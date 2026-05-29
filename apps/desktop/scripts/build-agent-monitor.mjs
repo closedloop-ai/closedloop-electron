@@ -152,6 +152,9 @@ const SHARED_MODULES = [
   "ingest-paths",
   "ingest-progress",
   "ingest-orchestrator",
+  // CLOSEDLOOP FEA-1434: write-path billing-mode stamping shared by the Claude
+  // hook route and every non-Claude importer (requires ../lib/billing-mode).
+  "billing-stamp",
 ];
 const MULTI_HARNESS_SPECS = [
   {
@@ -651,6 +654,7 @@ function materializeRuntimeTree() {
   patchHooksTranscriptOutsideTx(generatedHooksRoute);
   patchHooksWriteQueueAndWatchdog(generatedHooksRoute);
   patchHooksSandboxFilter(generatedHooksRoute);
+  patchHooksBillingMode(generatedHooksRoute);
   patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
   patchWebSocketFile(generatedWebSocketFile);
@@ -2019,6 +2023,56 @@ function patchHooksRoute(file) {
       ].join("\n"),
     );
   }
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1434: stamp `billing_mode` on Claude sessions at creation
+// time. ensureSession() is the single point where a hook-driven Claude session
+// row is first inserted (the insert leaves harness defaulting to 'claude'), so
+// stamping right after the session_created broadcast guarantees the mode is set
+// before any token-usage events flow — mirroring the non-Claude importers,
+// which stamp via the same shared helper after setSessionHarness. Detection is
+// existence-only (no credential contents are read) and best-effort (the helper
+// swallows failures so a hook is never blocked). Idempotent: re-runnable on an
+// already-patched tree.
+function patchHooksBillingMode(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("stampSessionBillingMode")) {
+    return;
+  }
+
+  const requireNeedle = 'const { broadcast } = require("../websocket");';
+  if (!source.includes(requireNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the websocket require anchor (billing mode, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    requireNeedle,
+    [
+      requireNeedle,
+      'const { stampSessionBillingMode } = require("../agent-monitor-shared/billing-stamp");',
+    ].join("\n"),
+  );
+
+  const broadcastNeedle = '    broadcast("session_created", session);';
+  if (!source.includes(broadcastNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the session_created broadcast anchor (billing mode, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    broadcastNeedle,
+    [
+      broadcastNeedle,
+      "",
+      "    // CLOSEDLOOP FEA-1434: stamp the billing mode for this freshly-created",
+      "    // Claude session before any token-usage events flow. Existence-only",
+      "    // credential detection; best-effort (never blocks the hook).",
+      '    stampSessionBillingMode(stmts, "claude", sessionId);',
+    ].join("\n"),
+  );
 
   writeFileSync(file, source, "utf8");
 }
@@ -3582,6 +3636,14 @@ function assertGeneratedTree() {
   ) {
     throw new Error(
       "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
+    );
+  }
+  // CLOSEDLOOP FEA-1434: the Claude session-create path must stamp billing_mode
+  // before usage events flow. A future upstream bump that breaks the anchor
+  // must fail the build, not silently leave Claude sessions at 'unknown'.
+  if (!hooksRouteSource.includes("stampSessionBillingMode")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the billing-mode stamp (FEA-1434).",
     );
   }
 

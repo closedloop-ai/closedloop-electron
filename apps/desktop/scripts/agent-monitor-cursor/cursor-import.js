@@ -12,6 +12,7 @@ const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
 const { ingestCachePath } = require("../agent-monitor-shared/ingest-paths");
+const { stampSessionBillingMode } = require("../agent-monitor-shared/billing-stamp");
 
 // Skip transcript files unchanged since the last tick to keep the 5 s catchup
 // poll cheap (FEA-1316); the persisted backing file additionally lets a fresh
@@ -26,6 +27,8 @@ function importCursorSession(dbModule, session) {
   try {
     dbModule.stmts.setSessionHarness.run("cursor", session.sessionId, "cursor");
   } catch { /* non-fatal */ }
+  // FEA-1434: stamp the billing mode (idempotent + best-effort internally).
+  stampSessionBillingMode(dbModule.stmts, "cursor", session.sessionId);
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

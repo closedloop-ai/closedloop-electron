@@ -21,6 +21,13 @@ const generatedImportHistoryUrl = new URL(
 const generatedImportHistorySource = existsSync(generatedImportHistoryUrl)
   ? readFileSync(generatedImportHistoryUrl, "utf8")
   : null;
+const generatedHooksRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/hooks.js",
+  import.meta.url,
+);
+const generatedHooksRouteSource = existsSync(generatedHooksRouteUrl)
+  ? readFileSync(generatedHooksRouteUrl, "utf8")
+  : null;
 // Resolve the pinned upstream agent-dashboard source the same way the build
 // script does (createRequire from apps/desktop/package.json) so we can assert
 // the build-script patch anchors still match the source they patch.
@@ -597,6 +604,71 @@ test("billing-mode two-ledger support (FEA-1434) is wired into the generated bui
         ),
       ),
       "generated server/lib/billing-mode.js missing",
+    );
+  }
+});
+
+test("billing_mode write paths (FEA-1434) stamp every harness", () => {
+  // The shared stamp helper delegates detection to the canonical engine and
+  // exposes the single write entry point used by both hooks and importers.
+  const billingStamp = read("../scripts/agent-monitor-shared/billing-stamp.js");
+  assert.match(billingStamp, /require\("\.\.\/lib\/billing-mode"\)/);
+  assert.match(billingStamp, /function stampSessionBillingMode/);
+
+  // Every non-Claude importer stamps its harness via the shared helper right
+  // after setSessionHarness, so the billing mode is set the moment a session is
+  // imported (before any token-usage rollups read it).
+  const importers: Array<[string, string]> = [
+    ["../scripts/agent-monitor-codex/codex-import.js", "codex"],
+    ["../scripts/agent-monitor-cursor/cursor-import.js", "cursor"],
+    ["../scripts/agent-monitor-copilot/copilot-import.js", "copilot"],
+    ["../scripts/agent-monitor-opencode/opencode-import.js", "opencode"],
+  ];
+  for (const [rel, harness] of importers) {
+    const src = read(rel);
+    assert.ok(
+      src.includes('require("../agent-monitor-shared/billing-stamp")'),
+      `${rel} missing billing-stamp require`,
+    );
+    assert.ok(
+      src.includes(
+        `stampSessionBillingMode(dbModule.stmts, "${harness}", session.sessionId)`,
+      ),
+      `${rel} missing ${harness} billing-mode stamp`,
+    );
+  }
+
+  // Build script wires the Claude hook-route stamp, lists the helper among the
+  // materialized shared modules, and hard-gates the generated output.
+  for (const needle of [
+    "function patchHooksBillingMode",
+    "patchHooksBillingMode(generatedHooksRoute)",
+    '"billing-stamp"',
+    "billing-mode stamp (FEA-1434)",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing billing write-path wiring: ${needle}`,
+    );
+  }
+
+  // If a generated tree is present, the Claude stamp + materialized helper
+  // must have survived patching/materialization.
+  if (generatedHooksRouteSource) {
+    assert.ok(
+      generatedHooksRouteSource.includes(
+        'stampSessionBillingMode(stmts, "claude", sessionId)',
+      ),
+      "generated server/routes/hooks.js missing Claude billing-mode stamp",
+    );
+    assert.ok(
+      existsSync(
+        new URL(
+          "../.generated/agent-monitor/server/agent-monitor-shared/billing-stamp.js",
+          import.meta.url,
+        ),
+      ),
+      "generated server/agent-monitor-shared/billing-stamp.js missing",
     );
   }
 });
