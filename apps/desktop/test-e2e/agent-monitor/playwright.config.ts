@@ -25,8 +25,13 @@ function resolveBaseUrl(): string | undefined {
 }
 
 export default defineConfig({
-  testDir: "./specs/ui",
-  testMatch: /.*\.spec\.ts$/,
+  // Default e2e config covers ONLY ./specs/ui. Audit Playwright specs live
+  // in ./specs/audit and are run via a dedicated config
+  // (playwright.audit.config.ts) so a known-failing audit spec
+  // (e.g. dashboard.ui-audit.spec.ts asserting the FEA-1418 cost bug) does
+  // NOT block the default `test:e2e` command.
+  testDir: "./specs",
+  testMatch: /ui\/.*\.spec\.ts$/,
   workers: 1,
   fullyParallel: false,
   reporter: [["list"]],

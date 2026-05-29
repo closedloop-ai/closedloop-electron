@@ -93,6 +93,12 @@ export async function launchSidecar({ dbPath, env = {} } = {}) {
       DASHBOARD_DB_PATH: dbPath,
       CCAM_AUTO_INSTALL_HOOKS: "0",
       CCAM_ENABLE_RUN: "0",
+      // FEA-1407 sandbox scoping: the hook handler silently drops events
+      // whose data.cwd is outside SANDBOX_BASE_DIRECTORY. Tests post
+      // synthetic fixture events with cwd="/Users/dev/repo"; widening the
+      // sandbox to "/" lets fixture cwds pass without exposing real data
+      // (tests run against a temp DB seeded by seed-fixture-db.mjs).
+      SANDBOX_BASE_DIRECTORY: "/",
       // Harness ingest sandboxing — every importer reads from these.
       HOME: sandboxHome,
       CLAUDE_HOME: join(sandboxHome, ".claude"),

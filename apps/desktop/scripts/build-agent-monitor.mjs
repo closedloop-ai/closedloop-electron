@@ -2600,8 +2600,9 @@ function patchImportHistorySandboxFilter(file) {
 
   // (a) Inject the isSessionInSandbox helper at the top of the file, after
   // the existing requires section. Anchor on the PROJECTS_DIR const which is
-  // always present near the top.
-  const requireAnchor = 'const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");';
+  // always present near the top. Upstream (pinned 840c518d) derives it via the
+  // claude-home helper rather than the older inline os.homedir() form.
+  const requireAnchor = "const PROJECTS_DIR = getProjectsDir();";
   if (!source.includes(requireAnchor)) {
     throw new Error(
       `Unable to patch ${file}: expected PROJECTS_DIR anchor (FEA-1407 sandbox scoping).`,
