@@ -279,6 +279,29 @@ const PR_MODULES = ["pr-parsers", "pull-request-store", "pr-extractor", "pr-back
 const costModulesDir = path.join(appDir, "scripts", "agent-monitor-cost");
 const COST_MODULES = ["cost-pricing"];
 
+// CLOSEDLOOP token cost (FEA-1433): read the pinned genai-prices version from the
+// installed package so the read-only pricing catalog stamp always matches the
+// library actually bundled. The package's exports map blocks
+// require("@pydantic/genai-prices/package.json") at runtime, so we read the file
+// directly here at build time and inject the literal into the generated route.
+// Fail loud (no silent null stamp) — a missing version means a broken install.
+function resolveGenaiPricesVersion() {
+  const pkgPath = path.join(
+    appDir,
+    "node_modules",
+    "@pydantic",
+    "genai-prices",
+    "package.json",
+  );
+  const version = JSON.parse(readFileSync(pkgPath, "utf8")).version;
+  if (!version) {
+    throw new Error(
+      "Unable to read @pydantic/genai-prices version for the pricing catalog stamp (FEA-1433). Run `pnpm install` for apps/desktop.",
+    );
+  }
+  return version;
+}
+
 // CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
 // the desktop app. These ClosedLoop-authored files are copied over the
 // upstream client source before the Vite build — Layout.tsx adds embed mode
@@ -1360,6 +1383,35 @@ function patchSessionsRoute(file) {
     );
   }
 
+  // CLOSEDLOOP token cost (FEA-1433): alongside row.cost, surface the models the
+  // token-cost engine could not price so the sessions list can flag them instead
+  // of rendering a misleading $0. Both list code paths (price-sort and the
+  // default order) share the same per-session cost assignment (modulo
+  // indentation), so replaceAll covers both. The breakdown is computed once and
+  // both the total and the unpriced model names are read from it. `unpriced_models`
+  // is a purely additive field on an internal sidecar response consumed only by
+  // the bundled client — no external contract migration is required.
+  if (!source.includes("CLOSEDLOOP FEA-1433 unpriced_models")) {
+    const costNeedle =
+      "row.cost = sessionTokens ? calculateCost(sessionTokens, rules).total_cost : 0;";
+    if (!source.includes(costNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the per-session calculateCost assignment (unpriced_models, FEA-1433).`,
+      );
+    }
+    source = source.replaceAll(
+      costNeedle,
+      [
+        "// CLOSEDLOOP FEA-1433 unpriced_models: price once, read total + unpriced from it.",
+        "          const __clCost = sessionTokens ? calculateCost(sessionTokens, rules) : null;",
+        "          row.cost = __clCost ? __clCost.total_cost : 0;",
+        "          row.unpriced_models = __clCost",
+        "            ? [...new Set(__clCost.breakdown.filter((b) => !b.priced).map((b) => b.model))]",
+        "            : [];",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -1633,6 +1685,12 @@ function patchPricingRoute(file) {
         "// canonical token-cost engine (genai-prices). The model_pricing table and",
         "// its rule-matching are no longer used for any cost calculation.",
         'const { computeTokenCost } = require("../lib/cost-pricing");',
+        "// CLOSEDLOOP token cost (FEA-1433): the pinned genai-prices version,",
+        "// injected at build time from the installed package. The package's exports",
+        "// map blocks require(\"@pydantic/genai-prices/package.json\") at runtime, so",
+        "// the build reads it directly and stamps the literal here. The read-only",
+        "// pricing catalog renders this as its single source of truth.",
+        `const GENAI_PRICES_VERSION = ${JSON.stringify(resolveGenaiPricesVersion())};`,
       ].join("\n"),
     );
   }
@@ -1801,6 +1859,39 @@ function patchPricingRoute(file) {
         "// single source of truth for rates, so there is no host-editable rule table",
         "// to write to. GET /api/pricing below stays read-only.",
         "",
+      ].join("\n"),
+    );
+  }
+
+  // (d) the read-only GET /api/pricing keeps returning the model_pricing rows
+  // (still seeded by upstream for the listing) but now also stamps the pinned
+  // genai-prices version. The bundled client renders this as the source-of-truth
+  // catalog label. Additive field on an internal sidecar response — no migration.
+  if (!source.includes("// CLOSEDLOOP FEA-1433 engine-stamped pricing listing")) {
+    const getNeedle = [
+      '// GET /api/pricing - List all pricing rules',
+      'router.get("/", (_req, res) => {',
+      "  const rules = stmts.listPricing.all();",
+      "  res.json({ pricing: rules });",
+      "});",
+    ].join("\n");
+    if (!source.includes(getNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the GET /api/pricing listing handler (engine stamp, FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      getNeedle,
+      [
+        "// GET /api/pricing - List pricing rows + the engine source-of-truth stamp",
+        "// CLOSEDLOOP FEA-1433 engine-stamped pricing listing",
+        'router.get("/", (_req, res) => {',
+        "  const rules = stmts.listPricing.all();",
+        "  res.json({",
+        "    pricing: rules,",
+        '    engine: { name: "@pydantic/genai-prices", version: GENAI_PRICES_VERSION },',
+        "  });",
+        "});",
       ].join("\n"),
     );
   }
@@ -3329,6 +3420,14 @@ function assertGeneratedTree() {
       "Generated server/routes/sessions.js is missing the server-side harness filter.",
     );
   }
+  // CLOSEDLOOP token cost (FEA-1433): the sessions list must surface
+  // unpriced_models so the UI never shows a misleading $0 for models the engine
+  // could not price. A future upstream bump that breaks the anchor must fail loud.
+  if (!sessionsSource.includes("row.unpriced_models = __clCost")) {
+    throw new Error(
+      "Generated server/routes/sessions.js is missing the unpriced_models surfacing (FEA-1433).",
+    );
+  }
 
   // CC-Config MCP discovery: hard-gate the claude.ai-connector patch so a
   // future upstream bump can't silently drop the closedloop MCP from the
@@ -3551,6 +3650,16 @@ function assertGeneratedTree() {
   ) {
     throw new Error(
       "Generated server/routes/pricing.js still exposes the mutating PUT/DELETE pricing endpoints — they must be removed (FEA-1431).",
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1433): GET /api/pricing must stamp the pinned
+  // genai-prices version so the read-only catalog can label its source of truth.
+  if (
+    !pricingRouteSource.includes("// CLOSEDLOOP FEA-1433 engine-stamped pricing listing") ||
+    !pricingRouteSource.includes("GENAI_PRICES_VERSION")
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js is missing the genai-prices version stamp on GET /api/pricing (FEA-1433).",
     );
   }
 
