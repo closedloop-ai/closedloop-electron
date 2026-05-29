@@ -869,10 +869,10 @@
       "notes": "Cross-check: /api/sessions.total should equal /api/stats.total_sessions. Different endpoints, same DB.",
       "selector": {
         "value": "[data-testid='audit-sessions-list-total']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text_embed",
-        "renders_at": "scripts/agent-monitor-client/Sessions.tsx:195",
-        "followup": "Wrap the numeric token in a data-testid span inside the i18n subtitle string (i18n interpolation must keep the number in its own element)."
+        "renders_at": "scripts/agent-monitor-client/Sessions.tsx (i18n subtitle <p>, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid on the subtitle <p>; the count token is asserted within the i18n string via \\b<n>\\b."
       }
     },
     {
