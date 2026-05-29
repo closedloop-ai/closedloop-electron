@@ -374,7 +374,32 @@ export function Sessions() {
                       {session.agent_count ?? "-"}
                     </td>
                     <td className="px-5 py-4 text-sm text-gray-400 font-mono">
-                      {session.cost != null && session.cost > 0 ? fmtCost(session.cost) : "-"}
+                      {/* CLOSEDLOOP FEA-1433: never render a silent $0 for models the
+                          token-cost engine (genai-prices) cannot price. A priced total
+                          still shows; any unpriced models surface as an amber badge whose
+                          tooltip names them, distinguishing "unpriced" from a real $0. */}
+                      {session.unpriced_models && session.unpriced_models.length > 0 ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          {session.cost != null && session.cost > 0 ? (
+                            <span>{fmtCost(session.cost)}</span>
+                          ) : null}
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.5 rounded-full"
+                            title={t("unpricedTooltip", {
+                              models: session.unpriced_models.join(", "),
+                              defaultValue: "Not priced by genai-prices: {{models}}",
+                            })}
+                          >
+                            {session.cost != null && session.cost > 0
+                              ? t("costPartial", "partial")
+                              : t("costUnpriced", "not priced")}
+                          </span>
+                        </span>
+                      ) : session.cost != null && session.cost > 0 ? (
+                        fmtCost(session.cost)
+                      ) : (
+                        "-"
+                      )}
                     </td>
                     <td
                       className="px-5 py-4 text-[11px] text-gray-500 font-mono"
