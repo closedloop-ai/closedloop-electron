@@ -23,11 +23,8 @@ import {
 } from "../server/operations/symphony-utils.js";
 import { expandHomePath } from "../shared/path-utils.js";
 import { computeTokenCost } from "../shared/token-cost.js";
-import {
-  normalizeBillingMode,
-  type BillingMode,
-} from "../shared/billing-mode.js";
-import { detectBillingMode } from "./billing-mode-detector.js";
+import type { BillingMode } from "../shared/billing-mode.js";
+import { resolveBillingMode } from "./billing-mode-detector.js";
 
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
@@ -899,11 +896,10 @@ export function estimateTokenUsageCostUsd(
  * stored, definite mode always wins over re-detection.
  */
 export function resolveBillingModeForRow(row: SessionRow): BillingMode {
-  const stored = normalizeBillingMode(row.billing_mode);
-  if (stored !== "unknown") {
-    return stored;
-  }
-  return detectBillingMode(row.harness ?? "");
+  return resolveBillingMode({
+    billingMode: row.billing_mode,
+    harness: row.harness,
+  });
 }
 
 function selectRowsByIds<T>(

@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 
 import {
   detectBillingModeForHarness,
+  normalizeBillingMode,
   type BillingMode,
   type BillingModeDetectionDeps,
 } from "../shared/billing-mode.js";
@@ -40,4 +41,22 @@ function realDeps(): BillingModeDetectionDeps {
  */
 export function detectBillingMode(harness: string): BillingMode {
   return detectBillingModeForHarness(harness, realDeps());
+}
+
+/**
+ * Resolve the billing mode for a persisted session row. A stored, definite mode
+ * (stamped at ingest by FEA-1434) always wins; a missing/legacy/"unknown" mode
+ * falls back to best-effort detection from the live desktop environment. Shared
+ * by the agent-session sync payload and the nightly cost-reconciliation worker
+ * so the two never diverge on which sessions count as real metered API spend.
+ */
+export function resolveBillingMode(input: {
+  billingMode: unknown;
+  harness: string | null;
+}): BillingMode {
+  const stored = normalizeBillingMode(input.billingMode);
+  if (stored !== "unknown") {
+    return stored;
+  }
+  return detectBillingMode(input.harness ?? "");
 }
