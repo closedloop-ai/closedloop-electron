@@ -1708,6 +1708,121 @@
         border-top: 1px solid var(--border);
       }
 
+      /* Cost reconciliation (FEA-1435/1436) */
+      .cost-key-row label {
+        display: block;
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: 6px;
+      }
+      .cost-key-row input {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--card);
+        color: var(--foreground);
+        font-size: 13px;
+      }
+      .cost-key-row input:focus {
+        outline: none;
+        border-color: var(--primary);
+      }
+      .cost-recon-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .cost-recon-avg {
+        margin-left: auto;
+        font-size: 12px;
+        color: var(--muted-foreground);
+      }
+      .cost-recon-table-wrap {
+        margin-top: 8px;
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+      .cost-recon-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      .cost-recon-table th,
+      .cost-recon-table td {
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      .cost-recon-table th {
+        font-weight: 600;
+        color: var(--muted-foreground);
+        background: var(--card);
+      }
+      .cost-recon-table td.num,
+      .cost-recon-table th.num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .cost-recon-table tr:last-child td {
+        border-bottom: none;
+      }
+      .cost-recon-empty {
+        color: var(--muted-foreground);
+        text-align: center !important;
+        padding: 18px !important;
+      }
+      .cost-drift-pos { color: var(--destructive); }
+      .cost-drift-neg { color: var(--success); }
+      .cost-drift-zero { color: var(--muted-foreground); }
+      .cost-recon-explain-btn {
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--foreground);
+        font-size: 11px;
+        padding: 3px 8px;
+        cursor: pointer;
+      }
+      .cost-recon-explain-btn:hover { border-color: var(--primary); }
+      .cost-recon-explain-row td {
+        background: var(--accent);
+        white-space: normal;
+      }
+      .cost-cause {
+        margin: 0 0 8px;
+      }
+      .cost-cause:last-child { margin-bottom: 0; }
+      .cost-cause-title {
+        font-weight: 600;
+        font-size: 12px;
+      }
+      .cost-cause-badge {
+        display: inline-block;
+        margin-left: 6px;
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: var(--warning);
+        color: var(--primary-foreground);
+      }
+      .cost-cause-detail {
+        font-size: 12px;
+        color: var(--muted-foreground);
+        margin-top: 2px;
+      }
+      .cost-cause-link {
+        font-size: 12px;
+        color: var(--primary);
+      }
+
       .saved-configs-group {
         margin-top: 20px;
       }
@@ -3421,6 +3536,7 @@
           <button data-settings-tab="relay-gateway" class="active">Relay / Gateway</button>
           <button data-settings-tab="security">Security</button>
           <button data-settings-tab="policies">Policies</button>
+          <button data-settings-tab="cost">Cost</button>
           <button data-settings-tab="binary-paths">CLI Tools</button>
           <button data-settings-tab="feature-flags">Labs</button>
         </div>
@@ -3781,6 +3897,80 @@
             <button id="savePolicies">Save</button>
             <button class="secondary" id="reloadPolicies">Reload</button>
             <p class="muted" id="policiesMessage"></p>
+          </div>
+        </div>
+
+        <!-- Cost reconciliation sub-tab (FEA-1435/1436) -->
+        <div id="settings-cost" class="settings-sub-panel">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Billing Admin Keys</h3>
+            <p class="settings-group-desc">
+              Organization Admin keys let ClosedLoop fetch what each vendor actually billed and
+              reconcile it against the local estimate. Keys are stored in your OS keychain and never
+              leave this device's main process &mdash; the dashboard only ever sees whether a key
+              exists, never the key itself. Saving verifies the key with a single billing-API call.
+            </p>
+
+            <div class="cost-key-row">
+              <label for="adminKeyAnthropic">Anthropic Admin Key</label>
+              <input id="adminKeyAnthropic" type="password" placeholder="sk-ant-admin..." autocomplete="off" />
+              <div class="actions" style="margin-top:8px">
+                <button id="saveAdminKeyAnthropic">Save &amp; Verify</button>
+                <button class="secondary" id="clearAdminKeyAnthropic">Clear</button>
+              </div>
+              <p class="muted" id="adminKeyStatusAnthropic"></p>
+            </div>
+
+            <div class="cost-key-row" style="margin-top:16px">
+              <label for="adminKeyOpenai">OpenAI Admin Key</label>
+              <input id="adminKeyOpenai" type="password" placeholder="sk-admin..." autocomplete="off" />
+              <div class="actions" style="margin-top:8px">
+                <button id="saveAdminKeyOpenai">Save &amp; Verify</button>
+                <button class="secondary" id="clearAdminKeyOpenai">Clear</button>
+              </div>
+              <p class="muted" id="adminKeyStatusOpenai"></p>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h3 class="settings-group-title">Drift Diagnostics</h3>
+            <p class="settings-group-desc">
+              Each row compares the local token-based estimate against the vendor's billed amount for
+              a day and model. Drift is informational &mdash; ClosedLoop never re-prices past sessions.
+              A positive drift means the local estimate ran higher than the vendor bill; negative
+              means lower. Use &ldquo;Explain&rdquo; on a flagged row for the most likely cause.
+            </p>
+
+            <div class="cost-recon-toolbar">
+              <button id="runReconciliationNow">Run reconciliation now</button>
+              <button class="secondary" id="refreshReconciliation">Refresh</button>
+              <button class="secondary" id="exportReconciliation">Export for support</button>
+              <span class="cost-recon-avg" id="reconciliationAvg"></span>
+            </div>
+            <p class="muted" id="reconciliationMessage"></p>
+
+            <div class="cost-recon-table-wrap">
+              <table class="cost-recon-table">
+                <thead>
+                  <tr>
+                    <th>Day</th>
+                    <th>Vendor</th>
+                    <th>Model</th>
+                    <th class="num">Local</th>
+                    <th class="num">Vendor</th>
+                    <th class="num">Drift</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="reconciliationTableBody">
+                  <tr><td colspan="7" class="cost-recon-empty">No reconciliation data yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="settings-tab-footer">
+            <p class="muted" id="costFooterMessage"></p>
           </div>
         </div>
 
@@ -4462,6 +4652,9 @@
         if (tabName === "feature-flags" && typeof renderFeatureFlagsPanel === "function") {
           void renderFeatureFlagsPanel();
         }
+        if (tabName === "cost" && typeof loadCostReconciliationPanel === "function") {
+          void loadCostReconciliationPanel();
+        }
       }
 
       settingsSubTabs.forEach((btn) => {
@@ -4575,6 +4768,413 @@
           void renderFeatureFlagsPanel();
         }
       });
+
+      // ── Cost reconciliation panel (FEA-1435/1436) ────────────────────
+      // Admin-key intake (existence-only status; key material never crosses
+      // the bridge) plus a drift-diagnostics table. The persisted rows carry
+      // drift numbers but NOT cause hints — hints only arrive on a fresh run
+      // summary, so the "Explain" affordance appears only for rows a run in
+      // this session flagged. We never fabricate a cause for a persisted row.
+      const costKeyInputs = {
+        anthropic: document.getElementById("adminKeyAnthropic"),
+        openai: document.getElementById("adminKeyOpenai"),
+      };
+      const costKeyStatusEls = {
+        anthropic: document.getElementById("adminKeyStatusAnthropic"),
+        openai: document.getElementById("adminKeyStatusOpenai"),
+      };
+      const costKeyPrefixes = { anthropic: "sk-ant-admin", openai: "sk-admin" };
+      const costKeyVendorLabels = { anthropic: "Anthropic", openai: "OpenAI" };
+      const reconciliationTableBody = document.getElementById("reconciliationTableBody");
+      const reconciliationAvg = document.getElementById("reconciliationAvg");
+      const reconciliationMessage = document.getElementById("reconciliationMessage");
+      const costFooterMessage = document.getElementById("costFooterMessage");
+      // Most-recent run notices, keyed by day|vendor|model, for the Explain expander.
+      const costLatestNotices = new Map();
+      let costLatestRows = [];
+      const costExpandedKeys = new Set();
+
+      function costRowKey(row) {
+        return `${row.day}|${row.vendor}|${row.model}`;
+      }
+
+      function formatUsdFromMicroCents(microCents) {
+        if (typeof microCents !== "number" || !Number.isFinite(microCents)) return "—";
+        return "$" + (microCents / 1000000).toFixed(4);
+      }
+
+      function describeAdminKeyStatus(vendor, status) {
+        const label = costKeyVendorLabels[vendor] || vendor;
+        if (status && status.hasKey) {
+          return `${label} Admin key: stored in secure keychain`;
+        }
+        return `${label} Admin key: not configured`;
+      }
+
+      async function refreshAdminKeyStatuses() {
+        let statuses;
+        try {
+          statuses = await api.getAdminKeyStatuses();
+        } catch (error) {
+          for (const vendor of Object.keys(costKeyStatusEls)) {
+            if (costKeyStatusEls[vendor]) {
+              costKeyStatusEls[vendor].textContent = `Failed to load status: ${error.message}`;
+            }
+          }
+          return;
+        }
+        for (const vendor of Object.keys(costKeyStatusEls)) {
+          if (costKeyStatusEls[vendor]) {
+            costKeyStatusEls[vendor].textContent = describeAdminKeyStatus(
+              vendor,
+              statuses ? statuses[vendor] : null,
+            );
+          }
+        }
+      }
+
+      // Merge a run summary's notices into the in-memory cause map so the
+      // Explain expander has hints for the rows this run flagged.
+      function applyCostRunSummary(summary) {
+        if (!summary || !Array.isArray(summary.notices)) return;
+        for (const notice of summary.notices) {
+          costLatestNotices.set(costRowKey(notice), notice);
+        }
+      }
+
+      function describeCostRunSummary(summary) {
+        if (!summary) return "";
+        if (summary.skippedBusy) return "A reconciliation run is already in progress.";
+        if (!summary.computedAt) {
+          return "No Admin keys configured — add a key above to reconcile.";
+        }
+        const vendorCount = Array.isArray(summary.vendorsReconciled)
+          ? summary.vendorsReconciled.length
+          : 0;
+        const parts = [`Reconciled ${vendorCount} vendor(s); wrote ${summary.rowsWritten} row(s).`];
+        if (Array.isArray(summary.notices) && summary.notices.length) {
+          parts.push(`${summary.notices.length} drift notice(s).`);
+        }
+        if (Array.isArray(summary.errors) && summary.errors.length) {
+          const detail = summary.errors
+            .map((e) => `${costKeyVendorLabels[e.vendor] || e.vendor}: ${e.message}`)
+            .join("; ");
+          parts.push(`Errors — ${detail}`);
+        }
+        return parts.join(" ");
+      }
+
+      async function saveAdminKeyValue(vendor) {
+        const input = costKeyInputs[vendor];
+        const statusEl = costKeyStatusEls[vendor];
+        if (!input || !statusEl) return;
+        const value = input.value.trim();
+        const prefix = costKeyPrefixes[vendor];
+        if (!value) {
+          statusEl.textContent = "Enter an Admin key before saving.";
+          return;
+        }
+        if (!value.startsWith(prefix)) {
+          statusEl.textContent = `${costKeyVendorLabels[vendor]} Admin key must start with ${prefix}.`;
+          return;
+        }
+        statusEl.textContent = "Saving and verifying…";
+        try {
+          await api.setAdminKey(vendor, value);
+          input.value = "";
+        } catch (error) {
+          statusEl.textContent = `Failed to save: ${error.message}`;
+          return;
+        }
+        // Verify the key with a real run and surface this vendor's auth/network
+        // error inline (the run reconciles every keyed vendor; we only report
+        // the one being saved here).
+        try {
+          const summary = await api.runCostReconciliation();
+          applyCostRunSummary(summary);
+          if (reconciliationMessage) {
+            reconciliationMessage.textContent = describeCostRunSummary(summary);
+          }
+          const vendorError = (summary && Array.isArray(summary.errors) ? summary.errors : []).find(
+            (e) => e.vendor === vendor,
+          );
+          if (vendorError) {
+            statusEl.textContent = `Saved, but verification failed: ${vendorError.message}`;
+          } else if (summary && summary.skippedBusy) {
+            statusEl.textContent = "Saved. A reconciliation run is already in progress.";
+          } else {
+            statusEl.textContent = "Saved and verified.";
+          }
+        } catch (error) {
+          statusEl.textContent = `Saved, but verification run failed: ${error.message}`;
+        }
+        await refreshReconciliationTable();
+        await refreshAdminKeyStatuses();
+      }
+
+      async function clearAdminKeyValue(vendor) {
+        const statusEl = costKeyStatusEls[vendor];
+        if (!statusEl) return;
+        statusEl.textContent = "";
+        try {
+          await api.clearAdminKey(vendor);
+          if (costKeyInputs[vendor]) costKeyInputs[vendor].value = "";
+          statusEl.textContent = `${costKeyVendorLabels[vendor]} Admin key cleared.`;
+        } catch (error) {
+          statusEl.textContent = `Failed to clear: ${error.message}`;
+        }
+        await refreshAdminKeyStatuses();
+      }
+
+      async function runCostReconciliationNow() {
+        if (reconciliationMessage) reconciliationMessage.textContent = "Running reconciliation…";
+        try {
+          const summary = await api.runCostReconciliation();
+          applyCostRunSummary(summary);
+          if (reconciliationMessage) {
+            reconciliationMessage.textContent = describeCostRunSummary(summary);
+          }
+        } catch (error) {
+          if (reconciliationMessage) {
+            reconciliationMessage.textContent = `Reconciliation failed: ${error.message}`;
+          }
+        }
+        await refreshReconciliationTable();
+        await refreshAdminKeyStatuses();
+      }
+
+      function appendCostCell(tr, text, className) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        if (className) td.className = className;
+        tr.appendChild(td);
+      }
+
+      function buildExplainRow(notice) {
+        const tr = document.createElement("tr");
+        tr.className = "cost-recon-explain-row";
+        const td = document.createElement("td");
+        td.colSpan = 7;
+        const causes = notice && Array.isArray(notice.causes) ? notice.causes : [];
+        if (causes.length === 0) {
+          td.textContent = "No likely cause identified for this drift.";
+        } else {
+          for (const cause of causes) {
+            const block = document.createElement("div");
+            block.className = "cost-cause";
+            const title = document.createElement("div");
+            title.className = "cost-cause-title";
+            title.textContent = cause.title || cause.cause || "Possible cause";
+            if (cause.permanent) {
+              const badge = document.createElement("span");
+              badge.className = "cost-cause-badge";
+              badge.textContent = "expected";
+              title.appendChild(badge);
+            }
+            block.appendChild(title);
+            if (cause.detail) {
+              const detail = document.createElement("div");
+              detail.className = "cost-cause-detail";
+              detail.textContent = cause.detail;
+              block.appendChild(detail);
+            }
+            if (typeof cause.link === "string" && /^https?:\/\//.test(cause.link)) {
+              // Shown as plain text (not a navigating anchor): the renderer has
+              // no external-URL open handler, so a target="_blank" link would
+              // spawn an unmanaged window. The user can read/copy the URL.
+              const link = document.createElement("div");
+              link.className = "cost-cause-link";
+              link.textContent = `More: ${cause.link}`;
+              block.appendChild(link);
+            }
+            td.appendChild(block);
+          }
+        }
+        tr.appendChild(td);
+        return tr;
+      }
+
+      function renderReconciliationTable(rows) {
+        if (!reconciliationTableBody) return;
+        reconciliationTableBody.innerHTML = "";
+        if (!Array.isArray(rows) || rows.length === 0) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 7;
+          td.className = "cost-recon-empty";
+          td.textContent = "No reconciliation data yet.";
+          tr.appendChild(td);
+          reconciliationTableBody.appendChild(tr);
+          return;
+        }
+        // Newest day first, then vendor/model for a stable read.
+        const sorted = [...rows].sort((a, b) => {
+          if (a.day !== b.day) return a.day < b.day ? 1 : -1;
+          if (a.vendor !== b.vendor) return a.vendor < b.vendor ? -1 : 1;
+          return a.model < b.model ? -1 : a.model > b.model ? 1 : 0;
+        });
+        for (const row of sorted) {
+          const tr = document.createElement("tr");
+          appendCostCell(tr, row.day);
+          appendCostCell(tr, costKeyVendorLabels[row.vendor] || row.vendor);
+          appendCostCell(tr, row.model);
+          appendCostCell(tr, formatUsdFromMicroCents(row.localEstimateMicroCents), "num");
+          appendCostCell(tr, formatUsdFromMicroCents(row.vendorBilledMicroCents), "num");
+
+          const driftMc = row.driftMicroCents;
+          let driftText = formatUsdFromMicroCents(driftMc);
+          if (typeof driftMc === "number" && driftMc > 0) driftText = "+" + driftText;
+          if (typeof row.driftPct === "number" && Number.isFinite(row.driftPct)) {
+            const pctSign = row.driftPct > 0 ? "+" : "";
+            driftText += ` (${pctSign}${row.driftPct.toFixed(1)}%)`;
+          } else {
+            driftText += " (n/a)";
+          }
+          const driftClass =
+            typeof driftMc === "number" && driftMc > 0
+              ? "num cost-drift-pos"
+              : typeof driftMc === "number" && driftMc < 0
+                ? "num cost-drift-neg"
+                : "num cost-drift-zero";
+          appendCostCell(tr, driftText, driftClass);
+
+          const actionTd = document.createElement("td");
+          const key = costRowKey(row);
+          const notice = costLatestNotices.get(key);
+          if (notice) {
+            const btn = document.createElement("button");
+            btn.className = "cost-recon-explain-btn";
+            btn.type = "button";
+            btn.textContent = costExpandedKeys.has(key) ? "Hide" : "Explain";
+            btn.addEventListener("click", () => {
+              if (costExpandedKeys.has(key)) {
+                costExpandedKeys.delete(key);
+              } else {
+                costExpandedKeys.add(key);
+              }
+              renderReconciliationTable(costLatestRows);
+            });
+            actionTd.appendChild(btn);
+          }
+          tr.appendChild(actionTd);
+          reconciliationTableBody.appendChild(tr);
+
+          if (notice && costExpandedKeys.has(key)) {
+            reconciliationTableBody.appendChild(buildExplainRow(notice));
+          }
+        }
+      }
+
+      function renderAvgDrift(rows) {
+        if (!reconciliationAvg) return;
+        if (!Array.isArray(rows) || rows.length === 0) {
+          reconciliationAvg.textContent = "";
+          return;
+        }
+        const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        let sumLocal = 0;
+        let sumVendor = 0;
+        let counted = 0;
+        for (const row of rows) {
+          if (typeof row.day !== "string" || row.day < cutoff) continue;
+          if (
+            typeof row.localEstimateMicroCents !== "number" ||
+            typeof row.vendorBilledMicroCents !== "number"
+          ) {
+            continue;
+          }
+          sumLocal += row.localEstimateMicroCents;
+          sumVendor += row.vendorBilledMicroCents;
+          counted += 1;
+        }
+        if (counted === 0) {
+          reconciliationAvg.textContent = "30-day drift: no data in window";
+          return;
+        }
+        if (sumVendor === 0) {
+          reconciliationAvg.textContent = "30-day drift: n/a (vendor billed $0)";
+          return;
+        }
+        const pct = ((sumLocal - sumVendor) / sumVendor) * 100;
+        const sign = pct > 0 ? "+" : "";
+        reconciliationAvg.textContent = `30-day drift: ${sign}${pct.toFixed(1)}%`;
+      }
+
+      async function refreshReconciliationTable() {
+        let rows;
+        try {
+          rows = await api.listCostReconciliation();
+        } catch (error) {
+          if (reconciliationMessage) {
+            reconciliationMessage.textContent = `Failed to load reconciliation data: ${error.message}`;
+          }
+          return;
+        }
+        costLatestRows = Array.isArray(rows) ? rows : [];
+        // Drop expanded state for rows no longer present.
+        const presentKeys = new Set(costLatestRows.map(costRowKey));
+        for (const key of [...costExpandedKeys]) {
+          if (!presentKeys.has(key)) costExpandedKeys.delete(key);
+        }
+        renderReconciliationTable(costLatestRows);
+        renderAvgDrift(costLatestRows);
+      }
+
+      function exportReconciliationForSupport() {
+        const payload = {
+          generatedAt: new Date().toISOString(),
+          rows: costLatestRows,
+          notices: Array.from(costLatestNotices.values()),
+        };
+        try {
+          const blob = new Blob([JSON.stringify(payload, null, 2)], {
+            type: "application/json",
+          });
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = `cost-reconciliation-${new Date().toISOString().slice(0, 10)}.json`;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+          if (costFooterMessage) {
+            costFooterMessage.textContent = "Exported reconciliation diagnostics.";
+          }
+        } catch (error) {
+          if (costFooterMessage) {
+            costFooterMessage.textContent = `Export failed: ${error.message}`;
+          }
+        }
+      }
+
+      async function loadCostReconciliationPanel() {
+        await Promise.all([refreshAdminKeyStatuses(), refreshReconciliationTable()]);
+      }
+
+      document
+        .getElementById("saveAdminKeyAnthropic")
+        ?.addEventListener("click", () => void saveAdminKeyValue("anthropic"));
+      document
+        .getElementById("clearAdminKeyAnthropic")
+        ?.addEventListener("click", () => void clearAdminKeyValue("anthropic"));
+      document
+        .getElementById("saveAdminKeyOpenai")
+        ?.addEventListener("click", () => void saveAdminKeyValue("openai"));
+      document
+        .getElementById("clearAdminKeyOpenai")
+        ?.addEventListener("click", () => void clearAdminKeyValue("openai"));
+      document
+        .getElementById("runReconciliationNow")
+        ?.addEventListener("click", () => void runCostReconciliationNow());
+      document
+        .getElementById("refreshReconciliation")
+        ?.addEventListener("click", () => void refreshReconciliationTable());
+      document
+        .getElementById("exportReconciliation")
+        ?.addEventListener("click", () => exportReconciliationForSupport());
 
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
