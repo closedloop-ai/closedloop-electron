@@ -96,6 +96,12 @@ function makeSandbox(): {
   mkdirSync(codexSessions, { recursive: true });
   process.env.CODEX_HOME = codexHome;
   process.env.DASHBOARD_DB_PATH = join(root, "dashboard.db");
+  // FEA-1407 sandbox scoping: importSession skips any session whose cwd falls
+  // outside SANDBOX_BASE_DIRECTORY (fail-closed — when unset it skips
+  // everything). The synthetic rollouts declare cwd "/tmp", so scope the
+  // sandbox there; otherwise every import returns 0 and the catchup-cache
+  // assertions below never observe a session.
+  process.env.SANDBOX_BASE_DIRECTORY = "/tmp";
 
   // Fresh require each call so the importer's module-level catchupCache is
   // empty for the new sandbox.

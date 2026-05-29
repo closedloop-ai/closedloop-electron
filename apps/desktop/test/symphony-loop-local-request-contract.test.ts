@@ -240,7 +240,9 @@ describe("parseSymphonyLoopRequestBody", () => {
     );
   });
 
-  test("accepts and trims a valid cloud session token", () => {
+  // PLN-740 T-4.4: cloudSessionToken is tolerated-but-ignored. The field is
+  // still stripped from rawBody for security but not propagated to the return value.
+  test("PLN-740 T-4.4: cloudSessionToken is tolerated-but-ignored (stripped from rawBody)", () => {
     const parsed = parseSymphonyLoopRequestBody({
       loopId: "aaaaaaaa-0000-0000-0000-000000000010",
       command: LoopCommand.Plan,
@@ -250,10 +252,15 @@ describe("parseSymphonyLoopRequestBody", () => {
       cloudSessionToken: "  session-tok-abc123  ",
     });
 
-    assert.equal(parsed.cloudSessionToken, "session-tok-abc123");
+    // cloudSessionToken is no longer propagated to the return type.
+    assert.equal(
+      (parsed as unknown as Record<string, unknown>).cloudSessionToken,
+      undefined,
+      "cloudSessionToken must be stripped from the parsed body (PLN-740 T-4.4)",
+    );
   });
 
-  test("treats an absent or empty cloud session token as undefined", () => {
+  test("absent cloud session token: parsed body has no cloudSessionToken field", () => {
     const absent = parseSymphonyLoopRequestBody({
       loopId: "aaaaaaaa-0000-0000-0000-000000000011",
       command: LoopCommand.Plan,
@@ -261,20 +268,10 @@ describe("parseSymphonyLoopRequestBody", () => {
       artifacts: [],
       repo: { fullName: "org/repo", branch: "main" },
     });
-    assert.equal(absent.cloudSessionToken, undefined);
-
-    const whitespace = parseSymphonyLoopRequestBody({
-      loopId: "aaaaaaaa-0000-0000-0000-000000000012",
-      command: LoopCommand.Plan,
-      closedLoopAuthToken: "token",
-      artifacts: [],
-      repo: { fullName: "org/repo", branch: "main" },
-      cloudSessionToken: "   ",
-    });
-    assert.equal(whitespace.cloudSessionToken, undefined);
+    assert.equal((absent as unknown as Record<string, unknown>).cloudSessionToken, undefined);
   });
 
-  test("rejects an oversized cloud session token", () => {
+  test("rejects an oversized cloud session token (validation still runs for security)", () => {
     assert.throws(
       () =>
         parseSymphonyLoopRequestBody({

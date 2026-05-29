@@ -85,6 +85,14 @@ const branchMaterializationSchema = z
   })
   .strict();
 
+// PLN-740 T-4.4: cloudSessionToken is now tolerated-but-ignored during the
+// migration window. The schema and parseCloudSessionToken helper are kept so
+// the field is still stripped from rawBody before the passthrough spread
+// (security: keeps unvalidated data out of the loopBody). The parsed value is
+// no longer wired into effectiveCloudSessionToken.
+// TODO(FEA-1423): Hard-remove cloudSessionTokenSchema, parseCloudSessionToken,
+// and the cloudSessionToken field from SymphonyLoopRequestBody once server-side
+// S3 (cloud sender removal) has deployed.
 const cloudSessionTokenSchema = z
   .string()
   .trim()
@@ -115,7 +123,9 @@ export type SymphonyLoopRequestBody = LoopRequestBody & {
   parentSessionId?: string;
   artifactSlug?: string;
   branchMaterialization?: SymphonyBranchMaterialization;
-  cloudSessionToken?: string;
+  // cloudSessionToken removed from the type in PLN-740 T-4.4 — the field is
+  // still stripped from rawBody in parseSymphonyLoopRequestBody (security) but
+  // is no longer propagated downstream.
 };
 
 export class SymphonyLoopRequestValidationError extends Error {
@@ -143,7 +153,11 @@ export function parseSymphonyLoopRequestBody(
   const branchMaterialization = parseBranchMaterialization(
     rawBody.branchMaterialization,
   );
-  const cloudSessionToken = parseCloudSessionToken(rawBody.cloudSessionToken);
+  // PLN-740 T-4.4: parse cloudSessionToken for validation/logging but do NOT
+  // re-add it to the return value (the re-add block was the source of the now-
+  // removed effectiveCloudSessionToken pipeline). The field is still stripped
+  // from rawBody below so it cannot bypass security via the passthrough spread.
+  parseCloudSessionToken(rawBody.cloudSessionToken);
   // Strip the raw extension fields so they cannot bypass validation via the
   // untyped `...loopBody` passthrough spread below.
   const {
@@ -157,7 +171,6 @@ export function parseSymphonyLoopRequestBody(
     supportingArtifacts,
     codeEvaluationContext,
     ...(branchMaterialization ? { branchMaterialization } : {}),
-    ...(cloudSessionToken ? { cloudSessionToken } : {}),
   };
 }
 

@@ -105,6 +105,28 @@ const generatedUninstallHooks = path.join(
 const stampFile = path.join(generatedRootDir, ".build-stamp");
 const viteBin = resolvePackageBin("vite", "vite");
 
+// FEA-1407: shared CJS body for the isSessionInSandbox helper injected into
+// both hooks.js and import-history.js. Single source of truth — the two patch
+// functions reference this constant instead of inlining separate copies.
+const IS_SESSION_IN_SANDBOX_CJS = [
+  "function isSessionInSandbox(cwd, sandboxBase) {",
+  "  if (!sandboxBase) return false;",
+  "  if (!cwd) return false;",
+  '  const _path = require("path");',
+  '  const _os = require("os");',
+  "  function _expandHome(p) {",
+  '    if (p === "~") return _os.homedir();',
+  '    if (p.startsWith("~/")) return _path.join(_os.homedir(), p.slice(2));',
+  "    return p;",
+  "  }",
+  "  const nc = _path.resolve(_expandHome(cwd));",
+  "  const ns = _path.resolve(_expandHome(sandboxBase));",
+  "  if (nc === ns) return true;",
+  '  const prefix = ns.endsWith(_path.sep) ? ns : ns + _path.sep;',
+  "  return nc.startsWith(prefix);",
+  "}",
+].join("\n");
+
 // CLOSEDLOOP multi-harness support: proven ingestion modules live in-repo and
 // are copied into the generated server/lib at materialize time (parallel to
 // how uninstall-hooks.js is written). Their logic is architecture-independent
@@ -600,6 +622,7 @@ function materializeRuntimeTree() {
   patchImportHistoryTokenReconcile(generatedImportHistory);
   patchImportHistoryMetaImported(generatedImportHistory);
   patchImportHistoryMetadataRefresh(generatedImportHistory);
+  patchImportHistorySandboxFilter(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
   cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
     recursive: true,
@@ -615,6 +638,7 @@ function materializeRuntimeTree() {
   patchCompatSqliteBeginImmediate(generatedCompatSqlite);
   patchHooksTranscriptOutsideTx(generatedHooksRoute);
   patchHooksWriteQueueAndWatchdog(generatedHooksRoute);
+  patchHooksSandboxFilter(generatedHooksRoute);
   patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
   patchWebSocketFile(generatedWebSocketFile);
@@ -2145,6 +2169,51 @@ function patchHooksWriteQueueAndWatchdog(file) {
   writeFileSync(file, source, "utf8");
 }
 
+// CLOSEDLOOP FEA-1407: sandbox scoping — skip hook events whose cwd falls
+// outside the configured sandbox directory. Injects an isSessionInSandbox
+// helper and a guard in the POST /event handler before the session_id check.
+function patchHooksSandboxFilter(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("FEA-1407 sandbox scoping")) return;
+
+  // (a) Inject the isSessionInSandbox helper before the POST handler.
+  const postAnchor = "// FEA-1363: Write queue coalesces concurrent hook events into batched transactions.";
+  if (!source.includes(postAnchor)) {
+    throw new Error(
+      `Unable to patch ${file}: expected FEA-1363 write queue comment anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(postAnchor, [
+    "// FEA-1407 sandbox scoping — reject hook events outside the configured sandbox.",
+    IS_SESSION_IN_SANDBOX_CJS,
+    "",
+    postAnchor,
+  ].join("\n"));
+
+  // (b) Inject sandbox guard in the POST handler before the session_id check.
+  const sessionIdCheck = [
+    '  if (!data.session_id) {',
+    '    return res.status(400).json({',
+    '      error: { code: "MISSING_SESSION", message: "session_id is required in data" },',
+    '    });',
+    '  }',
+  ].join("\n");
+  if (!source.includes(sessionIdCheck)) {
+    throw new Error(
+      `Unable to patch ${file}: expected session_id guard anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(sessionIdCheck, [
+    "  // FEA-1407 sandbox scoping: skip events outside the configured sandbox.",
+    "  if (data.cwd && !isSessionInSandbox(data.cwd, process.env.SANDBOX_BASE_DIRECTORY)) {",
+    "    return res.json({ ok: true });",
+    "  }",
+    sessionIdCheck,
+  ].join("\n"));
+
+  writeFileSync(file, source, "utf8");
+}
+
 // CLOSEDLOOP FEA-1334: expose cold-start ingest progress so the desktop
 // renderer can show a floating "catching up on agent history" card on every
 // launch. The ingest orchestrator writes into the ingest-progress singleton;
@@ -2518,6 +2587,51 @@ function patchImportHistoryForPullRequests(file) {
     ].join("\n");
     source = source.replace(anchor, inject);
   }
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1407: sandbox scoping — skip sessions whose cwd falls outside
+// the configured sandbox directory. Injects an isSessionInSandbox helper and a
+// guard at the top of importSession, before any DB interaction.
+function patchImportHistorySandboxFilter(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("FEA-1407 sandbox scoping")) return;
+
+  // (a) Inject the isSessionInSandbox helper at the top of the file, after
+  // the existing requires section. Anchor on the PROJECTS_DIR const which is
+  // always present near the top. Upstream (pinned 840c518d) derives it via the
+  // claude-home helper rather than the older inline os.homedir() form.
+  const requireAnchor = "const PROJECTS_DIR = getProjectsDir();";
+  if (!source.includes(requireAnchor)) {
+    throw new Error(
+      `Unable to patch ${file}: expected PROJECTS_DIR anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(requireAnchor, [
+    requireAnchor,
+    "",
+    "// FEA-1407 sandbox scoping — reject sessions outside the configured sandbox.",
+    IS_SESSION_IN_SANDBOX_CJS,
+  ].join("\n"));
+
+  // (b) Inject sandbox guard at the top of importSession, before the plan
+  // extraction block.
+  const importSessionHead =
+    "function importSession(dbModule, session) {\n  const { db, stmts } = dbModule;";
+  if (!source.includes(importSessionHead)) {
+    throw new Error(
+      `Unable to patch ${file}: expected importSession head anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(importSessionHead, [
+    "function importSession(dbModule, session) {",
+    "  // FEA-1407 sandbox scoping: skip sessions outside the configured sandbox.",
+    "  if (!isSessionInSandbox(session.cwd, process.env.SANDBOX_BASE_DIRECTORY)) {",
+    '    return { skipped: true, reason: "sandbox" };',
+    "  }",
+    "  const { db, stmts } = dbModule;",
+  ].join("\n"));
 
   writeFileSync(file, source, "utf8");
 }
@@ -3197,6 +3311,19 @@ function assertGeneratedTree() {
   if (!hooksRouteSource.includes("pendingBroadcasts")) {
     throw new Error(
       "Generated server/routes/hooks.js is missing watchdog transaction wrapping (FEA-1363).",
+    );
+  }
+
+  // CLOSEDLOOP FEA-1407: sandbox scoping hard-gates. A future upstream bump
+  // that breaks an anchor must fail the build, not silently drop sandbox filtering.
+  if (!hooksRouteSource.includes("FEA-1407 sandbox scoping")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the sandbox scoping filter (FEA-1407).",
+    );
+  }
+  if (!importHistorySource.includes("FEA-1407 sandbox scoping")) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the sandbox scoping filter (FEA-1407).",
     );
   }
 
