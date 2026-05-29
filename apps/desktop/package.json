@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.98",
+  "version": "0.15.99",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -27,6 +27,7 @@
     "pretest:audit": "pnpm build:agent-monitor && pnpm audit:scan && pnpm audit:classify",
     "audit:scan": "node test-e2e/agent-monitor/inventory/scan-tiles.mjs",
     "audit:classify": "node test-e2e/agent-monitor/inventory/coverage-classifier.mjs",
+    "audit:coverage": "bash scripts/check-audit-coverage.sh",
     "test:audit": "node --test \"test-e2e/agent-monitor/specs/audit/*.test.mjs\"",
     "pretest:audit:ui": "pnpm build:agent-monitor",
     "test:audit:ui": "playwright test --config test-e2e/agent-monitor/playwright.audit.config.ts",

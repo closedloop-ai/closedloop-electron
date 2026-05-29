@@ -484,6 +484,7 @@ function currentStamp() {
     embedTailwindSource,
     clientOverlayStatusBadgeSource,
     clientOverlaySessionsSource,
+    clientOverlayDashboardSource,
   ]) {
     h.update(readFileSync(file));
   }
