@@ -102,7 +102,7 @@ type TokenUsageRow = {
    * carry the split (the tier is chosen by the request's `cache_control.ttl`
    * directive, not echoed back in the response). v1 of FEA-1432 keeps this
    * column unchanged and synthesizes `cache_write_1h_tokens = 0` downstream
-   * in the cost calculation. Splitting the tiers is tracked by FEA-1438.
+   * in the cost calculation. Splitting the tiers is tracked by FEA-1440.
    */
   cache_write_tokens: number;
 };
@@ -849,7 +849,7 @@ export function loadSyncedSessions(
       // parser cannot recover the 5-min vs 1-hour split from the response
       // usage block (tier is request-side). Always emit 0 here so v2
       // payloads stay shape-correct and the field is plumbed end-to-end for
-      // FEA-1438. Cost compute below honors any positive value.
+      // FEA-1440. Cost compute below honors any positive value.
       cacheWrite1hTokens: 0,
       estimatedCostUsd: estimateTokenUsageCostUsd(tokenRow, pricingRows),
     }));
@@ -912,7 +912,7 @@ export function estimateTokenUsageCostUsd(
   // FEA-1432: cache_write_per_mtok is the 5-minute ephemeral rate;
   // cache_write_1h_per_mtok is the 1-hour rate. token_usage today only
   // carries a single cache_write_tokens counter (5-min meaning); the 1h
-  // counter defaults to 0 until FEA-1438 lands per-tier parsing.
+  // counter defaults to 0 until FEA-1440 lands per-tier parsing.
   // For non-Anthropic vendors (OpenAI/Gemini) both write rates are 0, so
   // the additional term contributes nothing.
   const cacheWrite1hTokens = tokenUsage.cache_write_1h_tokens ?? 0;

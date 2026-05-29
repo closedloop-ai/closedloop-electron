@@ -219,7 +219,7 @@ export function parseTokenUsage(claudeWorkDir: string): {
     // v1 of FEA-1432 therefore treats every cache creation token as 5-min
     // (i.e. attributes it to `cacheCreation`/`cache_write_tokens`) and leaves
     // the 1-hour bucket at 0. Recovering the split requires correlating the
-    // assistant response with the originating request, tracked by FEA-1438.
+    // assistant response with the originating request, tracked by FEA-1440.
     const cacheCreationTk = usage.cache_creation_input_tokens ?? 0;
     const cacheReadTk = usage.cache_read_input_tokens ?? 0;
     totals.inputTokens += inputTk;
