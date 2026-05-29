@@ -51,6 +51,13 @@ import { ImportHistory } from "../components/ImportHistory";
 // the single source of truth for rates, so the ModelPricing CRUD type is no
 // longer used by this read-only catalog view.
 import type { WSMessage } from "../lib/types";
+// CLOSEDLOOP FEA-1434: shared two-ledger client helper. Settings is the writer
+// of the "show hypothetical API cost" preference; the Dashboard reads it.
+import {
+  loadLedgerPrefs,
+  saveLedgerPrefs,
+  type LedgerPrefs,
+} from "../lib/closedloop-ledger";
 
 // ─── Notification preferences ───
 
@@ -228,6 +235,9 @@ export function Settings() {
   } | null>(null);
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
   const [notifPrefs, setNotifPrefs] = useState<NotifPrefs>(loadNotifPrefs);
+  // CLOSEDLOOP FEA-1434: per-user "show hypothetical API cost for subscription
+  // sessions" preference (localStorage, default off). Read by the Dashboard.
+  const [ledgerPrefs, setLedgerPrefs] = useState<LedgerPrefs>(loadLedgerPrefs);
   const [abandonHours, setAbandonHours] = useState("24");
   const [purgeDays, setPurgeDays] = useState("90");
   const [claudeHome, setClaudeHomeState] = useState("");
@@ -306,6 +316,14 @@ export function Settings() {
     setNotifPrefs((prev) => {
       const next = { ...prev, ...patch };
       saveNotifPrefs(next);
+      return next;
+    });
+  };
+
+  const updateLedgerPrefs = (patch: Partial<LedgerPrefs>) => {
+    setLedgerPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      saveLedgerPrefs(next);
       return next;
     });
   };
@@ -491,6 +509,30 @@ export function Settings() {
             <p>{t("acrossSessions")}</p>
             <p>{t("basedOnUsage")}</p>
           </div>
+        </div>
+      </div>
+
+      {/* CLOSEDLOOP FEA-1434: two-ledger display preference. The headline total
+          counts only really-billed spend (metered API + unknown). Sessions
+          covered by a flat subscription (Claude Pro/Max, Codex, Cursor Pro,
+          Copilot) are priced as a hypothetical "would have cost" and kept out
+          of that total. This opt-in surfaces that hypothetical on the Dashboard;
+          it never changes the billed headline. Default off. */}
+      <div className="card p-5">
+        <div className="flex items-center gap-3 mb-1">
+          <Coins className="w-4 h-4 text-gray-500" />
+          <Toggle
+            checked={ledgerPrefs.showHypotheticalCost}
+            onChange={(v) => updateLedgerPrefs({ showHypotheticalCost: v })}
+            label={t(
+              "ledger.showHypothetical",
+              "Show hypothetical API cost for subscription sessions",
+            )}
+            description={t(
+              "ledger.showHypotheticalDescription",
+              "Display what subscription-covered usage (Pro/Max, Codex, Cursor Pro, Copilot) would have cost at metered API rates. This is never added to the billed total.",
+            )}
+          />
         </div>
       </div>
 

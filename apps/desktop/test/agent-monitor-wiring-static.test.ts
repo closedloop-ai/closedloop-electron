@@ -81,6 +81,14 @@ const hostFlagsSource = read(
   "../scripts/agent-monitor-plans/client/closedloop-host-flags.ts",
 );
 const sessionsOverlaySource = read("../scripts/agent-monitor-client/Sessions.tsx");
+const dashboardOverlaySource = read("../scripts/agent-monitor-client/Dashboard.tsx");
+const settingsOverlaySource = read("../scripts/agent-monitor-client/Settings.tsx");
+const statusBadgeOverlaySource = read(
+  "../scripts/agent-monitor-client/StatusBadge.tsx",
+);
+const ledgerHelperSource = read(
+  "../scripts/agent-monitor-client/lib/closedloop-ledger.ts",
+);
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
   scripts: Record<string, string>;
@@ -981,4 +989,94 @@ test("Codex harness filter now uses server-backed pagination and rebuilds on sni
   assert.doesNotMatch(loadTopSnippet, /filter === "waiting" \|\| harness/);
   assert.match(loadRowsSnippet, /rows = rows\.filter\(isSessionAwaitingInput\);/);
   assert.doesNotMatch(loadRowsSnippet, /\(s\.harness \|\| "claude"\)/);
+});
+
+test("two-ledger client UI (FEA-1434 Slice 4b) is wired into the build and overlays", () => {
+  // 1. The shared ledger helper is delivered as a full-file overlay so the
+  //    StatusBadge/Sessions/Dashboard/Settings overlays can import it.
+  assert.match(
+    buildScriptSource,
+    /const clientOverlayLedgerSource = path\.join\(\s*clientOverlayDir,\s*"lib",\s*"closedloop-ledger\.ts"\s*\)/,
+  );
+  assert.match(
+    buildScriptSource,
+    /from: clientOverlayLedgerSource,[\s\S]*?to: path\.join\("src", "lib", "closedloop-ledger\.ts"\)/,
+  );
+
+  // 2. Latent cache-bust bug fix: currentStamp() must hash EVERY full-file
+  //    client overlay. Before the fix it omitted Dashboard/Settings (and the
+  //    new ledger helper), so editing only those left the cached generated tree
+  //    stale. Assert all three appear inside the currentStamp() hash list.
+  const stampMatch = buildScriptSource.match(
+    /function currentStamp\(\)\s*\{[\s\S]*?\n\}/,
+  );
+  assert.ok(stampMatch, "currentStamp() function not found in build script");
+  const stampBody = stampMatch[0];
+  for (const overlayConst of [
+    "clientOverlayStatusBadgeSource",
+    "clientOverlaySessionsSource",
+    "clientOverlayDashboardSource",
+    "clientOverlaySettingsSource",
+    "clientOverlayLedgerSource",
+  ]) {
+    assert.ok(
+      stampBody.includes(overlayConst),
+      `currentStamp() must hash ${overlayConst} so editing that overlay busts the build cache`,
+    );
+  }
+
+  // 3. The Session type gains billing_mode via a declarative edit anchored on
+  //    the harness line the prior edit adds (additive optional field).
+  assert.match(
+    buildScriptSource,
+    /guard: "billing_mode\?: string \| null",\s*find: "  harness\?: string \| null;",\s*replace: "  harness\?: string \| null;\\n  billing_mode\?: string \| null;",/,
+  );
+
+  // 4. Shared helper: presentation-only classification + prefs, NO cost math.
+  assert.match(ledgerHelperSource, /export function isSubscriptionMode/);
+  assert.match(ledgerHelperSource, /export function subscriptionBadgeLabel/);
+  assert.match(ledgerHelperSource, /export interface CostByLedger/);
+  assert.match(ledgerHelperSource, /LEDGER_PREFS_KEY = "agent-monitor-ledger"/);
+  assert.match(ledgerHelperSource, /showHypotheticalCost: boolean/);
+  // The helper must never recompute dollars — cost math is server-side only.
+  assert.doesNotMatch(ledgerHelperSource, /calcPrice|computeTokenCost|total_price/);
+
+  // 5. StatusBadge overlay exports a BillingBadge that renders ONLY for
+  //    subscription sessions (no fabricated quota %).
+  assert.match(statusBadgeOverlaySource, /export function BillingBadge/);
+  assert.match(
+    statusBadgeOverlaySource,
+    /if \(!isSubscriptionMode\(billing_mode\)\) return null;/,
+  );
+
+  // 6. Sessions overlay renders the badge from the session's billing_mode.
+  assert.match(
+    sessionsOverlaySource,
+    /<BillingBadge billing_mode=\{session\.billing_mode\} \/>/,
+  );
+
+  // 7. Dashboard reads cost_by_ledger + the opt-in pref, but the headline value
+  //    stays the billed total_cost — the subscription hypothetical only ever
+  //    appears in the pill subtitle, never summed into the headline.
+  assert.match(dashboardOverlaySource, /loadLedgerPrefs\(\)\.showHypotheticalCost/);
+  assert.match(dashboardOverlaySource, /cost_by_ledger\?: CostByLedger/);
+  assert.match(
+    dashboardOverlaySource,
+    /const subscriptionCost = costByLedger\?\.subscription \?\? 0;/,
+  );
+  assert.match(dashboardOverlaySource, /sub=\{costPillSub\}/);
+  // The pill VALUE must remain total_cost (billed), never the subscription sum.
+  assert.match(
+    dashboardOverlaySource,
+    /value=\{costData \? fmtCost\(costData\.total_cost\) : "\$0\.00"\}/,
+  );
+
+  // 8. Settings persists the opt-in toggle through the shared helper.
+  assert.match(settingsOverlaySource, /loadLedgerPrefs,/);
+  assert.match(settingsOverlaySource, /saveLedgerPrefs,/);
+  assert.match(settingsOverlaySource, /"ledger\.showHypothetical"/);
+  assert.match(
+    settingsOverlaySource,
+    /onChange=\{\(v\) => updateLedgerPrefs\(\{ showHypotheticalCost: v \}\)\}/,
+  );
 });

@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { eventBus } from "../lib/eventBus";
-import { SessionStatusBadge, HarnessBadge } from "../components/StatusBadge";
+import { SessionStatusBadge, HarnessBadge, BillingBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/EmptyState";
 import { formatDateTime, formatDuration, truncate, fmtCost } from "../lib/format";
 import { effectiveSessionStatus, isSessionAwaitingInput } from "../lib/types";
@@ -342,6 +342,7 @@ export function Sessions() {
                             {session.name || `${t("defaultName")}${session.id.slice(0, 8)}`}
                           </p>
                           <HarnessBadge harness={session.harness} />
+                          <BillingBadge billing_mode={session.billing_mode} />
                           {dashboardRunIds.has(session.id) && (
                             <Link
                               to={`/run?session=${encodeURIComponent(session.id)}`}

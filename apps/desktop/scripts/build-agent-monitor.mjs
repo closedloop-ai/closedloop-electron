@@ -333,6 +333,10 @@ const clientOverlayStatusBadgeSource = path.join(clientOverlayDir, "StatusBadge.
 const clientOverlaySessionsSource = path.join(clientOverlayDir, "Sessions.tsx");
 const clientOverlayDashboardSource = path.join(clientOverlayDir, "Dashboard.tsx");
 const clientOverlaySettingsSource = path.join(clientOverlayDir, "Settings.tsx");
+// CLOSEDLOOP FEA-1434: shared two-ledger client helper (prefs + cost_by_ledger
+// shape + presentation-only billing-mode classification) imported by the
+// Dashboard, Settings, StatusBadge, and Sessions overlays.
+const clientOverlayLedgerSource = path.join(clientOverlayDir, "lib", "closedloop-ledger.ts");
 const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: embedAppSource,
@@ -345,6 +349,14 @@ const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: embedTailwindSource,
     to: "tailwind.config.js",
+  },
+  {
+    // CLOSEDLOOP FEA-1434: delivered first among the ClosedLoop overlays since
+    // the StatusBadge, Sessions, Dashboard, and Settings overlays import it.
+    // Order is cosmetic (every cpSync copy runs before Vite resolves imports),
+    // but keeping the shared module first documents the dependency direction.
+    from: clientOverlayLedgerSource,
+    to: path.join("src", "lib", "closedloop-ledger.ts"),
   },
   {
     from: clientOverlayStatusBadgeSource,
@@ -497,6 +509,14 @@ function currentStamp() {
     embedTailwindSource,
     clientOverlayStatusBadgeSource,
     clientOverlaySessionsSource,
+    // CLOSEDLOOP FEA-1434: the Dashboard, Settings, and shared ledger overlays
+    // were previously omitted from the stamp, so editing only those files left
+    // the cached generated tree stale (the build short-circuits when the stamp
+    // matches and the tree exists). Hash every full-file client overlay so any
+    // overlay edit busts the cache.
+    clientOverlayDashboardSource,
+    clientOverlaySettingsSource,
+    clientOverlayLedgerSource,
   ]) {
     h.update(readFileSync(file));
   }
@@ -3326,6 +3346,16 @@ function patchClientSource() {
       guard: "harness?: string | null",
       find: "  cost?: number;",
       replace: "  cost?: number;\n  harness?: string | null;",
+    },
+    {
+      // CLOSEDLOOP FEA-1434: the sessions API returns billing_mode (SELECT *),
+      // consumed by the Sessions overlay's <BillingBadge>. Anchor on the
+      // harness line the previous edit just added (this edit must stay ordered
+      // after it). Additive optional field — schema version unchanged.
+      rel: "src/lib/types.ts",
+      guard: "billing_mode?: string | null",
+      find: "  harness?: string | null;",
+      replace: "  harness?: string | null;\n  billing_mode?: string | null;",
     },
     {
       rel: "src/lib/api.ts",
