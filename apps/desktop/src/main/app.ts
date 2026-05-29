@@ -69,7 +69,9 @@ import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
 import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
+  isAgentMonitorCodexHooksOptIn,
   isAgentMonitorHooksEnabled,
+  setAgentMonitorCodexHooksOptIn,
   setAgentMonitorHooksEnabled,
   syncAgentMonitorHooksOnBoot,
 } from "./agent-monitor-hooks.js";
@@ -2497,6 +2499,26 @@ export class DesktopApplication {
           };
         }
         return setAgentMonitorHooksEnabled(enabled === true);
+      },
+    );
+    // FEA-1444: opt-in toggle for Codex hooks. Surfaced as a sibling of the
+    // Claude hooks toggle in the Agent Dashboard view. Gated on the master
+    // Agent Dashboard flag for the same reason the Claude toggle is — the
+    // sidecar must be running to receive the forwarded hook events.
+    ipcMain.handle("desktop:get-agent-monitor-codex-hooks-opt-in", () =>
+      this.isAgentMonitorEnabled() && isAgentMonitorCodexHooksOptIn(),
+    );
+    ipcMain.handle(
+      "desktop:set-agent-monitor-codex-hooks-opt-in",
+      (_event, optIn: boolean) => {
+        if (!this.isAgentMonitorEnabled()) {
+          return {
+            ok: false,
+            enabled: false,
+            error: "Agent Dashboard is disabled in Settings.",
+          };
+        }
+        return setAgentMonitorCodexHooksOptIn(optIn === true);
       },
     );
     ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());

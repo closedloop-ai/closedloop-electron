@@ -3404,6 +3404,17 @@
           <span>Enable Claude Code session tracking</span>
           <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
         </div>
+        <!-- FEA-1444: opt-in toggle for Codex hook ingestion. Sibling of the
+             Claude toggle above. Requires `[features].codex_hooks = true` in
+             ~/.codex/config.toml on the Codex side. -->
+        <div id="codexDashConsent" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
+          <label class="toggle-switch" title="Installs Codex CLI hooks in ~/.codex/hooks.json so this dashboard receives live session events from Codex (in addition to the rollout-tail watcher that already runs). Requires `[features].codex_hooks = true` in ~/.codex/config.toml. Off by default; fully removable.">
+            <input type="checkbox" id="codexDashHooksToggle" />
+            <span class="toggle-track"></span>
+          </label>
+          <span>Enable Codex CLI session tracking (experimental)</span>
+          <span id="codexDashHooksHint" style="color:var(--muted-foreground,#888)">— off (rollout-tail watcher continues)</span>
+        </div>
         <div id="claudeDashStatus" class="dash-loading" aria-live="polite"></div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
@@ -3971,6 +3982,11 @@
           if (consent) {
             consent.style.display = id === "agent-settings" ? "flex" : "none";
           }
+          // FEA-1444: sibling Codex toggle gets the same visibility treatment.
+          const codexConsent = document.getElementById("codexDashConsent");
+          if (codexConsent) {
+            codexConsent.style.display = id === "agent-settings" ? "flex" : "none";
+          }
           startClaudeDashboard();
           navigateAgentRoute(item.route);
         } else {
@@ -4030,12 +4046,25 @@
         const status = document.getElementById("claudeDashStatus");
         const toggle = document.getElementById("claudeDashHooksToggle");
         const hint = document.getElementById("claudeDashHooksHint");
+        // FEA-1444: same disable-when-master-off treatment for the Codex toggle.
+        const codexToggle = document.getElementById("codexDashHooksToggle");
+        const codexHint = document.getElementById("codexDashHooksHint");
 
         if (toggle) {
           toggle.disabled = !cachedAgentMonitorEnabled;
           if (!cachedAgentMonitorEnabled) {
             toggle.checked = false;
           }
+        }
+        if (codexToggle) {
+          codexToggle.disabled = !cachedAgentMonitorEnabled;
+          if (!cachedAgentMonitorEnabled) {
+            codexToggle.checked = false;
+          }
+        }
+        if (codexHint && !cachedAgentMonitorEnabled) {
+          codexHint.textContent =
+            "— enable Agent Dashboard in Settings to manage session tracking";
         }
 
         if (!cachedAgentMonitorEnabled) {
@@ -4059,8 +4088,16 @@
             activateTab("settings");
             activateSettingsTab("relay-gateway");
           }
-        } else if (hint) {
-          hint.textContent = "— off (no changes to your global Claude config)";
+        } else {
+          if (hint) {
+            hint.textContent = "— off (no changes to your global Claude config)";
+          }
+          // FEA-1444: mirror Claude hint reset for Codex so the stale
+          // "enable Agent Dashboard in Settings..." text doesn't linger
+          // after the user turns the master flag back on.
+          if (codexHint) {
+            codexHint.textContent = "— off (rollout-tail watcher continues)";
+          }
         }
 
         // Render the initial view once the enabled-state is known on boot.
@@ -4110,6 +4147,62 @@
         } catch (_) { /* leave as-is */ }
       }
 
+      // FEA-1444: Codex hook opt-in toggle. Mirrors the Claude pair above.
+      async function refreshCodexHooksToggle() {
+        const toggle = document.getElementById("codexDashHooksToggle");
+        const hint = document.getElementById("codexDashHooksHint");
+        if (!toggle) return;
+        if (!cachedAgentMonitorEnabled) {
+          toggle.disabled = true;
+          if (hint) {
+            hint.textContent =
+              "— enable Agent Dashboard in Settings to manage session tracking";
+          }
+          return;
+        }
+        try {
+          const optedIn = await api.getAgentMonitorCodexHooksOptIn();
+          toggle.checked = !!optedIn;
+          toggle.disabled = false;
+          if (hint) {
+            hint.textContent = optedIn
+              ? "— on (Codex hooks installed in ~/.codex/hooks.json; also set [features].codex_hooks = true in ~/.codex/config.toml)"
+              : "— off (rollout-tail watcher continues)";
+          }
+        } catch (_) { /* leave as-is */ }
+      }
+
+      (function wireCodexHooksToggle() {
+        const toggle = document.getElementById("codexDashHooksToggle");
+        const hint = document.getElementById("codexDashHooksHint");
+        if (!toggle) return;
+        toggle.addEventListener("change", async () => {
+          const want = toggle.checked;
+          toggle.disabled = true;
+          if (hint) hint.textContent = want ? "— enabling…" : "— disabling…";
+          try {
+            const res = await api.setAgentMonitorCodexHooksOptIn(want);
+            if (!res || !res.ok) {
+              toggle.checked = !want;
+              if (hint) {
+                hint.textContent =
+                  "— failed: " + ((res && res.error) || "unknown error");
+              }
+            } else {
+              await refreshCodexHooksToggle();
+            }
+          } catch (e) {
+            toggle.checked = !want;
+            if (hint) {
+              hint.textContent =
+                "— failed: " + (e && e.message ? e.message : "error");
+            }
+          } finally {
+            toggle.disabled = false;
+          }
+        });
+      })();
+
       (function wireClaudeHooksToggle() {
         const toggle = document.getElementById("claudeDashHooksToggle");
         const hint = document.getElementById("claudeDashHooksHint");
@@ -4125,6 +4218,11 @@
               hint.textContent = "— failed: " + ((res && res.error) || "unknown error");
             } else {
               await refreshClaudeHooksToggle();
+              // FEA-1444: refresh sibling Codex toggle state so its on/off
+              // badge stays in sync after a successful Claude-toggle change.
+              // (The master `agentMonitorEnabled` flag, not this toggle,
+              // controls the Codex toggle's disabled state.)
+              await refreshCodexHooksToggle();
             }
           } catch (e) {
             toggle.checked = !want;
@@ -4161,6 +4259,9 @@
           return;
         }
         void refreshClaudeHooksToggle();
+        // FEA-1444: also refresh the sibling Codex toggle on dashboard mount
+        // so its on/off badge reflects the persisted state.
+        void refreshCodexHooksToggle();
         if (claudeDashLoaded) { sizeClaudeFrame(); return; }
         renderDashLoading();
 

@@ -30,6 +30,16 @@ const catchupCache = createCatchupCache({ persistPath: ingestCachePath("codex") 
  * or { skipped: true } when the file has no usable content.
  */
 function importCodexSession(dbModule, session) {
+  // FEA-1444 dedup: if the user opted into Codex hooks, the same logical
+  // event will already be in `events` (inserted ~5s earlier by the hook
+  // handler). Without this filter the rollout-tail importer would create a
+  // duplicate row for every Codex event after the user opts in. Match on
+  // (session_id, event_type, tool_name, created_at-truncated-to-second) —
+  // hooks and rollout-tail timestamps usually agree within sub-second
+  // granularity for the same logical event. False negatives are tolerable
+  // (cosmetic duplicates); false positives would silently drop events, so
+  // the match is intentionally narrow.
+  filterEventsAlreadyCapturedByHooks(dbModule, session);
   const result = importSession(dbModule, session);
   // Stamp the harness regardless of skipped/backfilled — cheap, idempotent,
   // and self-heals rows imported before the `harness` column existed.
@@ -40,6 +50,73 @@ function importCodexSession(dbModule, session) {
   }
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
+}
+
+/**
+ * FEA-1444: filter session.events in place, removing any whose
+ * (session_id, event_type, COALESCE(tool_name, ''), created_at-rounded-to-second)
+ * already exists in the `events` table. The hook handler inserts in real time;
+ * rollout-tail catches up ~5s later — so the dedup query consistently sees
+ * hook-sourced rows first when both paths are active.
+ *
+ * No-op when session.events is empty or the events query fails (best-effort;
+ * never block the import on a dedup-time error).
+ */
+// FEA-1444 dedup-stmt cache: the filter runs per-session inside
+// importCodexSession, which itself runs inside the importBatch transaction
+// loop. Caching the prepared statement on the dbModule keeps us at O(1)
+// compilations per process instead of O(sessions) per batch. The cache is
+// keyed by dbModule so a fresh DatabaseSync in tests gets a fresh stmt.
+const dedupStmtCache = new WeakMap();
+function getDedupCheckStmt(dbModule) {
+  let stmt = dedupStmtCache.get(dbModule);
+  if (stmt) return stmt;
+  // Truncate created_at to seconds via `substr(?, 1, 19)` so sub-second
+  // timestamp drift between the hook payload and the rollout file doesn't
+  // produce a false negative.
+  stmt = dbModule.db.prepare(
+    "SELECT 1 FROM events " +
+      "WHERE session_id = ? AND event_type = ? " +
+      "AND COALESCE(tool_name, '') = COALESCE(?, '') " +
+      "AND substr(COALESCE(created_at, ''), 1, 19) = substr(COALESCE(?, ''), 1, 19) " +
+      "LIMIT 1",
+  );
+  dedupStmtCache.set(dbModule, stmt);
+  return stmt;
+}
+
+function filterEventsAlreadyCapturedByHooks(dbModule, session) {
+  if (!session || !Array.isArray(session.events) || session.events.length === 0) {
+    return;
+  }
+  let checkStmt;
+  try {
+    checkStmt = getDedupCheckStmt(dbModule);
+  } catch {
+    return; // schema mismatch or db locked — fall through, accept duplicates
+  }
+  const filtered = [];
+  for (const ev of session.events) {
+    if (!ev || typeof ev !== "object") {
+      filtered.push(ev);
+      continue;
+    }
+    try {
+      const hit = checkStmt.get(
+        session.sessionId,
+        ev.event_type ?? null,
+        ev.tool_name ?? null,
+        ev.created_at ?? null,
+      );
+      if (hit) {
+        continue; // already captured by the hook handler — drop the duplicate
+      }
+    } catch {
+      // best-effort — on any per-row failure, keep the event
+    }
+    filtered.push(ev);
+  }
+  session.events = filtered;
 }
 
 /**
@@ -107,4 +184,9 @@ async function importAllCodexSessions(dbModule, opts = {}) {
   return { imported, skipped, errors };
 }
 
-module.exports = { importAllCodexSessions, importCodexSession };
+module.exports = {
+  importAllCodexSessions,
+  importCodexSession,
+  // Exposed for regression coverage of FEA-1444 dedup.
+  filterEventsAlreadyCapturedByHooks,
+};
