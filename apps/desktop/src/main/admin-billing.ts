@@ -18,6 +18,7 @@
  * (which never contains your key) but never the key itself.
  */
 import {
+  centsToMicroCents,
   parseDecimalCentsToMicroCents,
   usdToMicroCents,
 } from "./cost-math.js";
@@ -140,4 +141,4 @@ export function utcDayFromUnixSeconds(value: unknown, vendorLabel: string): stri
 
 // Re-export the unit converters the vendor parsers use, so the clients import
 // money math from one place.
-export { parseDecimalCentsToMicroCents, usdToMicroCents };
+export { centsToMicroCents, parseDecimalCentsToMicroCents, usdToMicroCents };

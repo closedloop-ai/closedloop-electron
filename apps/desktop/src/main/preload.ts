@@ -58,6 +58,10 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:run-cost-reconciliation") as Promise<unknown>,
   listCostReconciliation: (query?: unknown) =>
     ipcRenderer.invoke("desktop:list-cost-reconciliation", query) as Promise<unknown>,
+  // FEA-1436: Claude Code per-user usage (Anthropic's own estimate). Returns
+  // per-actor usage rows only — never any Admin key material.
+  getClaudeCodeAnalytics: (query?: unknown) =>
+    ipcRenderer.invoke("desktop:get-claude-code-analytics", query) as Promise<unknown>,
   getCloudCommandsPaused: () =>
     ipcRenderer.invoke("desktop:get-cloud-commands-paused") as Promise<unknown>,
   setCloudCommandsPaused: (paused: boolean) =>

@@ -85,6 +85,7 @@ import {
   reconciliationCutoffIso,
 } from "./reconciliation-worker.js";
 import { CostReconciliationService } from "./cost-reconciliation-service.js";
+import { ClaudeCodeAnalyticsService } from "./claude-code-analytics-service.js";
 import {
   isAgentMonitorHooksEnabled,
   setAgentMonitorHooksEnabled,
@@ -255,6 +256,24 @@ function parseReconciliationQuery(value: unknown): ReconciliationQuery | undefin
   return Object.keys(query).length > 0 ? query : undefined;
 }
 
+/**
+ * Extract the Claude Code analytics query from an untrusted IPC payload. Only a
+ * numeric `windowDays` is read; the service clamps it to a sane range, so any
+ * other shape becomes `undefined` (the service then uses its default window).
+ */
+function parseClaudeCodeAnalyticsQuery(
+  value: unknown,
+): { windowDays?: number } | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.windowDays === "number" && Number.isFinite(record.windowDays)) {
+    return { windowDays: record.windowDays };
+  }
+  return undefined;
+}
+
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
   private readonly apiKeyStore: ApiKeyStore;
@@ -272,6 +291,7 @@ export class DesktopApplication {
   private readonly agentMonitor: AgentMonitorSidecar;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly costReconciliation: CostReconciliationService;
+  private readonly claudeCodeAnalytics: ClaudeCodeAnalyticsService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
@@ -627,8 +647,13 @@ export class DesktopApplication {
     // genai-prices estimate (read from dashboard.db READ-ONLY) against what each
     // vendor actually billed. loadUsageRows re-opens the live DB each run, scoped
     // to the recent window, and returns [] when the sidecar has not created it.
+    // One Anthropic Admin key store, shared by reconciliation (compares the local
+    // estimate against the billed cost_report) and Claude Code analytics (reads
+    // Anthropic's own per-user usage estimate). Sharing the store means a key
+    // saved once powers both, and there is a single owner of the key material.
+    const anthropicKeyStore = createAnthropicAdminKeyStore();
     this.costReconciliation = new CostReconciliationService({
-      anthropicKeyStore: createAnthropicAdminKeyStore(),
+      anthropicKeyStore,
       openaiKeyStore: createOpenAiAdminKeyStore(),
       store: new ReconciliationStore(),
       loadUsageRows: () =>
@@ -637,6 +662,13 @@ export class DesktopApplication {
           reconciliationCutoffIso(new Date()),
         ),
       log: (message) => gatewayLog.info("cost-reconciliation", message),
+    });
+    // FEA-1436: Claude Code per-user usage view. Read-only, main-only, and uses
+    // the SAME Anthropic Admin key as reconciliation. The estimate it returns is
+    // Anthropic's own — it never overrides the local genai-prices ledger.
+    this.claudeCodeAnalytics = new ClaudeCodeAnalyticsService({
+      anthropicKeyStore,
+      log: (message) => gatewayLog.info("claude-code-analytics", message),
     });
     this.recovery = new GatewayRecoveryManager({
       probe: () => this.probeGatewayAlive(),
@@ -3017,6 +3049,12 @@ export class DesktopApplication {
     );
     ipcMain.handle("desktop:list-cost-reconciliation", (_event, query: unknown) =>
       this.costReconciliation.listRows(parseReconciliationQuery(query)),
+    );
+    // FEA-1436: Claude Code per-user usage (Anthropic's own estimate). Read-only;
+    // uses the same Anthropic Admin key. The query is runtime-validated (untrusted
+    // IPC) and the result carries no key material — only per-actor usage rows.
+    ipcMain.handle("desktop:get-claude-code-analytics", (_event, query: unknown) =>
+      this.claudeCodeAnalytics.fetchAnalytics(parseClaudeCodeAnalyticsQuery(query)),
     );
     ipcMain.handle(
       "desktop:get-cloud-commands-paused",

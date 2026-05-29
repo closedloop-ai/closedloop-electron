@@ -21,42 +21,10 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  assertAllowedAdminHost,
-  type AdminFetchLike,
-  type AdminFetchResponse,
-} from "../src/main/admin-billing.js";
+import { assertAllowedAdminHost } from "../src/main/admin-billing.js";
 import { AnthropicAdminClient } from "../src/main/anthropic-admin-client.js";
 import { OpenAiAdminClient } from "../src/main/openai-admin-client.js";
-
-interface RecordedCall {
-  url: string;
-  headers: Record<string, string>;
-}
-
-/** A fake fetch that returns the queued JSON bodies in order and records calls. */
-function makeFetch(
-  pages: unknown[],
-  opts?: { status?: number; bodyText?: string },
-): { fetch: AdminFetchLike; calls: RecordedCall[] } {
-  const calls: RecordedCall[] = [];
-  let index = 0;
-  const fetch: AdminFetchLike = async (url, init) => {
-    calls.push({ url, headers: init.headers });
-    const status = opts?.status ?? 200;
-    const ok = status >= 200 && status < 300;
-    const body = pages[index] ?? pages[pages.length - 1];
-    index += 1;
-    const response: AdminFetchResponse = {
-      ok,
-      status,
-      json: async () => body,
-      text: async () => opts?.bodyText ?? JSON.stringify(body),
-    };
-    return response;
-  };
-  return { fetch, calls };
-}
+import { makeFetch } from "./helpers/admin-fetch.js";
 
 // ── assertAllowedAdminHost ────────────────────────────────────────────────────
 

@@ -3969,6 +3969,40 @@
             </div>
           </div>
 
+          <div class="settings-group">
+            <h3 class="settings-group-title">Claude Code Usage (Anthropic estimate)</h3>
+            <p class="settings-group-desc">
+              Per-user Claude Code spend over the last 7 days, as reported by Anthropic's own
+              usage report. This is <strong>Anthropic's estimate</strong>, shown for reference
+              &mdash; it never replaces the local token-based ledger. Requires an Anthropic Admin
+              key above and a Team or Enterprise organization.
+            </p>
+
+            <div class="cost-recon-toolbar">
+              <button class="secondary" id="refreshClaudeCodeUsage">Refresh</button>
+              <span class="cost-recon-avg" id="claudeCodeUsageTotal"></span>
+            </div>
+            <p class="muted" id="claudeCodeUsageMessage"></p>
+
+            <div class="cost-recon-table-wrap">
+              <table class="cost-recon-table">
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Type</th>
+                    <th class="num">Models</th>
+                    <th class="num">Input</th>
+                    <th class="num">Output</th>
+                    <th class="num">Est. cost</th>
+                  </tr>
+                </thead>
+                <tbody id="claudeCodeUsageTableBody">
+                  <tr><td colspan="6" class="cost-recon-empty">No Claude Code usage loaded yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <div class="settings-tab-footer">
             <p class="muted" id="costFooterMessage"></p>
           </div>
@@ -4789,6 +4823,9 @@
       const reconciliationAvg = document.getElementById("reconciliationAvg");
       const reconciliationMessage = document.getElementById("reconciliationMessage");
       const costFooterMessage = document.getElementById("costFooterMessage");
+      const claudeCodeUsageTableBody = document.getElementById("claudeCodeUsageTableBody");
+      const claudeCodeUsageTotal = document.getElementById("claudeCodeUsageTotal");
+      const claudeCodeUsageMessage = document.getElementById("claudeCodeUsageMessage");
       // Most-recent run notices, keyed by day|vendor|model, for the Explain expander.
       const costLatestNotices = new Map();
       let costLatestRows = [];
@@ -5150,8 +5187,127 @@
         }
       }
 
+      function formatTokenCount(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+        return Math.round(value).toLocaleString();
+      }
+
+      // Collapse the per actor×model×day records into one row per actor: total
+      // estimated cost, total input/output tokens, and the count of distinct
+      // models. Sorted by cost descending so the biggest spenders are on top.
+      function aggregateClaudeCodeRecords(records) {
+        const byActor = new Map();
+        for (const record of records) {
+          if (!record || typeof record.actor !== "string") continue;
+          let agg = byActor.get(record.actor);
+          if (!agg) {
+            agg = {
+              actor: record.actor,
+              actorType: record.actorType === "user" ? "user" : "api_key",
+              models: new Set(),
+              estimatedCostMicroCents: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+            };
+            byActor.set(record.actor, agg);
+          }
+          if (typeof record.model === "string") agg.models.add(record.model);
+          if (typeof record.estimatedCostMicroCents === "number") {
+            agg.estimatedCostMicroCents += record.estimatedCostMicroCents;
+          }
+          if (typeof record.inputTokens === "number") agg.inputTokens += record.inputTokens;
+          if (typeof record.outputTokens === "number") agg.outputTokens += record.outputTokens;
+        }
+        return [...byActor.values()].sort(
+          (a, b) => b.estimatedCostMicroCents - a.estimatedCostMicroCents,
+        );
+      }
+
+      function renderClaudeCodeUsageTable(rows) {
+        if (!claudeCodeUsageTableBody) return;
+        claudeCodeUsageTableBody.innerHTML = "";
+        if (!Array.isArray(rows) || rows.length === 0) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 6;
+          td.className = "cost-recon-empty";
+          td.textContent = "No Claude Code usage in the last 7 days.";
+          tr.appendChild(td);
+          claudeCodeUsageTableBody.appendChild(tr);
+          return;
+        }
+        for (const row of rows) {
+          const tr = document.createElement("tr");
+          appendCostCell(tr, row.actor);
+          appendCostCell(tr, row.actorType === "user" ? "User" : "API key");
+          appendCostCell(tr, String(row.models.size), "num");
+          appendCostCell(tr, formatTokenCount(row.inputTokens), "num");
+          appendCostCell(tr, formatTokenCount(row.outputTokens), "num");
+          appendCostCell(tr, formatUsdFromMicroCents(row.estimatedCostMicroCents), "num");
+          claudeCodeUsageTableBody.appendChild(tr);
+        }
+      }
+
+      function describeClaudeCodeResult(result) {
+        if (!result) return "";
+        if (!result.available) {
+          return "Add an Anthropic Admin key above to load Claude Code usage.";
+        }
+        if (result.error) {
+          return `Could not load Claude Code usage: ${result.error}`;
+        }
+        const count = Array.isArray(result.records) ? result.records.length : 0;
+        if (count === 0) {
+          return "No Claude Code usage reported for this window (requires a Team or Enterprise org).";
+        }
+        const window = result.window;
+        const range = window ? ` (${window.startDay} → ${window.endDay})` : "";
+        return `Anthropic's estimate${range}.`;
+      }
+
+      function renderClaudeCodeTotal(rows) {
+        if (!claudeCodeUsageTotal) return;
+        if (!Array.isArray(rows) || rows.length === 0) {
+          claudeCodeUsageTotal.textContent = "";
+          return;
+        }
+        let total = 0;
+        for (const row of rows) {
+          if (typeof row.estimatedCostMicroCents === "number") {
+            total += row.estimatedCostMicroCents;
+          }
+        }
+        claudeCodeUsageTotal.textContent = `7-day total: ${formatUsdFromMicroCents(total)}`;
+      }
+
+      async function refreshClaudeCodeUsage() {
+        if (claudeCodeUsageMessage) claudeCodeUsageMessage.textContent = "Loading Claude Code usage…";
+        let result;
+        try {
+          result = await api.getClaudeCodeAnalytics();
+        } catch (error) {
+          if (claudeCodeUsageMessage) {
+            claudeCodeUsageMessage.textContent = `Could not load Claude Code usage: ${error.message}`;
+          }
+          renderClaudeCodeUsageTable([]);
+          renderClaudeCodeTotal([]);
+          return;
+        }
+        const records = result && Array.isArray(result.records) ? result.records : [];
+        const rows = aggregateClaudeCodeRecords(records);
+        renderClaudeCodeUsageTable(rows);
+        renderClaudeCodeTotal(rows);
+        if (claudeCodeUsageMessage) {
+          claudeCodeUsageMessage.textContent = describeClaudeCodeResult(result);
+        }
+      }
+
       async function loadCostReconciliationPanel() {
-        await Promise.all([refreshAdminKeyStatuses(), refreshReconciliationTable()]);
+        await Promise.all([
+          refreshAdminKeyStatuses(),
+          refreshReconciliationTable(),
+          refreshClaudeCodeUsage(),
+        ]);
       }
 
       document
@@ -5175,6 +5331,9 @@
       document
         .getElementById("exportReconciliation")
         ?.addEventListener("click", () => exportReconciliationForSupport());
+      document
+        .getElementById("refreshClaudeCodeUsage")
+        ?.addEventListener("click", () => void refreshClaudeCodeUsage());
 
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
