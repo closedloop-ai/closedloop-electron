@@ -21,6 +21,10 @@
  * generic like "Image generation"). We map `line_item` to `model` for the
  * reconciliation join and fall back to `"unknown"` when null.
  *
+ * Currency: only `amount.currency === "usd"` is supported. International orgs
+ * billed in GBP/EUR throw `OpenAIMalformedResponseError` rather than silently
+ * treating foreign amounts as USD at 1:1 (see review finding M5).
+ *
  * Security: host allowlist enforced at module boundary; Admin Key never logged.
  */
 
@@ -56,6 +60,24 @@ export class OpenAINetworkError extends Error {
   }
 }
 
+/**
+ * H1: thrown when the API host responds with a 3xx redirect. We pass
+ * `redirect: "error"` to `fetch()` so undici throws instead of silently
+ * following the Location header (which would forward the
+ * `Authorization: Bearer` Admin Key to the redirect target). A DNS hijack or
+ * compromise of an OpenAI subdomain could otherwise exfiltrate the Admin Key.
+ * The user-facing message intentionally instructs verifying network
+ * configuration rather than echoing the redirect target.
+ */
+export class OpenAIRedirectError extends Error {
+  readonly name = "OpenAIRedirectError";
+  constructor() {
+    super(
+      "openai_admin_redirect: host did not respond directly — verify network configuration",
+    );
+  }
+}
+
 export class OpenAIMalformedResponseError extends Error {
   readonly name = "OpenAIMalformedResponseError";
   constructor() {
@@ -86,6 +108,7 @@ export interface OpenAIDailyCostRow {
 export async function fetchOpenAICosts(
   adminKey: string,
   window: OpenAICostsWindow,
+  options?: { signal?: AbortSignal },
 ): Promise<OpenAIDailyCostRow[]> {
   const trimmed = adminKey.trim();
   if (!trimmed) {
@@ -97,7 +120,7 @@ export async function fetchOpenAICosts(
   const startedAt = Date.now();
   while (pageCount < MAX_PAGES) {
     const url = buildCostsUrl(window, nextPage);
-    const body = await fetchWithRetry(url, trimmed);
+    const body = await fetchWithRetry(url, trimmed, options?.signal);
     const parsed = parseCosts(body);
     rows.push(...parsed.rows);
     pageCount += 1;
@@ -128,12 +151,25 @@ function buildCostsUrl(window: OpenAICostsWindow, nextPage: string | null): URL 
   return url;
 }
 
-async function fetchWithRetry(url: URL, adminKey: string): Promise<unknown> {
+async function fetchWithRetry(
+  url: URL,
+  adminKey: string,
+  externalSignal: AbortSignal | undefined,
+): Promise<unknown> {
   let attempt = 0;
   while (true) {
     attempt += 1;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    // M3: forward upstream abort (worker.stop()) into this fetch.
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+      }
+    }
     let response: Response;
     try {
       response = await fetch(url, {
@@ -143,9 +179,19 @@ async function fetchWithRetry(url: URL, adminKey: string): Promise<unknown> {
           accept: "application/json",
         },
         signal: controller.signal,
+        // H1: never follow 3xx redirects — undici would otherwise forward the
+        // `Authorization: Bearer` header to the redirect target. We catch the
+        // resulting TypeError below and map to OpenAIRedirectError.
+        redirect: "error",
       });
-    } catch {
+    } catch (err) {
       clearTimeout(timeout);
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      }
+      if (isRedirectError(err)) {
+        throw new OpenAIRedirectError();
+      }
       if (attempt >= MAX_RETRIES) {
         throw new OpenAINetworkError();
       }
@@ -153,6 +199,9 @@ async function fetchWithRetry(url: URL, adminKey: string): Promise<unknown> {
       continue;
     }
     clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
     if (response.status === 401) {
       throw new OpenAIAuthError(401);
     }
@@ -224,6 +273,17 @@ function parseCosts(body: unknown): ParsedPage {
       if (typeof value !== "number" || !Number.isFinite(value)) {
         continue;
       }
+      // Currency must be present and USD — international orgs may receive GBP
+      // or EUR amounts that would otherwise be silently treated as USD at 1:1.
+      // We throw rather than silently skip so the user sees an unsupported-
+      // currency error instead of a confusingly-zero cost report. The error
+      // type intentionally does not echo the raw currency string back into the
+      // message (defense-in-depth — the error surface should never leak
+      // user-controllable data from the response).
+      const currency = amount.currency;
+      if (typeof currency !== "string" || currency.toLowerCase() !== "usd") {
+        throw new OpenAIMalformedResponseError();
+      }
       let costMicroCents: MicroCents;
       try {
         costMicroCents = parseOpenAIDollars(value);
@@ -280,4 +340,29 @@ function computeBackoff(attempt: number): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Detects undici's redirect-blocked error from `redirect: "error"`. Matches on
+ * both message and cause to stay resilient to undici-version drift.
+ */
+function isRedirectError(err: unknown): boolean {
+  if (!err || typeof err !== "object") {
+    return false;
+  }
+  const e = err as { message?: unknown; cause?: { message?: unknown; code?: unknown } };
+  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  const causeMsg =
+    e.cause && typeof e.cause === "object" && typeof e.cause.message === "string"
+      ? e.cause.message.toLowerCase()
+      : "";
+  const causeCode =
+    e.cause && typeof e.cause === "object" && typeof e.cause.code === "string"
+      ? (e.cause.code as string).toLowerCase()
+      : "";
+  return (
+    msg.includes("redirect") ||
+    causeMsg.includes("redirect") ||
+    causeCode.includes("redirect")
+  );
 }

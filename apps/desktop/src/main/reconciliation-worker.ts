@@ -59,6 +59,7 @@ import {
 } from "./reconciliation-cause-hint.js";
 import {
   fetchClaudeCodeAnalytics,
+  ClaudeCodeAnalyticsAuthError,
   ClaudeCodeAnalyticsUnsupportedError,
   type ClaudeCodeAnalyticsUserDay,
 } from "./claude-code-analytics-client.js";
@@ -224,6 +225,13 @@ export class ReconciliationWorker {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private lastRunAt: string | null = null;
+  /**
+   * M3: hoisted per-run AbortController. `stop()` aborts in-flight fetches so
+   * app quit doesn't hang on a 30s vendor-request timeout. Re-initialized at
+   * the start of each run; stays "fresh" across normal idle cycles so a stray
+   * external abort can't race the next run's start.
+   */
+  private abortController: AbortController = new AbortController();
 
   constructor(options: ReconciliationWorkerOptions) {
     this.options = {
@@ -272,6 +280,16 @@ export class ReconciliationWorker {
   }
 
   stop(): void {
+    // M3: abort any in-flight vendor fetch BEFORE clearing the timer so app
+    // quit doesn't hang on a pending request waiting out the 30s timeout.
+    // Replace the controller so a subsequent start() gets a fresh, non-aborted
+    // signal.
+    try {
+      this.abortController.abort();
+    } catch {
+      /* no-op: AbortController.abort never throws in practice */
+    }
+    this.abortController = new AbortController();
     if (this.timer) {
       this.options.clearTimer(this.timer);
       this.timer = null;
@@ -342,9 +360,14 @@ export class ReconciliationWorker {
              FROM reconciliation`,
           )
           .get() as { from_day: string | null; to_day: string | null; row_count: number } | undefined;
+        // FEA-1435 review (M2): AVG(ABS()) so positive + negative drift on
+        // different days/models don't silently cancel and surface a misleading
+        // "near-zero average drift" in the Settings panel when both are real.
+        // Drift sign is intentionally discarded for the rolling status view —
+        // per-row sign is still preserved in the diagnostics tab.
         const avgDriftRow = db
           .prepare(
-            `SELECT AVG(drift_pct) AS avg_drift
+            `SELECT AVG(ABS(drift_pct)) AS avg_drift
              FROM reconciliation
              WHERE drift_pct IS NOT NULL`,
           )
@@ -425,10 +448,15 @@ export class ReconciliationWorker {
           | { avg_drift: number | null; row_count: number; total_drift_micro_cents: number | null }
           | undefined;
         // Per-day average drift % for the sparkline. Averaging across vendors+
-        // models per day collapses the multi-row breakdown into a single y-value.
+        // models per day collapses the multi-row breakdown into a single
+        // y-value. FEA-1436 review (M1): AVG(ABS()) so the sparkline matches
+        // the headline at line 419 and a mixed-sign day (e.g. +10% Anthropic /
+        // -10% OpenAI) doesn't show a flat sparkline alongside a non-zero
+        // headline. Drift sign is intentionally discarded for the trend view —
+        // the diagnostics table below the sparkline retains per-row sign.
         const sparkRows = db
           .prepare(
-            `SELECT day, AVG(drift_pct) AS drift_pct
+            `SELECT day, AVG(ABS(drift_pct)) AS drift_pct
              FROM reconciliation
              WHERE day >= date('now', '-30 days')
              GROUP BY day
@@ -595,12 +623,21 @@ export class ReconciliationWorker {
 
       const rows: ReconciliationRow[] = [];
 
+      // M3: capture the controller's signal at the start of the run so a
+      // subsequent stop() (which swaps in a new controller) doesn't desync
+      // the in-flight fetches.
+      const signal = this.abortController.signal;
+
       if (anthropicKey) {
         try {
-          const vendorRows = await this.options.fetchAnthropic(anthropicKey, {
-            startingAt: startDate.toISOString(),
-            endingAt: endDate.toISOString(),
-          });
+          const vendorRows = await this.options.fetchAnthropic(
+            anthropicKey,
+            {
+              startingAt: startDate.toISOString(),
+              endingAt: endDate.toISOString(),
+            },
+            { signal },
+          );
           const localByKey = this.aggregateLocalUsage("anthropic", days);
           rows.push(...joinAnthropic(vendorRows, localByKey, days));
         } catch (err) {
@@ -615,10 +652,14 @@ export class ReconciliationWorker {
         try {
           const startUnix = Math.floor(startDate.getTime() / 1000);
           const endUnix = Math.floor(endDate.getTime() / 1000);
-          const vendorRows = await this.options.fetchOpenAI(openaiKey, {
-            startTime: startUnix,
-            endTime: endUnix,
-          });
+          const vendorRows = await this.options.fetchOpenAI(
+            openaiKey,
+            {
+              startTime: startUnix,
+              endTime: endUnix,
+            },
+            { signal },
+          );
           const localByKey = this.aggregateLocalUsage("openai", days);
           rows.push(...joinOpenAI(vendorRows, localByKey, days));
         } catch (err) {
@@ -651,10 +692,19 @@ export class ReconciliationWorker {
               startingAt: startDate.toISOString(),
               endingAt: endDate.toISOString(),
             },
+            { signal },
           );
           if (analyticsResult.users.length > 0) {
             claudeCodeRows = this.persistClaudeCodeAnalyticsRows(
               analyticsResult.users,
+            );
+          }
+          // H2: surface per-day failures + degraded status so the user can
+          // see why their per-user view is incomplete.
+          if (analyticsResult.errors.length > 0) {
+            gatewayLog.warn(
+              "reconciliation",
+              `claude_code_analytics partial trigger=${meta.trigger} failedDays=${analyticsResult.errors.length} degraded=${analyticsResult.degraded} userRows=${claudeCodeRows}`,
             );
           }
         } catch (err) {
@@ -664,6 +714,18 @@ export class ReconciliationWorker {
             gatewayLog.info(
               "reconciliation",
               `claude_code_analytics unsupported status=${err.status}; capability flag cached, skipping on subsequent runs`,
+            );
+          } else if (err instanceof ClaudeCodeAnalyticsAuthError) {
+            // M6: 401 means the Admin Key lacks Claude Code analytics
+            // permission (valid for the cost report but not for this
+            // endpoint). Cache as terminal capability negative — same as
+            // 403/404 — so subsequent runs don't re-hit and accumulate 401
+            // log noise. The cached flag clears on key rotation via
+            // resetClaudeCodeAnalyticsState().
+            this.setClaudeCodeAnalyticsCapability(false);
+            gatewayLog.info(
+              "reconciliation",
+              `claude_code_analytics auth_denied status=401 (key lacks analytics permission); capability flag cached until key rotation`,
             );
           } else {
             gatewayLog.warn(

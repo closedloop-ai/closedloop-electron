@@ -5,6 +5,7 @@ import {
   AnthropicMalformedResponseError,
   AnthropicNetworkError,
   AnthropicRateLimitedError,
+  AnthropicRedirectError,
   fetchAnthropicCostReport,
 } from "../src/main/anthropic-admin-client.js";
 
@@ -211,6 +212,43 @@ describe("anthropic-admin-client.fetchAnthropicCostReport", () => {
     assert.ok(
       !(caught.stack || "").includes(adminKey),
       "error stack must not contain the admin key",
+    );
+  });
+
+  test("H1: passes redirect:'error' so 3xx never forwards Admin Key to a redirect target", async () => {
+    // The host allowlist enforced at URL construction time only catches an
+    // attacker who already replaced ANTHROPIC_HOST. Once a request is in
+    // flight, undici will (without redirect:'error') follow a 301/302 from
+    // the legitimate host and forward request headers — including the
+    // x-api-key Admin Key — to wherever Location points. We rely on
+    // redirect:'error' to prevent that, surfacing a clean RedirectError.
+    const adminKey = "sk-ant-admin-redirect-test";
+    let redirectInit: RequestInit | undefined;
+    installFetch(async (_input, init) => {
+      redirectInit = init;
+      // Simulate undici's behavior when redirect:"error" is set and the
+      // server returns a 301 to a different host: it throws TypeError
+      // mentioning "redirect" rather than following the Location header.
+      throw new TypeError("fetch failed: unexpected redirect");
+    });
+    let caught: Error | null = null;
+    try {
+      await fetchAnthropicCostReport(adminKey, {
+        startingAt: "2025-08-01T00:00:00Z",
+        endingAt: "2025-08-02T00:00:00Z",
+      });
+    } catch (err) {
+      caught = err as Error;
+    }
+    assert.ok(caught instanceof AnthropicRedirectError, "expected AnthropicRedirectError");
+    // The thrown error must not contain the Admin Key in message or stack.
+    assert.ok(!(caught!.message || "").includes(adminKey), "redirect error must not leak Admin Key in message");
+    assert.ok(!(caught!.stack || "").includes(adminKey), "redirect error must not leak Admin Key in stack");
+    // The fetch must have been issued with redirect:"error".
+    assert.equal(
+      (redirectInit as RequestInit & { redirect?: string })?.redirect,
+      "error",
+      "fetch must be called with redirect:'error'",
     );
   });
 

@@ -71,6 +71,59 @@ describe("reconciliation-cause-hint.classifyReconciliationCause", () => {
     );
   });
 
+  test("M7: Rule 2b does NOT fire on standard-tier Anthropic with 50% ratio (model_alias_mismatch instead)", () => {
+    // Pre-M7 bug: Rule 2b fired for ALL Anthropic rows in the 40-60% ratio
+    // band regardless of serviceTier — misclassifying a standard-tier row
+    // with a 50% local-vs-vendor ratio as batch_api_discount. After M7, the
+    // guard requires serviceTier !== "standard". A 50% ratio on standard
+    // tier means vendor ≈ local / 2, which falls back to model_alias_mismatch
+    // (|drift| > 50%) because the magnitude is consistent with hitting a
+    // different SKU (e.g. Sonnet billed at Opus rates).
+    //
+    // Microcent magnitudes deliberately larger than 100 (the trial-credit
+    // rounding threshold) so Rule 5 doesn't claim the row.
+    assert.equal(
+      classifyReconciliationCause({
+        vendor: "anthropic",
+        localMicroCents: mc(2_000_000),
+        vendorMicroCents: mc(1_000_000),
+        driftPct: -100,
+        serviceTier: "standard",
+      }),
+      "model_alias_mismatch",
+    );
+  });
+
+  test("M7: Rule 2b DOES fire on Anthropic with missing serviceTier in 50% band", () => {
+    // The unknown-tier path is the legit use of Rule 2b — vendor breakdowns
+    // don't always include service_tier, so we still want to catch a
+    // batch-shaped 50% ratio when we have no other signal.
+    assert.equal(
+      classifyReconciliationCause({
+        vendor: "anthropic",
+        localMicroCents: mc(2_000_000),
+        vendorMicroCents: mc(1_000_000),
+        driftPct: -100,
+        // serviceTier intentionally omitted
+      }),
+      "batch_api_discount",
+    );
+  });
+
+  test("M7: Rule 2a still fires on explicit batch tier (unchanged)", () => {
+    // Regression guard — fixing 2b must not regress 2a's explicit batch path.
+    assert.equal(
+      classifyReconciliationCause({
+        vendor: "anthropic",
+        localMicroCents: mc(2_000_000),
+        vendorMicroCents: mc(1_000_000),
+        driftPct: -100,
+        serviceTier: "batch",
+      }),
+      "batch_api_discount",
+    );
+  });
+
   test("priority_tier_premium when vendor > local AND description mentions priority", () => {
     assert.equal(
       classifyReconciliationCause({

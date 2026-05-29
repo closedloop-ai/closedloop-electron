@@ -12,7 +12,10 @@ import {
   joinOpenAI,
   ReconciliationWorker,
 } from "../src/main/reconciliation-worker.js";
-import { ClaudeCodeAnalyticsUnsupportedError } from "../src/main/claude-code-analytics-client.js";
+import {
+  ClaudeCodeAnalyticsAuthError,
+  ClaudeCodeAnalyticsUnsupportedError,
+} from "../src/main/claude-code-analytics-client.js";
 import { microCentsFromInt } from "../src/main/cost-math.js";
 import type { SafeStorageLike } from "../src/main/electron-safe-storage.js";
 import { AnthropicAdminKeyStore } from "../src/main/anthropic-admin-key-store.js";
@@ -263,6 +266,90 @@ describe("reconciliation-worker: ReconciliationWorker integration", () => {
     worker.init();
     assert.equal(scheduled, false, "should not schedule when disabled");
     worker.stop();
+  });
+
+  test("M3: stop() aborts in-flight vendor fetches via AbortSignal", async () => {
+    const dbPath = path.join(tempRoot, "abort.db");
+    const anthropicStore = new AnthropicAdminKeyStore({
+      cwd: tempRoot,
+      name: "abort-an",
+      safeStorage: stubSafeStorage(),
+    });
+    anthropicStore.set("sk-ant-admin-test");
+    // Seed schema so the fetch path can run without a setup gate.
+    const seed = new DatabaseSync(dbPath);
+    try {
+      ensureReconciliationSchema(seed);
+    } finally {
+      seed.close();
+    }
+
+    let observedSignal: AbortSignal | undefined;
+    let fetchResolve: ((value: never) => void) | null = null;
+    let fetchReject: ((err: Error) => void) | null = null;
+    const fetchStarted = new Promise<void>((res) => {
+      fetchResolve = res as never;
+    });
+    // Long-running fetch that only resolves/rejects when triggered.
+    // Captures the signal so we can verify abort propagation.
+    const fetchPromise = new Promise<never>((_resolve, reject) => {
+      fetchReject = reject;
+    });
+
+    const worker = new ReconciliationWorker({
+      dbPath,
+      anthropicKeyStore: anthropicStore,
+      openaiKeyStore: new OpenAIAdminKeyStore({
+        cwd: tempRoot,
+        name: "abort-oa",
+        safeStorage: stubSafeStorage(),
+      }),
+      getIntervalHours: () => 24,
+      isEnabled: () => true,
+      fetchAnthropic: (async (_key: string, _win: unknown, opts?: { signal?: AbortSignal }) => {
+        observedSignal = opts?.signal;
+        // Mark fetch as started so the test can call stop() at the right moment.
+        if (fetchResolve) (fetchResolve as () => void)();
+        // Wire the abort propagation: when the signal aborts, reject this
+        // pending fetch with an AbortError (mirroring undici's behavior).
+        opts?.signal?.addEventListener("abort", () => {
+          if (fetchReject) {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            fetchReject(err);
+          }
+        });
+        await fetchPromise;
+        return [];
+      }) as never,
+      fetchOpenAI: async () => [],
+      fetchClaudeCodeAnalytics: async () => ({
+        users: [],
+        totalCount: 0,
+        errors: [],
+        degraded: false,
+      }),
+      scheduleTimer: () => setTimeout(() => {}, 0) as NodeJS.Timeout,
+    });
+
+    worker.init();
+    // Force a manual run so the long-running fetch is in-flight.
+    await worker.runNow();
+    // Wait for the fetch to actually start.
+    await fetchStarted;
+    assert.ok(observedSignal, "fetcher should receive an AbortSignal from worker");
+    assert.equal(observedSignal!.aborted, false, "signal should not be aborted before stop()");
+
+    const stopStart = Date.now();
+    worker.stop();
+    // Signal must be aborted (the run captured the pre-stop controller, which
+    // stop() then aborts).
+    assert.equal(observedSignal!.aborted, true, "stop() must abort the captured signal");
+    // stop() returns synchronously — no 30s timeout wait.
+    assert.ok(Date.now() - stopStart < 1000, "stop() should not block for the request timeout");
+
+    // Wait briefly for the rejected fetch to bubble up and the run to finish.
+    await new Promise((r) => setTimeout(r, 50));
   });
 
   test("runNow returns queued=true when no run is in flight", async () => {
@@ -617,6 +704,99 @@ describe("reconciliation-worker: FEA-1436 diagnostics queries", () => {
     assert.equal(rollup.sparklineDaily.length, 2);
   });
 
+  test("M2: getStatus().avgDriftPct uses AVG(ABS()) so positive and negative drift don't cancel in the Settings panel", () => {
+    const dbPath = path.join(tempRoot, "status-signed.db");
+    const seed = new DatabaseSync(dbPath);
+    try {
+      ensureReconciliationSchema(seed);
+      const today = new Date().toISOString().slice(0, 10);
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const insert = seed.prepare(
+        `INSERT INTO reconciliation
+         (day, vendor, model, local_estimate_micro_cents, vendor_billed_micro_cents, drift_micro_cents, drift_pct, cause_hint, computed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      // +15% / -15% over two days. Naive AVG(drift_pct) would report 0% in
+      // the Settings panel even though both days are out of tolerance.
+      insert.run(today, "anthropic", "claude-x", 1000, 1150, 150, 15.0, null, "x");
+      insert.run(yesterday, "openai", "gpt-x", 1000, 850, -150, -15.0, null, "x");
+    } finally {
+      seed.close();
+    }
+    const worker = new ReconciliationWorker({
+      dbPath,
+      anthropicKeyStore: new AnthropicAdminKeyStore({
+        cwd: tempRoot,
+        name: "status-signed-an",
+        safeStorage: stubSafeStorage(),
+      }),
+      openaiKeyStore: new OpenAIAdminKeyStore({
+        cwd: tempRoot,
+        name: "status-signed-oa",
+        safeStorage: stubSafeStorage(),
+      }),
+      getIntervalHours: () => 24,
+      isEnabled: () => true,
+    });
+    const status = worker.getStatus();
+    assert.equal(status.rowCount, 2);
+    // AVG(ABS(15), ABS(-15)) = 15, NOT (15 + -15) / 2 = 0.
+    assert.ok(
+      Math.abs((status.avgDriftPct ?? 0) - 15) < 0.01,
+      `expected avg ≈ 15, got ${status.avgDriftPct}`,
+    );
+  });
+
+  test("M1: getDriftRollup sparkline uses AVG(ABS()) so mixed-sign days match the headline", () => {
+    const dbPath = path.join(tempRoot, "sparkline-signed.db");
+    const seed = new DatabaseSync(dbPath);
+    try {
+      ensureReconciliationSchema(seed);
+      const today = new Date().toISOString().slice(0, 10);
+      // A single day with a mixed-sign breakdown across two vendors:
+      // +10% Anthropic + -10% OpenAI. Naive sparkline would show 0%; after
+      // the fix it should show 10% (matching the headline AVG(ABS()).
+      const insert = seed.prepare(
+        `INSERT INTO reconciliation
+         (day, vendor, model, local_estimate_micro_cents, vendor_billed_micro_cents, drift_micro_cents, drift_pct, cause_hint, computed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      insert.run(today, "anthropic", "claude-x", 1000, 1100, 100, 10.0, null, "x");
+      insert.run(today, "openai", "gpt-x", 1000, 900, -100, -10.0, null, "x");
+    } finally {
+      seed.close();
+    }
+    const worker = new ReconciliationWorker({
+      dbPath,
+      anthropicKeyStore: new AnthropicAdminKeyStore({
+        cwd: tempRoot,
+        name: "spark-an",
+        safeStorage: stubSafeStorage(),
+      }),
+      openaiKeyStore: new OpenAIAdminKeyStore({
+        cwd: tempRoot,
+        name: "spark-oa",
+        safeStorage: stubSafeStorage(),
+      }),
+      getIntervalHours: () => 24,
+      isEnabled: () => true,
+    });
+    const rollup = worker.getDriftRollup();
+    assert.equal(rollup.sparklineDaily.length, 1);
+    // AVG(ABS(10), ABS(-10)) = 10, not zero.
+    assert.ok(
+      Math.abs((rollup.sparklineDaily[0].driftPct ?? 0) - 10) < 0.01,
+      `expected sparkline ≈ 10, got ${rollup.sparklineDaily[0].driftPct}`,
+    );
+    // Headline must match (same aggregation now).
+    assert.ok(
+      Math.abs((rollup.avgDriftPct ?? 0) - 10) < 0.01,
+      `expected headline ≈ 10, got ${rollup.avgDriftPct}`,
+    );
+  });
+
   test("getDriftRollup uses AVG(ABS()) so positive and negative drift don't cancel", () => {
     const dbPath = path.join(tempRoot, "rollup-signed.db");
     const seed = new DatabaseSync(dbPath);
@@ -855,6 +1035,73 @@ describe("reconciliation-worker: FEA-1436 Claude Code Analytics integration", ()
     worker.stop();
   });
 
+  test("M6: 401 ClaudeCodeAnalyticsAuthError also sets the capability flag (key valid for costs but lacks analytics permission)", async () => {
+    const dbPath = path.join(tempRoot, "cc-401.db");
+    const seed = new DatabaseSync(dbPath);
+    try {
+      seed.exec(`
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at TEXT, model TEXT);
+        CREATE TABLE token_usage (
+          session_id TEXT, model TEXT,
+          input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+          cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
+          baseline_input INTEGER DEFAULT 0, baseline_output INTEGER DEFAULT 0,
+          baseline_cache_read INTEGER DEFAULT 0, baseline_cache_write INTEGER DEFAULT 0,
+          PRIMARY KEY (session_id, model)
+        );
+        CREATE TABLE model_pricing (
+          model_pattern TEXT PRIMARY KEY,
+          input_per_mtok REAL, output_per_mtok REAL,
+          cache_read_per_mtok REAL, cache_write_per_mtok REAL
+        );
+      `);
+    } finally {
+      seed.close();
+    }
+    const anthropicStore = new AnthropicAdminKeyStore({
+      cwd: tempRoot,
+      name: "cc-401-an",
+      safeStorage: stubSafeStorage(),
+    });
+    anthropicStore.set("sk-ant-admin-test");
+    const worker = new ReconciliationWorker({
+      dbPath,
+      anthropicKeyStore: anthropicStore,
+      openaiKeyStore: new OpenAIAdminKeyStore({
+        cwd: tempRoot,
+        name: "cc-401-oa",
+        safeStorage: stubSafeStorage(),
+      }),
+      getIntervalHours: () => 24,
+      isEnabled: () => true,
+      fetchAnthropic: async () => [],
+      fetchOpenAI: async () => [],
+      fetchClaudeCodeAnalytics: async () => {
+        throw new ClaudeCodeAnalyticsAuthError(401);
+      },
+      scheduleTimer: () => setTimeout(() => {}, 0) as NodeJS.Timeout,
+    });
+    worker.init();
+    await worker.runNow();
+    await new Promise((r) => setTimeout(r, 150));
+    const verify = new DatabaseSync(dbPath);
+    try {
+      const row = verify
+        .prepare(
+          `SELECT value FROM feature_capability WHERE key = 'claude_code_analytics_supported'`,
+        )
+        .get() as { value: string } | undefined;
+      assert.equal(
+        row?.value,
+        "false",
+        "401 must cache the capability negative so subsequent runs short-circuit until key rotation",
+      );
+    } finally {
+      verify.close();
+    }
+    worker.stop();
+  });
+
   test("403 also sets the capability flag (Team key without right permission)", async () => {
     const dbPath = path.join(tempRoot, "cc-403.db");
     const seed = new DatabaseSync(dbPath);
@@ -980,6 +1227,8 @@ describe("reconciliation-worker: FEA-1436 Claude Code Analytics integration", ()
           },
         ],
         totalCount: 2,
+        errors: [],
+        degraded: false,
       }),
       scheduleTimer: () => setTimeout(() => {}, 0) as NodeJS.Timeout,
     });
@@ -1121,6 +1370,8 @@ describe("reconciliation-worker: FEA-1436 Claude Code Analytics integration", ()
           },
         ],
         totalCount: 2,
+        errors: [],
+        degraded: false,
       }),
       scheduleTimer: () => setTimeout(() => {}, 0) as NodeJS.Timeout,
     });

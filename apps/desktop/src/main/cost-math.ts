@@ -153,9 +153,21 @@ export function sumMicroCents(values: MicroCents[]): MicroCents {
 }
 
 /**
- * Drift % is defined as `(vendor - local) / vendor`. We anchor on vendor since
- * vendor is the source of truth — a $5 local guess vs a $4 vendor bill is a
- * +25% drift (we overestimated by a quarter of the true cost).
+ * Drift % is defined as `(vendor - local) / |vendor|`. We anchor on vendor
+ * since vendor is the source of truth.
+ *
+ * **Sign convention:** positive drift means the vendor billed *more* than our
+ * local estimate (we under-estimated); negative drift means the vendor billed
+ * *less* than our local estimate (we over-estimated). Worked examples:
+ *
+ *   - $5 local vs $4 vendor → drift = (4 - 5) / |4| = **-25%** (we over-estimated)
+ *   - $4 local vs $5 vendor → drift = (5 - 4) / |5| = **+20%** (we under-estimated)
+ *   - $5 local vs $5 vendor → drift = 0% (in tolerance)
+ *
+ * The negative-means-over-estimated convention is baked into stored rows and
+ * into the cause-hint classifier's threshold logic (see reconciliation-cause-
+ * hint.ts). Do NOT flip this formula without a data migration + retuning the
+ * classifier — see review finding M4.
  *
  * Returns null when vendor == 0 (any non-zero local against zero vendor is
  * effectively infinite drift — caller surfaces this as a `trial_credit_applied`

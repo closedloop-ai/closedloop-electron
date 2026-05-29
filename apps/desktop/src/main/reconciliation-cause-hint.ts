@@ -72,15 +72,26 @@ export function classifyReconciliationCause(
     return "cache_write_1h_unmodeled";
   }
 
-  // Rule 2 — Anthropic batch service tier applies a ~50% discount.
+  // Rule 2a — Anthropic batch service tier applies a ~50% discount when the
+  // service_tier breakdown explicitly says "batch".
   if (inputs.serviceTier === "batch" && vendor > 0 && local > 0) {
     const ratio = vendor / local;
     if (ratio >= BATCH_RATIO_LOWER && ratio <= BATCH_RATIO_UPPER) {
       return "batch_api_discount";
     }
   }
-  // Anthropic-side independent batch check (e.g. when serviceTier isn't passed)
-  if (inputs.vendor === "anthropic" && vendor > 0 && local > 0) {
+  // Rule 2b — Anthropic batch heuristic when serviceTier is missing/unknown
+  // (the breakdown doesn't always include it). Gated so a *standard*-tier row
+  // landing in the 40-60% ratio band cannot be mis-classified as batch — that
+  // band is real for trial credits or model-alias mismatch on standard tier
+  // too, and 2a already covers the explicit batch case. See review finding M7.
+  if (
+    inputs.vendor === "anthropic" &&
+    vendor > 0 &&
+    local > 0 &&
+    inputs.serviceTier !== "standard" &&
+    inputs.serviceTier !== "batch"
+  ) {
     const ratio = vendor / local;
     if (ratio >= BATCH_RATIO_LOWER && ratio <= BATCH_RATIO_UPPER) {
       return "batch_api_discount";

@@ -6,6 +6,7 @@ import {
   OpenAIMalformedResponseError,
   OpenAINetworkError,
   OpenAIRateLimitedError,
+  OpenAIRedirectError,
 } from "../src/main/openai-admin-client.js";
 
 const originalFetch = globalThis.fetch;
@@ -157,5 +158,111 @@ describe("openai-admin-client.fetchOpenAICosts", () => {
     assert.ok(caught, "expected an error");
     assert.ok(!(caught.message || "").includes(adminKey));
     assert.ok(!(caught.stack || "").includes(adminKey));
+  });
+
+  test("H1: passes redirect:'error' so 3xx never forwards Admin Key to a redirect target", async () => {
+    const adminKey = "sk-admin-redirect-test";
+    let redirectInit: RequestInit | undefined;
+    installFetch(async (_input, init) => {
+      redirectInit = init;
+      throw new TypeError("fetch failed: unexpected redirect");
+    });
+    let caught: Error | null = null;
+    try {
+      await fetchOpenAICosts(adminKey, { startTime: 0, endTime: 86_400 });
+    } catch (err) {
+      caught = err as Error;
+    }
+    assert.ok(caught instanceof OpenAIRedirectError, "expected OpenAIRedirectError");
+    assert.ok(!(caught!.message || "").includes(adminKey), "redirect error must not leak Admin Key in message");
+    assert.ok(!(caught!.stack || "").includes(adminKey), "redirect error must not leak Admin Key in stack");
+    assert.equal(
+      (redirectInit as RequestInit & { redirect?: string })?.redirect,
+      "error",
+      "fetch must be called with redirect:'error'",
+    );
+  });
+
+  test("M5: throws on missing currency field", async () => {
+    installFetch(async () =>
+      jsonResponse({
+        object: "page",
+        data: [
+          {
+            object: "bucket",
+            start_time: 1_756_080_000,
+            end_time: 1_756_166_400,
+            results: [
+              {
+                object: "organization.costs.result",
+                // currency missing entirely
+                amount: { value: 1.0 },
+                line_item: "gpt-4.1",
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    await assert.rejects(
+      () => fetchOpenAICosts("sk-admin-test", { startTime: 0, endTime: 86_400 }),
+      OpenAIMalformedResponseError,
+    );
+  });
+
+  test("M5: throws on non-USD currency to prevent silent 1:1 GBP/EUR treatment", async () => {
+    installFetch(async () =>
+      jsonResponse({
+        object: "page",
+        data: [
+          {
+            object: "bucket",
+            start_time: 1_756_080_000,
+            end_time: 1_756_166_400,
+            results: [
+              {
+                object: "organization.costs.result",
+                amount: { value: 1.0, currency: "gbp" },
+                line_item: "gpt-4.1",
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    await assert.rejects(
+      () => fetchOpenAICosts("sk-admin-test", { startTime: 0, endTime: 86_400 }),
+      OpenAIMalformedResponseError,
+    );
+  });
+
+  test("M5: accepts currency='usd' (lowercase) as the documented contract", async () => {
+    installFetch(async () =>
+      jsonResponse({
+        object: "page",
+        data: [
+          {
+            object: "bucket",
+            start_time: 1_756_080_000,
+            end_time: 1_756_166_400,
+            results: [
+              {
+                object: "organization.costs.result",
+                amount: { value: 1.0, currency: "usd" },
+                line_item: "gpt-4.1",
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    const rows = await fetchOpenAICosts("sk-admin-test", { startTime: 0, endTime: 86_400 });
+    assert.equal(rows.length, 1);
   });
 });

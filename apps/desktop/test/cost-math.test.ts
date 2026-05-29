@@ -125,6 +125,26 @@ describe("cost-math: driftPct", () => {
     const vendor = microCentsFromInt(0);
     assert.equal(driftPct(local, vendor), null);
   });
+
+  test("M4: sign convention is (vendor - local) / |vendor| — positive means we under-estimated", () => {
+    // Pin the sign convention that the cause-hint classifier + Settings panel
+    // depend on. Flipping the formula would invalidate stored rows + drift
+    // thresholds, so this test exists as a tripwire on the contract.
+    //
+    // Worked example from the docstring: $5 local vs $4 vendor → -25%.
+    // 5 USD = 5_000_000 microcents; 4 USD = 4_000_000 microcents.
+    const local5 = microCentsFromInt(5_000_000);
+    const vendor4 = microCentsFromInt(4_000_000);
+    // (4_000_000 - 5_000_000) / 4_000_000 * 100 = -25
+    assert.equal(driftPct(local5, vendor4), -25);
+    // Mirror: $4 local vs $5 vendor → +20% (we under-estimated).
+    const local4 = microCentsFromInt(4_000_000);
+    const vendor5 = microCentsFromInt(5_000_000);
+    assert.equal(driftPct(local4, vendor5), 20);
+    // Equal: 0%.
+    const same = microCentsFromInt(1_000_000);
+    assert.equal(driftPct(same, same), 0);
+  });
 });
 
 describe("cost-math: microCentsFromInt", () => {

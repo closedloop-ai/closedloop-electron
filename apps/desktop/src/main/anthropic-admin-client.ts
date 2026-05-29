@@ -56,6 +56,24 @@ export class AnthropicNetworkError extends Error {
   }
 }
 
+/**
+ * H1: thrown when the API host responds with a 3xx redirect. We pass
+ * `redirect: "error"` to `fetch()` so undici throws instead of silently
+ * following the Location header (which would forward the `x-api-key` Admin
+ * Key to the redirect target). A DNS hijack or compromise of an Anthropic
+ * subdomain could otherwise exfiltrate the Admin Key. The user-facing message
+ * intentionally instructs verifying network configuration rather than echoing
+ * the redirect target.
+ */
+export class AnthropicRedirectError extends Error {
+  readonly name = "AnthropicRedirectError";
+  constructor() {
+    super(
+      "anthropic_admin_redirect: host did not respond directly — verify network configuration",
+    );
+  }
+}
+
 export class AnthropicMalformedResponseError extends Error {
   readonly name = "AnthropicMalformedResponseError";
   constructor() {
@@ -107,6 +125,7 @@ export type AnthropicCostReportRow = AnthropicDailyCostRow;
 export async function fetchAnthropicCostReport(
   adminKey: string,
   window: AnthropicCostReportWindow,
+  options?: { signal?: AbortSignal },
 ): Promise<AnthropicCostReportRow[]> {
   const trimmed = adminKey.trim();
   if (!trimmed) {
@@ -118,7 +137,7 @@ export async function fetchAnthropicCostReport(
   const startedAt = Date.now();
   while (pageCount < MAX_PAGES) {
     const url = buildCostReportUrl(window, nextPage);
-    const body = await fetchWithRetry(url, trimmed);
+    const body = await fetchWithRetry(url, trimmed, options?.signal);
     const parsed = parseCostReport(body);
     rows.push(...parsed.rows);
     pageCount += 1;
@@ -157,12 +176,24 @@ function buildCostReportUrl(
 async function fetchWithRetry(
   url: URL,
   adminKey: string,
+  externalSignal: AbortSignal | undefined,
 ): Promise<unknown> {
   let attempt = 0;
   while (true) {
     attempt += 1;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    // M3: forward an upstream abort (worker.stop()) to this fetch so app quit
+    // doesn't hang waiting for the 30s timeout. The local controller still
+    // owns the timeout-driven abort path.
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+      }
+    }
     let response: Response;
     try {
       response = await fetch(url, {
@@ -175,9 +206,20 @@ async function fetchWithRetry(
           accept: "application/json",
         },
         signal: controller.signal,
+        // H1: never follow 3xx redirects — undici would otherwise forward
+        // `x-api-key` to the redirect target. A DNS hijack of an Anthropic
+        // subdomain could exfiltrate the Admin Key. We catch the resulting
+        // TypeError below and map to AnthropicRedirectError.
+        redirect: "error",
       });
-    } catch {
+    } catch (err) {
       clearTimeout(timeout);
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      }
+      if (isRedirectError(err)) {
+        throw new AnthropicRedirectError();
+      }
       if (attempt >= MAX_RETRIES) {
         throw new AnthropicNetworkError();
       }
@@ -185,6 +227,9 @@ async function fetchWithRetry(
       continue;
     }
     clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
     if (response.status === 401) {
       throw new AnthropicAuthError(401);
     }
@@ -354,4 +399,30 @@ function computeBackoff(attempt: number): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Detects undici's redirect-blocked error. With `redirect: "error"`, undici
+ * throws a `TypeError` whose `cause` (or `message`) mentions "redirect". We
+ * match on both surfaces to stay resilient to undici-version drift.
+ */
+function isRedirectError(err: unknown): boolean {
+  if (!err || typeof err !== "object") {
+    return false;
+  }
+  const e = err as { message?: unknown; cause?: { message?: unknown; code?: unknown } };
+  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  const causeMsg =
+    e.cause && typeof e.cause === "object" && typeof e.cause.message === "string"
+      ? e.cause.message.toLowerCase()
+      : "";
+  const causeCode =
+    e.cause && typeof e.cause === "object" && typeof e.cause.code === "string"
+      ? (e.cause.code as string).toLowerCase()
+      : "";
+  return (
+    msg.includes("redirect") ||
+    causeMsg.includes("redirect") ||
+    causeCode.includes("redirect")
+  );
 }

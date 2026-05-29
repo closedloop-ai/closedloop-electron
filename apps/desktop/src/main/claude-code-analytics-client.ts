@@ -75,6 +75,22 @@ export class ClaudeCodeAnalyticsNetworkError extends Error {
   }
 }
 
+/**
+ * H1: thrown when the API host responds with a 3xx redirect. We pass
+ * `redirect: "error"` to `fetch()` so undici throws instead of silently
+ * forwarding the `x-api-key` Admin Key to the redirect target. The user-facing
+ * message intentionally instructs verifying network configuration rather than
+ * echoing the redirect target.
+ */
+export class ClaudeCodeAnalyticsRedirectError extends Error {
+  readonly name = "ClaudeCodeAnalyticsRedirectError";
+  constructor() {
+    super(
+      "claude_code_analytics_redirect: host did not respond directly — verify network configuration",
+    );
+  }
+}
+
 export class ClaudeCodeAnalyticsMalformedResponseError extends Error {
   readonly name = "ClaudeCodeAnalyticsMalformedResponseError";
   constructor() {
@@ -125,10 +141,41 @@ export interface ClaudeCodeAnalyticsUserDay {
   };
 }
 
+/**
+ * H2: per-day error envelope. A single transient 500 or malformed-JSON day in
+ * a 30-day backfill window shouldn't discard rows collected from healthy days.
+ * Each entry records the day key and a classified error name so the caller
+ * can log structured warnings and surface a "partial" status when the failure
+ * count crosses MAX_PARTIAL_FAILURE_DAYS.
+ */
+export interface ClaudeCodeAnalyticsDayError {
+  day: string;
+  /** Stable error.name from one of the typed error classes above, or "unknown". */
+  errorName: string;
+}
+
 export interface ClaudeCodeAnalyticsResult {
   users: ClaudeCodeAnalyticsUserDay[];
   totalCount: number;
+  /**
+   * H2: days that failed mid-window. Empty when every requested day succeeded.
+   * Auth, unsupported, and redirect errors still abort the whole call — those
+   * are terminal signals about the key/host, not per-day transient failures.
+   */
+  errors: ClaudeCodeAnalyticsDayError[];
+  /**
+   * H2: true when the failure count crossed `MAX_PARTIAL_FAILURE_DAYS`. The
+   * worker surfaces this in the diagnostics status block.
+   */
+  degraded: boolean;
 }
+
+/**
+ * H2: a 30-day backfill with more than this many failed days is "degraded" —
+ * we keep the partial result so successful days aren't lost, but we flag it
+ * loudly so the user knows the per-user view is incomplete.
+ */
+export const MAX_PARTIAL_FAILURE_DAYS = 3;
 
 /**
  * Fetches per-user Claude Code analytics rows for every day in `window`.
@@ -145,6 +192,7 @@ export interface ClaudeCodeAnalyticsResult {
 export async function fetchClaudeCodeAnalytics(
   adminKey: string,
   window: ClaudeCodeAnalyticsWindow,
+  options?: { signal?: AbortSignal },
 ): Promise<ClaudeCodeAnalyticsResult> {
   const trimmed = adminKey.trim();
   if (!trimmed) {
@@ -152,39 +200,67 @@ export async function fetchClaudeCodeAnalytics(
   }
   const days = enumerateDays(window);
   const users: ClaudeCodeAnalyticsUserDay[] = [];
+  const errors: ClaudeCodeAnalyticsDayError[] = [];
   const startedAt = Date.now();
   let totalPages = 0;
   for (const day of days) {
-    let nextPage: string | null = null;
-    let pageCount = 0;
-    while (pageCount < MAX_PAGES_PER_DAY) {
-      const url = buildAnalyticsUrl(day, nextPage);
-      const body = await fetchWithRetry(url, trimmed);
-      const parsed = parseAnalyticsPage(body, day);
-      users.push(...parsed.rows);
-      pageCount += 1;
-      totalPages += 1;
-      if (!parsed.hasMore || !parsed.nextPage) {
-        break;
+    // H2: per-day try/catch so a single bad day in a 30-day window doesn't
+    // discard rows already collected from earlier successful days. Auth /
+    // Unsupported / Redirect errors are terminal (the key or host is broken)
+    // and re-thrown — partial-failure isolation only covers transient day-
+    // shaped issues (5xx, 429-after-retries, malformed JSON, network blip).
+    try {
+      let nextPage: string | null = null;
+      let pageCount = 0;
+      while (pageCount < MAX_PAGES_PER_DAY) {
+        const url = buildAnalyticsUrl(day, nextPage);
+        const body = await fetchWithRetry(url, trimmed, options?.signal);
+        const parsed = parseAnalyticsPage(body, day);
+        users.push(...parsed.rows);
+        pageCount += 1;
+        totalPages += 1;
+        if (!parsed.hasMore || !parsed.nextPage) {
+          break;
+        }
+        nextPage = parsed.nextPage;
       }
-      nextPage = parsed.nextPage;
-    }
-    // FEA-1436: surface when we hit the per-day pagination ceiling so the
-    // user knows the per-user attribution may be incomplete. The cap is a
-    // safety net against malformed cursors; if a real org actually exceeds
-    // 50 × 1000 = 50_000 users on a single day, we want to know about it.
-    if (pageCount >= MAX_PAGES_PER_DAY) {
+      // FEA-1436: surface when we hit the per-day pagination ceiling so the
+      // user knows the per-user attribution may be incomplete. The cap is a
+      // safety net against malformed cursors; if a real org actually exceeds
+      // 50 × 1000 = 50_000 users on a single day, we want to know about it.
+      if (pageCount >= MAX_PAGES_PER_DAY) {
+        gatewayLog.warn(
+          "claude-code-analytics",
+          `pagination ceiling hit day=${day} pages=${pageCount}; per-user view may be incomplete`,
+        );
+      }
+    } catch (err) {
+      // Terminal errors abort the whole window — they're not per-day signals.
+      if (
+        err instanceof ClaudeCodeAnalyticsAuthError ||
+        err instanceof ClaudeCodeAnalyticsUnsupportedError ||
+        err instanceof ClaudeCodeAnalyticsRedirectError
+      ) {
+        throw err;
+      }
+      const errorName =
+        err && typeof err === "object" && "name" in err && typeof (err as { name?: unknown }).name === "string"
+          ? ((err as { name: string }).name)
+          : "unknown";
+      errors.push({ day, errorName });
       gatewayLog.warn(
         "claude-code-analytics",
-        `pagination ceiling hit day=${day} pages=${pageCount}; per-user view may be incomplete`,
+        `per-day fetch failed day=${day} error=${errorName}; continuing with remaining days`,
       );
+      continue;
     }
   }
+  const degraded = errors.length > MAX_PARTIAL_FAILURE_DAYS;
   gatewayLog.info(
     "claude-code-analytics",
-    `claude_code_usage ok status=200 durationMs=${Date.now() - startedAt} userRows=${users.length} pages=${totalPages} days=${days.length}`,
+    `claude_code_usage ok status=200 durationMs=${Date.now() - startedAt} userRows=${users.length} pages=${totalPages} days=${days.length} failedDays=${errors.length} degraded=${degraded}`,
   );
-  return { users, totalCount: users.length };
+  return { users, totalCount: users.length, errors, degraded };
 }
 
 function buildAnalyticsUrl(day: string, nextPage: string | null): URL {
@@ -202,12 +278,25 @@ function buildAnalyticsUrl(day: string, nextPage: string | null): URL {
   return url;
 }
 
-async function fetchWithRetry(url: URL, adminKey: string): Promise<unknown> {
+async function fetchWithRetry(
+  url: URL,
+  adminKey: string,
+  externalSignal: AbortSignal | undefined,
+): Promise<unknown> {
   let attempt = 0;
   while (true) {
     attempt += 1;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    // M3: forward upstream abort (worker.stop()) into this fetch.
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+      }
+    }
     let response: Response;
     try {
       response = await fetch(url, {
@@ -219,9 +308,19 @@ async function fetchWithRetry(url: URL, adminKey: string): Promise<unknown> {
           accept: "application/json",
         },
         signal: controller.signal,
+        // H1: never follow 3xx redirects — undici would otherwise forward
+        // the `x-api-key` Admin Key to the redirect target. We catch the
+        // resulting TypeError below and map to ClaudeCodeAnalyticsRedirectError.
+        redirect: "error",
       });
-    } catch {
+    } catch (err) {
       clearTimeout(timeout);
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      }
+      if (isRedirectError(err)) {
+        throw new ClaudeCodeAnalyticsRedirectError();
+      }
       if (attempt >= MAX_RETRIES) {
         throw new ClaudeCodeAnalyticsNetworkError();
       }
@@ -229,6 +328,9 @@ async function fetchWithRetry(url: URL, adminKey: string): Promise<unknown> {
       continue;
     }
     clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
     if (response.status === 401) {
       throw new ClaudeCodeAnalyticsAuthError(401);
     }
@@ -406,4 +508,29 @@ function computeBackoff(attempt: number): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Detects undici's redirect-blocked error from `redirect: "error"`. Matches on
+ * both message and cause to stay resilient to undici-version drift.
+ */
+function isRedirectError(err: unknown): boolean {
+  if (!err || typeof err !== "object") {
+    return false;
+  }
+  const e = err as { message?: unknown; cause?: { message?: unknown; code?: unknown } };
+  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  const causeMsg =
+    e.cause && typeof e.cause === "object" && typeof e.cause.message === "string"
+      ? e.cause.message.toLowerCase()
+      : "";
+  const causeCode =
+    e.cause && typeof e.cause === "object" && typeof e.cause.code === "string"
+      ? (e.cause.code as string).toLowerCase()
+      : "";
+  return (
+    msg.includes("redirect") ||
+    causeMsg.includes("redirect") ||
+    causeCode.includes("redirect")
+  );
 }
