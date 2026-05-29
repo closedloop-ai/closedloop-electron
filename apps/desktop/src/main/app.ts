@@ -68,6 +68,7 @@ import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
 import { AgentSessionSyncService } from "./agent-session-sync-service.js";
+import { registerCostPricingIpc } from "./cost-pricing-ipc.js";
 import {
   isAgentMonitorHooksEnabled,
   setAgentMonitorHooksEnabled,
@@ -2419,6 +2420,9 @@ export class DesktopApplication {
 
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-app-version", () => app.getVersion());
+    // FEA-1433: Settings → Pricing diagnostic + add-rule IPC. Proxies to the
+    // sidecar so the model_pricing table stays the single source of truth.
+    registerCostPricingIpc(this.agentMonitor);
     ipcMain.handle("desktop:get-agent-monitor-url", () => ({
       url: this.agentMonitor.getUrl(),
       ready: this.agentMonitor.isReady(),

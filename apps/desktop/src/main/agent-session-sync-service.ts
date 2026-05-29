@@ -839,20 +839,31 @@ export function loadSyncedSessions(
     const attribution = resolveSessionAttribution(row.cwd, cache);
     const tokenUsageByModel: SyncedAgentSessionTokenUsage[] = (
       tokenUsageBySessionId.get(id) ?? []
-    ).map((tokenRow) => ({
-      model: tokenRow.model,
-      inputTokens: tokenRow.input_tokens,
-      outputTokens: tokenRow.output_tokens,
-      cacheReadTokens: tokenRow.cache_read_tokens,
-      cacheWriteTokens: tokenRow.cache_write_tokens,
-      // FEA-1432: token_usage carries a single cache-write column today; the
-      // parser cannot recover the 5-min vs 1-hour split from the response
-      // usage block (tier is request-side). Always emit 0 here so v2
-      // payloads stay shape-correct and the field is plumbed end-to-end for
-      // FEA-1440. Cost compute below honors any positive value.
-      cacheWrite1hTokens: 0,
-      estimatedCostUsd: estimateTokenUsageCostUsd(tokenRow, pricingRows),
-    }));
+    ).map((tokenRow) => {
+      // FEA-1433: pick `null` cost (not zero) when the model has no
+      // pricing match, so downstream consumers can distinguish "no data"
+      // from "genuinely zero". `priced=false` is the diagnostic signal
+      // surfaced in the Sessions UI and the Settings → Pricing surface.
+      const { priced, costUsd } = estimateTokenUsageCostBreakdown(
+        tokenRow,
+        pricingRows,
+      );
+      return {
+        model: tokenRow.model,
+        inputTokens: tokenRow.input_tokens,
+        outputTokens: tokenRow.output_tokens,
+        cacheReadTokens: tokenRow.cache_read_tokens,
+        cacheWriteTokens: tokenRow.cache_write_tokens,
+        // FEA-1432: token_usage carries a single cache-write column today; the
+        // parser cannot recover the 5-min vs 1-hour split from the response
+        // usage block (tier is request-side). Always emit 0 here so v2
+        // payloads stay shape-correct and the field is plumbed end-to-end for
+        // FEA-1440. Cost compute below honors any positive value.
+        cacheWrite1hTokens: 0,
+        estimatedCostUsd: costUsd,
+        priced,
+      };
+    });
 
     return [
       {
@@ -902,11 +913,35 @@ export function estimateTokenUsageCostUsd(
   tokenUsage: TokenUsageRow & { cache_write_1h_tokens?: number },
   pricingRows: PricingRow[],
 ): number {
+  // Backward-compatible wrapper preserved for legacy callers (tests + any
+  // downstream that imports this directly). Maps the FEA-1433 nullable
+  // breakdown back to the original "0 on no match" contract.
+  return estimateTokenUsageCostBreakdown(tokenUsage, pricingRows).costUsd ?? 0;
+}
+
+/**
+ * FEA-1433: distinguish "no pricing rule matched" from "genuinely zero cost".
+ *
+ *   priced=false  ⇒ no `model_pricing` row matched `tokenUsage.model`. The
+ *                   returned costUsd is `null` so the Sessions UI can render
+ *                   an em-dash + tooltip pointing to Settings → Pricing
+ *                   instead of silently fabricating $0.
+ *   priced=true   ⇒ a rule matched. costUsd is the rounded USD estimate
+ *                   (which may legitimately be 0 if all token counts are 0).
+ *
+ * Producers of `SyncedAgentSessionTokenUsage` (cloud sync) and consumers of
+ * the sidecar Sessions list both branch on this — see Sessions.tsx overlay
+ * and the Settings → Pricing diagnostic surface.
+ */
+export function estimateTokenUsageCostBreakdown(
+  tokenUsage: TokenUsageRow & { cache_write_1h_tokens?: number },
+  pricingRows: PricingRow[],
+): { priced: boolean; costUsd: number | null } {
   const pricing = pricingRows.find((row) =>
     sqliteLikeMatch(tokenUsage.model, row.model_pattern),
   );
   if (!pricing) {
-    return 0;
+    return { priced: false, costUsd: null };
   }
 
   // FEA-1432: cache_write_per_mtok is the 5-minute ephemeral rate;
@@ -917,7 +952,7 @@ export function estimateTokenUsageCostUsd(
   // the additional term contributes nothing.
   const cacheWrite1hTokens = tokenUsage.cache_write_1h_tokens ?? 0;
   const cacheWrite1hRate = pricing.cache_write_1h_per_mtok ?? 0;
-  return roundUsd(
+  const costUsd = roundUsd(
     (tokenUsage.input_tokens * pricing.input_per_mtok +
       tokenUsage.output_tokens * pricing.output_per_mtok +
       tokenUsage.cache_read_tokens * pricing.cache_read_per_mtok +
@@ -925,6 +960,7 @@ export function estimateTokenUsageCostUsd(
       cacheWrite1hTokens * cacheWrite1hRate) /
       1_000_000,
   );
+  return { priced: true, costUsd };
 }
 
 function selectRowsByIds<T>(

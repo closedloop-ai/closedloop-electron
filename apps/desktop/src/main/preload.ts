@@ -174,6 +174,31 @@ const desktopApi = {
   getManagedKeyHintState: () =>
     ipcRenderer.invoke("desktop:get-managed-key-hint-state") as Promise<ManagedKeyHintState>,
   /**
+   * FEA-1433: list distinct models seen in the sidecar's `token_usage` table
+   * that do not match any `model_pricing` row. Resolves to `null` when the
+   * sidecar is unreachable so the renderer can show a friendly empty state.
+   */
+  listUnpricedModels: () =>
+    ipcRenderer.invoke("desktop:list-unpriced-models") as Promise<{
+      unpriced_models: Array<{
+        model: string;
+        input_tokens: number;
+        output_tokens: number;
+        cache_read_tokens: number;
+        cache_write_tokens: number;
+      }>;
+    } | null>,
+  /**
+   * FEA-1433: upsert a pricing rule via the sidecar's `PUT /api/pricing`.
+   * Main-process Zod validation rejects malformed payloads with a structured
+   * `{ ok: false, error }` response.
+   */
+  addPricingRule: (payload: unknown) =>
+    ipcRenderer.invoke("cost-pricing:add-rule", payload) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  /**
    * Dismisses the managed-key revival limitation hint (D5).
    * The main process records the current provenance from apiKeyStore.
    * The renderer does not supply any arguments — provenance is main-process-only.

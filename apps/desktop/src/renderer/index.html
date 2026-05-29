@@ -3422,6 +3422,7 @@
           <button data-settings-tab="security">Security</button>
           <button data-settings-tab="policies">Policies</button>
           <button data-settings-tab="binary-paths">CLI Tools</button>
+          <button data-settings-tab="pricing">Pricing</button>
           <button data-settings-tab="feature-flags">Labs</button>
         </div>
 
@@ -3781,6 +3782,23 @@
             <button id="savePolicies">Save</button>
             <button class="secondary" id="reloadPolicies">Reload</button>
             <p class="muted" id="policiesMessage"></p>
+          </div>
+        </div>
+
+        <!-- Pricing sub-tab (FEA-1433) -->
+        <div id="settings-pricing" class="settings-sub-panel">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Models Without Pricing</h3>
+            <p class="settings-group-desc">
+              Recent models seen in the Agent Dashboard whose ID does not match any pricing rule.
+              Add a rule below to make cost estimates appear in the Sessions list. Rates are <code>$/Mtok</code>
+              (USD per million tokens) — copy from your provider's pricing page.
+            </p>
+            <div id="unpricedModelsList" class="muted">Loading…</div>
+            <div id="pricingMessage" class="muted" role="status" aria-live="polite" style="margin-top:8px"></div>
+            <div class="actions" style="margin-top: 12px">
+              <button class="secondary" id="refreshUnpricedModels" type="button">Refresh</button>
+            </div>
           </div>
         </div>
 
@@ -4462,6 +4480,9 @@
         if (tabName === "feature-flags" && typeof renderFeatureFlagsPanel === "function") {
           void renderFeatureFlagsPanel();
         }
+        if (tabName === "pricing" && typeof renderPricingPanel === "function") {
+          void renderPricingPanel();
+        }
       }
 
       settingsSubTabs.forEach((btn) => {
@@ -4574,6 +4595,158 @@
         if (flagsPanel?.classList.contains("active")) {
           void renderFeatureFlagsPanel();
         }
+      });
+
+      // ── Pricing panel (FEA-1433) ─────────────────────────────────────
+      // Lists the most-recent N distinct models seen in the agent dashboard
+      // database whose ID does not match any model_pricing row. Each row
+      // expands to a $/Mtok form that submits via the cost-pricing:add-rule
+      // IPC channel — the main process proxies to the sidecar's PUT /api/pricing
+      // and the panel refreshes on success. Empty list ⇒ everything is priced
+      // (or there is no token usage yet); we show a friendly empty state in
+      // either case so the user understands why no rows appear.
+      const unpricedModelsList = document.getElementById("unpricedModelsList");
+      const pricingMessage = document.getElementById("pricingMessage");
+      const refreshUnpricedModelsBtn = document.getElementById("refreshUnpricedModels");
+
+      function escapePricingHtml(value) {
+        return String(value).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        }[c]));
+      }
+
+      async function renderPricingPanel() {
+        if (!unpricedModelsList) return;
+        if (pricingMessage) pricingMessage.textContent = "";
+        unpricedModelsList.innerHTML = '<p class="muted">Loading…</p>';
+        try {
+          const result = await api.listUnpricedModels();
+          if (!result || !Array.isArray(result.unpriced_models)) {
+            unpricedModelsList.innerHTML = '<p class="muted">Could not reach the Agent Dashboard sidecar. Make sure it is enabled in Labs.</p>';
+            return;
+          }
+          if (result.unpriced_models.length === 0) {
+            unpricedModelsList.innerHTML = '<p class="muted">No unpriced models in recent sessions. The bundled rate card covers every model seen so far.</p>';
+            return;
+          }
+          unpricedModelsList.innerHTML = "";
+          for (const entry of result.unpriced_models) {
+            const totalTok = (entry.input_tokens || 0) + (entry.output_tokens || 0);
+            const wrapper = document.createElement("div");
+            wrapper.className = "settings-group";
+            wrapper.style.marginBottom = "12px";
+            const safeModel = escapePricingHtml(entry.model);
+            wrapper.innerHTML = `
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px">
+                <div>
+                  <p style="margin:0; font-weight:600"><code>${safeModel}</code></p>
+                  <p class="muted" style="margin:4px 0 0; font-size:12px">${totalTok.toLocaleString()} tokens recorded · no pricing rule matched</p>
+                </div>
+                <button type="button" class="secondary" data-pricing-expand="${safeModel}">Add pricing rule…</button>
+              </div>
+              <div data-pricing-form="${safeModel}" style="display:none; margin-top:12px; padding-top:12px; border-top:1px dashed var(--border)">
+                <div class="row">
+                  <label>Match pattern</label>
+                  <input data-field="pattern" type="text" value="${safeModel}" placeholder="e.g. claude-opus-4-%" />
+                  <p class="field-help">SQLite LIKE pattern. <code>%</code> matches any sequence. Default keeps the exact model id.</p>
+                </div>
+                <div class="row">
+                  <label>Display name</label>
+                  <input data-field="display" type="text" value="${safeModel}" />
+                </div>
+                <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:12px">
+                  <div class="row" style="margin-bottom:0">
+                    <label>Input ($/Mtok)</label>
+                    <input data-field="input" type="number" min="0" step="0.01" value="0" />
+                  </div>
+                  <div class="row" style="margin-bottom:0">
+                    <label>Output ($/Mtok)</label>
+                    <input data-field="output" type="number" min="0" step="0.01" value="0" />
+                  </div>
+                  <div class="row" style="margin-bottom:0">
+                    <label>Cache read ($/Mtok)</label>
+                    <input data-field="cache_read" type="number" min="0" step="0.01" value="0" />
+                  </div>
+                  <div class="row" style="margin-bottom:0">
+                    <label>Cache write — 5min ($/Mtok)</label>
+                    <input data-field="cache_write" type="number" min="0" step="0.01" value="0" />
+                  </div>
+                  <div class="row" style="margin-bottom:0">
+                    <label>Cache write — 1h ($/Mtok)</label>
+                    <input data-field="cache_write_1h" type="number" min="0" step="0.01" value="0" />
+                  </div>
+                </div>
+                <div class="actions" style="margin-top:12px">
+                  <button type="button" data-pricing-save="${safeModel}">Save rule</button>
+                  <button type="button" class="secondary" data-pricing-cancel="${safeModel}">Cancel</button>
+                </div>
+              </div>
+            `;
+            unpricedModelsList.appendChild(wrapper);
+          }
+
+          unpricedModelsList.querySelectorAll("button[data-pricing-expand]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              const model = btn.getAttribute("data-pricing-expand") || "";
+              const form = unpricedModelsList.querySelector(`[data-pricing-form="${CSS.escape(model)}"]`);
+              if (form instanceof HTMLElement) form.style.display = "block";
+            });
+          });
+          unpricedModelsList.querySelectorAll("button[data-pricing-cancel]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              const model = btn.getAttribute("data-pricing-cancel") || "";
+              const form = unpricedModelsList.querySelector(`[data-pricing-form="${CSS.escape(model)}"]`);
+              if (form instanceof HTMLElement) form.style.display = "none";
+            });
+          });
+          unpricedModelsList.querySelectorAll("button[data-pricing-save]").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+              const model = btn.getAttribute("data-pricing-save") || "";
+              const form = unpricedModelsList.querySelector(`[data-pricing-form="${CSS.escape(model)}"]`);
+              if (!(form instanceof HTMLElement)) return;
+              const readField = (name) => {
+                const input = form.querySelector(`input[data-field="${name}"]`);
+                if (input instanceof HTMLInputElement) return input.value;
+                return "";
+              };
+              const payload = {
+                model_pattern: readField("pattern").trim(),
+                display_name: readField("display").trim() || readField("pattern").trim(),
+                input_per_mtok: Number(readField("input")),
+                output_per_mtok: Number(readField("output")),
+                cache_read_per_mtok: Number(readField("cache_read")),
+                cache_write_per_mtok: Number(readField("cache_write")),
+                cache_write_1h_per_mtok: Number(readField("cache_write_1h")),
+              };
+              if (pricingMessage) pricingMessage.textContent = "";
+              try {
+                const res = await api.addPricingRule(payload);
+                if (res && res.ok) {
+                  if (pricingMessage) pricingMessage.textContent = `Saved rule for ${model}.`;
+                  await renderPricingPanel();
+                } else {
+                  if (pricingMessage) {
+                    pricingMessage.textContent = (res && res.error) || "Failed to save pricing rule.";
+                  }
+                }
+              } catch (err) {
+                if (pricingMessage) {
+                  pricingMessage.textContent = err instanceof Error ? err.message : "Failed to save pricing rule.";
+                }
+              }
+            });
+          });
+        } catch (err) {
+          unpricedModelsList.innerHTML = '<p class="muted">Failed to load unpriced models.</p>';
+        }
+      }
+
+      refreshUnpricedModelsBtn?.addEventListener("click", () => {
+        void renderPricingPanel();
       });
 
       const relayOrigin = document.getElementById("relayOrigin");

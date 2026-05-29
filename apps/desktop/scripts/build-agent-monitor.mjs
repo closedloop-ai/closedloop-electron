@@ -1650,6 +1650,180 @@ function patchSessionsRoute(file) {
     );
   }
 
+  // FEA-1433: surface the "no pricing rule matched" diagnostic in the Sessions
+  // list. Upstream's `calculateCost` returns 0 when a rule is missing, which
+  // collapses three distinct states into one ("$0 cost", "no tokens yet", "no
+  // rule"). We swap the two list-handler cost assignments for the FEA-1433
+  // helper that returns `{ total_cost, unpriced_models }`, then null out `cost`
+  // when every model the session used is unpriced so the renderer can show
+  // "—" with a tooltip instead of a fake $0.00.
+  if (!source.includes("calculateSessionCostFea1433")) {
+    const importNeedle = 'const { calculateCost } = require("./pricing");';
+    if (!source.includes(importNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the pricing require anchor (FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      importNeedle,
+      [
+        importNeedle,
+        "",
+        "// FEA-1433: classify session cost as null when every model is unpriced.",
+        "function calculateSessionCostFea1433(sessionTokens, rules) {",
+        "  if (!sessionTokens || sessionTokens.length === 0) {",
+        '    return { cost: 0, unpriced_models: [], priced: true };',
+        "  }",
+        "  const result = calculateCost(sessionTokens, rules);",
+        "  const unpriced_models = result.breakdown",
+        "    .filter((b) => !b.matched_rule)",
+        "    .map((b) => b.model)",
+        "    .filter((m, i, a) => a.indexOf(m) === i);",
+        "  const anyPriced = result.breakdown.some((b) => b.matched_rule);",
+        "  if (!anyPriced && unpriced_models.length > 0) {",
+        "    return { cost: null, unpriced_models, priced: false };",
+        "  }",
+        "  return { cost: result.total_cost, unpriced_models, priced: true };",
+        "}",
+      ].join("\n"),
+    );
+
+    // List handler — "price"-sort branch.
+    const priceSortNeedle = [
+      "        for (const row of chunk) {",
+      "          const sessionTokens = tokensBySession[row.id];",
+      "          row.cost = sessionTokens ? calculateCost(sessionTokens, rules).total_cost : 0;",
+      "        }",
+    ].join("\n");
+    if (!source.includes(priceSortNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the price-sort cost assignment block (FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      priceSortNeedle,
+      [
+        "        for (const row of chunk) {",
+        "          const sessionTokens = tokensBySession[row.id];",
+        "          const fea1433 = calculateSessionCostFea1433(sessionTokens, rules);",
+        "          row.cost = fea1433.cost;",
+        "          row.unpriced_models = fea1433.unpriced_models;",
+        "          row.priced = fea1433.priced;",
+        "        }",
+      ].join("\n"),
+    );
+
+    // Price sort comparator must keep null at the end regardless of direction.
+    const sortNeedle = [
+      "      allRows.sort((a, b) => {",
+      "        return sortDesc ? b.cost - a.cost : a.cost - b.cost;",
+      "      });",
+    ].join("\n");
+    if (!source.includes(sortNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the price-sort comparator (FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      sortNeedle,
+      [
+        "      // FEA-1433: null cost (= no rule matched) sorts to the end in both",
+        "      // directions so the diagnostic rows stay visible without polluting",
+        "      // the top of an ascending sort.",
+        "      allRows.sort((a, b) => {",
+        "        if (a.cost == null && b.cost == null) return 0;",
+        "        if (a.cost == null) return 1;",
+        "        if (b.cost == null) return -1;",
+        "        return sortDesc ? b.cost - a.cost : a.cost - b.cost;",
+        "      });",
+      ].join("\n"),
+    );
+
+    // List handler — time/duration branch.
+    const timeSortNeedle = [
+      "      for (const row of rows) {",
+      "        const sessionTokens = tokensBySession[row.id];",
+      "        row.cost = sessionTokens ? calculateCost(sessionTokens, rules).total_cost : 0;",
+      "      }",
+    ].join("\n");
+    if (!source.includes(timeSortNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the time-sort cost assignment block (FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      timeSortNeedle,
+      [
+        "      for (const row of rows) {",
+        "        const sessionTokens = tokensBySession[row.id];",
+        "        const fea1433 = calculateSessionCostFea1433(sessionTokens, rules);",
+        "        row.cost = fea1433.cost;",
+        "        row.unpriced_models = fea1433.unpriced_models;",
+        "        row.priced = fea1433.priced;",
+        "      }",
+      ].join("\n"),
+    );
+  }
+
+  // FEA-1433: extend the session detail endpoint with a cost_breakdown block
+  // so the Settings → Pricing surface and any future SessionDetail overlay can
+  // reuse the same shape (model × per-category rates × dollar amount + a
+  // priced flag for the diagnostic banner).
+  if (!source.includes('"cost_breakdown"')) {
+    const detailNeedle = [
+      'router.get("/:id", (req, res) => {',
+      "  const session = stmts.getSession.get(req.params.id);",
+      "  if (!session) {",
+      '    return res.status(404).json({ error: { code: "NOT_FOUND", message: "Session not found" } });',
+      "  }",
+      "  const agents = stmts.listAgentsBySession.all(req.params.id);",
+      "  const events = stmts.listEventsBySession.all(req.params.id);",
+      "  res.json({ session, agents, events });",
+      "});",
+    ].join("\n");
+    if (!source.includes(detailNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the session detail handler (FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      detailNeedle,
+      [
+        'router.get("/:id", (req, res) => {',
+        "  const session = stmts.getSession.get(req.params.id);",
+        "  if (!session) {",
+        '    return res.status(404).json({ error: { code: "NOT_FOUND", message: "Session not found" } });',
+        "  }",
+        "  const agents = stmts.listAgentsBySession.all(req.params.id);",
+        "  const events = stmts.listEventsBySession.all(req.params.id);",
+        "  // FEA-1433: attach a per-model cost_breakdown so the desktop Settings",
+        "  // → Pricing surface can render \"Estimated cost unavailable — model",
+        "  // not priced\" inline without an extra round trip. The breakdown",
+        "  // mirrors the /api/pricing/cost/:sessionId response shape so any",
+        "  // future SessionDetail overlay can reuse a single render path.",
+        "  const tokenRows = stmts.getTokensBySession.all(req.params.id);",
+        "  const rules = stmts.listPricing.all();",
+        "  const costSummary = calculateSessionCostFea1433(tokenRows, rules);",
+        "  let cost_breakdown = null;",
+        "  if (tokenRows.length > 0) {",
+        "    const detailed = calculateCost(tokenRows, rules);",
+        "    cost_breakdown = {",
+        "      total_cost: costSummary.cost,",
+        "      priced: costSummary.priced,",
+        "      unpriced_models: costSummary.unpriced_models,",
+        "      breakdown: detailed.breakdown.map((row) => ({",
+        "        ...row,",
+        "        priced: row.matched_rule != null,",
+        "        cost: row.matched_rule != null ? row.cost : null,",
+        "      })),",
+        "    };",
+        "  }",
+        "  res.json({ session, agents, events, cost_breakdown });",
+        "});",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -2093,6 +2267,68 @@ function patchPricingRoute(file) {
         '      const pattern = String(p.model_pattern || "").toLowerCase().replace(/%/g, ".*");',
         '      return new RegExp("^" + pattern + "$").test(modelId);',
         "    });",
+      ].join("\n"),
+    );
+  }
+
+  // FEA-1433: diagnostic endpoint surfacing the last N distinct models seen in
+  // `token_usage` whose model id does NOT match any `model_pricing` row.
+  // Powers the Settings → Pricing surface in the desktop renderer so users
+  // can add manual rates for vendors LiteLLM doesn't cover (mostly local +
+  // OpenCode hosted models). LIKE-matching (via stmts.matchPricing) so a
+  // `claude-opus-4-%` rule covers every dated variant without listing each.
+  if (!source.includes('"/diagnostics/unpriced-models"')) {
+    // Anchor: upstream tail is "module.exports = router;\nmodule.exports.calculateCost = calculateCost;"
+    // We splice the new route + its require dependencies above that pair so
+    // the order of the existing exports is preserved.
+    const exportNeedle = [
+      "module.exports = router;",
+      "module.exports.calculateCost = calculateCost;",
+    ].join("\n");
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the module.exports anchor (FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        '// FEA-1433: list distinct unpriced models for the desktop Settings →',
+        '// Pricing surface. Bounded result so a runaway `token_usage` table',
+        '// can\'t bloat the response. Most-recently-seen first via MAX(rowid).',
+        'router.get("/diagnostics/unpriced-models", (req, res) => {',
+        "  const limit = Math.min(parseInt(req.query.limit, 10) || 20, 200);",
+        "  const rows = db",
+        "    .prepare(",
+        "      `SELECT model, MAX(rowid) as last_seen_rowid,",
+        "         SUM(input_tokens + baseline_input) as input_tokens,",
+        "         SUM(output_tokens + baseline_output) as output_tokens,",
+        "         SUM(cache_read_tokens + baseline_cache_read) as cache_read_tokens,",
+        "         SUM(cache_write_tokens + baseline_cache_write) as cache_write_tokens",
+        "       FROM token_usage",
+        "       WHERE model IS NOT NULL AND model != ''",
+        "       GROUP BY model",
+        "       ORDER BY last_seen_rowid DESC",
+        "       LIMIT ?`",
+        "    )",
+        "    .all(limit * 4);",
+        "  const result = [];",
+        "  for (const row of rows) {",
+        "    const match = stmts.matchPricing.get(row.model);",
+        "    if (match) continue;",
+        "    result.push({",
+        "      model: row.model,",
+        "      input_tokens: row.input_tokens,",
+        "      output_tokens: row.output_tokens,",
+        "      cache_read_tokens: row.cache_read_tokens,",
+        "      cache_write_tokens: row.cache_write_tokens,",
+        "    });",
+        "    if (result.length >= limit) break;",
+        "  }",
+        "  res.json({ unpriced_models: result });",
+        "});",
+        "",
+        exportNeedle,
       ].join("\n"),
     );
   }
@@ -3221,6 +3457,16 @@ function patchClientSource() {
       guard: "harness?: string | null",
       find: "  cost?: number;",
       replace: "  cost?: number;\n  harness?: string | null;",
+    },
+    // FEA-1433: widen Session.cost to allow null (sidecar returns null when
+    // every model in the session is unpriced) and add unpriced_models for
+    // the tooltip on the Cost column.
+    {
+      rel: "src/lib/types.ts",
+      guard: "unpriced_models?: string[]",
+      find: "  cost?: number;\n  harness?: string | null;",
+      replace:
+        "  cost?: number | null;\n  unpriced_models?: string[] | null;\n  harness?: string | null;",
     },
     {
       rel: "src/lib/api.ts",

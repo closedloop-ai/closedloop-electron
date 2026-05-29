@@ -4,6 +4,13 @@
 //      ephemeral cache tier, split out from cacheWriteTokens which now means
 //      the 5-minute tier specifically).
 //
+// Additive (no schema bump):
+//   FEA-1433 — `tokenUsageByModel[].priced` (whether the model matched a
+//   `model_pricing` row at compute time). Missing means "assume priced" so
+//   legacy v1/v2 payloads decode unchanged. `estimatedCostUsd` becomes
+//   nullable: producers MAY emit `null` when `priced === false` to surface
+//   the diagnostic signal without conflating it with a zero cost.
+//
 // Boundary translation: a relay receiver MAY accept v1 payloads (no
 // `cacheWrite1hTokens` field) and treat the missing field as 0. The cloud
 // removal ticket for the legacy-shape translation lives at FEA-1439.
@@ -75,7 +82,20 @@ export type SyncedAgentSessionTokenUsage = {
    * downstream consumers should default it to 0 when reading a v1 batch.
    */
   cacheWrite1hTokens?: number | null;
-  estimatedCostUsd?: number;
+  /**
+   * Estimated USD cost for this row. Nullable as of FEA-1433: a `null` value
+   * signals "model not in `model_pricing` table" — distinct from a genuine
+   * zero cost (where the model is priced but had zero tokens). Legacy v1/v2
+   * payloads omitting `priced` should treat a missing field as priced=true
+   * and a missing/zero estimatedCostUsd as the legacy "0 fallback" meaning.
+   */
+  estimatedCostUsd?: number | null;
+  /**
+   * FEA-1433: whether `model` matched a `model_pricing` row at compute time.
+   * Optional + additive (no schema bump): missing field is treated as
+   * `priced=true` so legacy receivers keep working unchanged.
+   */
+  priced?: boolean;
 };
 
 export type SyncedAgentSession = {

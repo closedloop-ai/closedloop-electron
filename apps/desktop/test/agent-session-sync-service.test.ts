@@ -10,6 +10,7 @@ import {
   AgentSessionSyncService,
   chunkOversizedSession,
   estimateSessionPayloadBytes,
+  estimateTokenUsageCostBreakdown,
   estimateTokenUsageCostUsd,
   isSessionInSandbox,
   listAllSessionCursorRows,
@@ -538,6 +539,76 @@ test("agent-session sync cost estimator falls back to zero without pricing", () 
     ),
     0,
   );
+});
+
+test("FEA-1433: estimateTokenUsageCostBreakdown returns priced=false + null cost when no rule matches", () => {
+  // Diagnostic signal — null cost is distinct from a genuine $0 cost. Sessions
+  // UI uses this to render an em-dash with a Settings → Pricing tooltip.
+  const result = estimateTokenUsageCostBreakdown(
+    {
+      session_id: "sess-1",
+      model: "custom-vendor-x",
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_tokens: 25,
+      cache_write_tokens: 10,
+    },
+    [],
+  );
+  assert.deepEqual(result, { priced: false, costUsd: null });
+});
+
+test("FEA-1433: estimateTokenUsageCostBreakdown returns priced=true with rounded USD cost when a rule matches", () => {
+  const result = estimateTokenUsageCostBreakdown(
+    {
+      session_id: "sess-1",
+      model: "claude-opus-4-7",
+      input_tokens: 1_000_000,
+      output_tokens: 500_000,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    },
+    [
+      {
+        model_pattern: "claude-opus-4-7%",
+        input_per_mtok: 15,
+        output_per_mtok: 75,
+        cache_read_per_mtok: 0,
+        cache_write_per_mtok: 0,
+        cache_write_1h_per_mtok: 0,
+      },
+    ],
+  );
+  // 1M input × $15 + 0.5M output × $75 = $15 + $37.5 = $52.5
+  assert.equal(result.priced, true);
+  assert.equal(result.costUsd, 52.5);
+});
+
+test("FEA-1433: estimateTokenUsageCostBreakdown preserves a $0 cost for priced rows with zero tokens", () => {
+  // priced=true must not be conflated with null — a brand-new session that
+  // has not yet recorded usage should still report priced=true so the UI
+  // shows "$0.00", not the diagnostic em-dash.
+  const result = estimateTokenUsageCostBreakdown(
+    {
+      session_id: "sess-1",
+      model: "claude-haiku-4",
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    },
+    [
+      {
+        model_pattern: "claude-haiku-4%",
+        input_per_mtok: 1,
+        output_per_mtok: 5,
+        cache_read_per_mtok: 0,
+        cache_write_per_mtok: 0,
+        cache_write_1h_per_mtok: 0,
+      },
+    ],
+  );
+  assert.deepEqual(result, { priced: true, costUsd: 0 });
 });
 
 function insertEventRow(

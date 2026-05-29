@@ -373,8 +373,41 @@ export function Sessions() {
                     <td className="px-5 py-4 text-sm text-gray-400">
                       {session.agent_count ?? "-"}
                     </td>
+                    {/*
+                      FEA-1433: distinguish three cost states.
+                        cost == null            → at least one of the
+                          session's models has no `model_pricing` rule.
+                          Render an em-dash with a tooltip that points the
+                          user at Settings → Pricing (handled by the desktop
+                          renderer outside the iframe). This is the
+                          diagnostic signal — never silently show $0.
+                        cost == 0  && unpriced  → mixed state where every
+                          model is unpriced but cost happens to be 0. Same
+                          rendering as null (tooltip still relevant).
+                        cost > 0   || (cost === 0 && fully priced) → render
+                          the dollar value.
+                      Sort column already treats null as end-sort in the
+                      sidecar (see calculateSessionCostFea1433 patch in
+                      build-agent-monitor.mjs).
+                    */}
                     <td className="px-5 py-4 text-sm text-gray-400 font-mono">
-                      {session.cost != null && session.cost > 0 ? fmtCost(session.cost) : "-"}
+                      {session.cost == null ? (
+                        <span
+                          className="cursor-help text-gray-500"
+                          title={(() => {
+                            const first = session.unpriced_models?.[0];
+                            return first
+                              ? `Model "${first}" not in pricing table — open Settings → Pricing to add a manual rate.`
+                              : "Model not in pricing table — open Settings → Pricing to add a manual rate.";
+                          })()}
+                        >
+                          —
+                        </span>
+                      ) : session.cost > 0 ? (
+                        fmtCost(session.cost)
+                      ) : (
+                        "-"
+                      )}
                     </td>
                     <td
                       className="px-5 py-4 text-[11px] text-gray-500 font-mono"
