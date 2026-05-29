@@ -363,6 +363,14 @@ const HOST_ONLY_OVERRIDES = [
   ["claude-3-7-sonnet%", "Claude 3.7 Sonnet", 3, 15, 0.3, 3.75],
   ["claude-3-haiku%", "Claude 3 Haiku", 0.25, 1.25, 0.03, 0.3],
   ["claude-3-opus%", "Claude 3 Opus", 15, 75, 1.5, 18.75],
+  // FEA-1431 codex review: the legacy 4.2 aliases (`claude-opus-4-2`,
+  // `claude-sonnet-4-2`) shipped in 0.15.93 as host-curated defaults but
+  // LiteLLM does not carry them. Without these rows any session whose
+  // model id is the legacy 4.2 string would fall through to the OpenCode
+  // fallback ($0) on a fresh DB. Rates match Anthropic's Opus 4 / Sonnet 4
+  // list prices.
+  ["claude-opus-4-2%", "Claude Opus 4", 15, 75, 1.5, 18.75],
+  ["claude-sonnet-4-2%", "Claude Sonnet 4", 3, 15, 0.3, 3.75],
 ];
 
 const litellmPricingPath = path.join(scriptDir, "litellm-pricing.json");
@@ -1580,6 +1588,61 @@ function patchDbFile(file) {
     pricingBlock,
     `${renderDefaultPricingSource()}\n\n// Top-up:`,
   );
+
+  // FEA-1431: migrate previously-seeded Claude Opus 4.5/4.6/4.7 rows that were
+  // mis-priced in 0.15.93 at Sonnet rates ($5/$25/0.5/6.25). The top-up loop
+  // above uses INSERT OR IGNORE so it never overwrites existing rows; without
+  // a one-shot correction every upgrader stays on the legacy bad price.
+  // The UPDATE is narrowly conditional on the exact legacy bad values to
+  // avoid clobbering rows a user deliberately edited.
+  const legacyMigrationNeedle = "addMissing(DEFAULT_PRICING);\n}\n";
+  if (!source.includes(legacyMigrationNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected addMissing(DEFAULT_PRICING); block.`,
+    );
+  }
+  if (!source.includes("FEA-1431: legacy Opus 4.x price correction")) {
+    const legacyMigrationBlock = [
+      "",
+      "// FEA-1431: legacy Opus 4.x price correction. Profiles seeded by",
+      "// 0.15.93 carry claude-opus-4-5/6/7 rows at Sonnet rates",
+      "// ($5 / $25 / 0.5 / 6.25). The top-up's INSERT OR IGNORE leaves them",
+      "// unchanged. This UPDATE rewrites only rows still matching the exact",
+      "// legacy bad rates so user-edited rows are preserved.",
+      "{",
+      "  const opusPatterns = [",
+      '    "claude-opus-4-7%",',
+      '    "claude-opus-4-7-20260416%",',
+      '    "claude-opus-4-6%",',
+      '    "claude-opus-4-6-20260205%",',
+      '    "claude-opus-4-5%",',
+      '    "claude-opus-4-5-20251101%",',
+      "  ];",
+      "  const fixOpus = db.prepare(`",
+      "    UPDATE model_pricing",
+      "       SET input_per_mtok = 15,",
+      "           output_per_mtok = 75,",
+      "           cache_read_per_mtok = 1.5,",
+      "           cache_write_per_mtok = 18.75,",
+      "           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+      "     WHERE model_pattern = ?",
+      "       AND input_per_mtok = 5",
+      "       AND output_per_mtok = 25",
+      "       AND cache_read_per_mtok = 0.5",
+      "       AND cache_write_per_mtok = 6.25",
+      "  `);",
+      "  const fixAll = db.transaction((patterns) => {",
+      "    for (const p of patterns) fixOpus.run(p);",
+      "  });",
+      "  fixAll(opusPatterns);",
+      "}",
+      "",
+    ].join("\n");
+    source = source.replace(
+      legacyMigrationNeedle,
+      `${legacyMigrationNeedle}${legacyMigrationBlock}`,
+    );
+  }
 
   // CLOSEDLOOP Codex support (Addition #4): add a `harness` dimension so one
   // dashboard shows multiple harnesses. Additive + DEFAULT 'claude' so the
