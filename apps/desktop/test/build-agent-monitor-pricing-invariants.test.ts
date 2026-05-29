@@ -43,26 +43,27 @@ const REQUIRED_HOST_OVERRIDES = [
   "opencode-default%",
 ];
 
-test("Claude Opus 4.x rows price input ≥ $10/Mtok", async () => {
+test("FEA-1431-bugfix: Opus 4.1/4.2 retain their published $15/$75 list price", async () => {
+  // Anthropic re-priced Opus DOWN starting at 4.5 (now $5/Mtok input).
+  // Opus 4.1 and the deprecated Opus 4 (`claude-opus-4-2`) stayed at their
+  // original $15/Mtok input rate. This test pins those two specifically;
+  // the sibling FEA-1431-bugfix test pins Opus 4.5+ at $5.
   const { loadHostDefaultPricing } = await loadBuilder();
   const rows = loadHostDefaultPricing();
 
   const offending: Array<{ pattern: string; input: number }> = [];
   for (const row of rows) {
     const pattern = row[0];
-    const match = /^(claude-opus-4-\d+)%$/.exec(pattern);
+    const match = /^(claude-opus-4-[12])%$/.exec(pattern);
     if (!match) continue;
-    const key = match[1];
-    // Legacy hand-curated overrides — accepted as-is per build invariant.
-    if (key === "claude-opus-4-1" || key === "claude-opus-4-2") continue;
-    if (row[2] < 10) {
+    if (row[2] !== 15) {
       offending.push({ pattern, input: row[2] });
     }
   }
   assert.deepEqual(
     offending,
     [],
-    `Opus 4.x rows must price input ≥ $10/Mtok. Offending: ${JSON.stringify(offending)}`,
+    `Opus 4.1/4.2 must price input at $15/Mtok. Offending: ${JSON.stringify(offending)}`,
   );
 });
 
@@ -105,24 +106,32 @@ test("merged pricing list contains the vendored Claude Opus 4 family", async () 
   );
 });
 
-test("Opus floor invariant catches date-suffixed snapshot keys", async () => {
-  // Direct invariant verification — every Opus 4.x row in the merged list,
-  // including any `-YYYYMMDD` date-suffixed snapshot key, must price input
-  // ≥ $10/Mtok. This pins the regex shape used inside loadHostDefaultPricing.
+test("FEA-1431-bugfix: Opus 4.5+ tracks Anthropic's published list price", async () => {
+  // Anthropic re-priced Opus starting at 4.5 down to $5/Mtok input
+  // (https://platform.claude.com/docs/en/about-claude/pricing). Earlier
+  // builds force-overrode these to $15/Mtok in HOST_ONLY_OVERRIDES; the
+  // bugfix pass removed the overrides so LiteLLM upstream drives the rates.
+  // This test pins the corrected behavior — verifies the merged list
+  // reflects $5/$25 for Opus 4.5/4.6/4.7 (LiteLLM-aligned), NOT $15/$75.
   const { loadHostDefaultPricing } = await loadBuilder();
   const rows = loadHostDefaultPricing();
-  const dateSuffixed = rows.filter((r) =>
-    /^claude-opus-4-\d+-\d{8}%$/.test(r[0]),
-  );
-  for (const row of dateSuffixed) {
-    const [pattern, , input] = row;
-    const minor = /^claude-opus-4-(\d+)-/.exec(pattern)?.[1];
-    if (minor === "1" || minor === "2") continue;
-    assert.ok(
-      input >= 10,
-      `Date-suffixed Opus row ${pattern} priced below $10/Mtok input (${input})`,
-    );
+  const wronglyOverridden: Array<{ pattern: string; input: number }> = [];
+  for (const row of rows) {
+    // `\d{1,2}` (not `\d+`) so this does NOT match the date-only suffix
+    // form `claude-opus-4-20250514%` — that's the deprecated base Opus 4
+    // snapshot ($15/Mtok), not Opus 4.1+.
+    const match = /^claude-opus-4-(\d{1,2})(?:-\d{8})?%$/.exec(row[0]);
+    if (!match) continue;
+    const minor = parseInt(match[1], 10);
+    if (minor < 5) continue; // Opus 4.1/4.2 are correctly $15/$75
+    const input = row[2];
+    if (input !== 5) wronglyOverridden.push({ pattern: row[0], input });
   }
+  assert.deepEqual(
+    wronglyOverridden,
+    [],
+    `Opus 4.5+ rows must be at $5/Mtok input (Anthropic's published rate). Offending: ${JSON.stringify(wronglyOverridden)}`,
+  );
 });
 
 test("FEA-1432: every gpt-* row has cache_write = 0 and cache_write_1h = 0", async () => {

@@ -94,12 +94,14 @@ test("OpenAI cache_write_tokens contribute $0 to the estimated cost", async () =
 test("Anthropic cache_write_1h_tokens are billed at input × 2.0", async () => {
   const { loadHostDefaultPricing } = await loadBuilder();
   const pricingRows = loadHostDefaultPricing().map(toServiceRow);
-  // Pick the Claude Opus 4.7 row: input = $15/Mtok → cache_write_1h = $30/Mtok.
+  // FEA-1431-bugfix: Anthropic re-priced Opus 4.5+ down to $5/Mtok input.
+  // The 1h cache write tier = input × 2.0 = $10/Mtok for Opus 4.7.
+  // (Source: https://platform.claude.com/docs/en/about-claude/pricing)
   const opus = pricingRows.find((r) => r.model_pattern === "claude-opus-4-7%");
   assert.ok(opus);
-  assert.equal(opus!.cache_write_1h_per_mtok, 30);
+  assert.equal(opus!.cache_write_1h_per_mtok, 10);
 
-  // 100,000 cache_write_1h tokens at $30/Mtok = $3.00.
+  // 100,000 cache_write_1h tokens at $10/Mtok = $1.00.
   const usage = {
     session_id: "test",
     model: "claude-opus-4-7",
@@ -112,7 +114,7 @@ test("Anthropic cache_write_1h_tokens are billed at input × 2.0", async () => {
   const cost = estimateTokenUsageCostUsd(usage, pricingRows);
   assert.equal(
     cost,
-    3.0,
+    1.0,
     `Anthropic 1h cache writes must be billed at input × 2.0; got ${cost}`,
   );
 });

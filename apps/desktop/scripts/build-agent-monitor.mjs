@@ -351,22 +351,17 @@ const HOST_ONLY_OVERRIDES = [
   ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3, 0],
   ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3, 0],
   ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0, 0],
-  // FEA-1431 deviation: LiteLLM upstream currently carries Claude Opus 4.5,
-  // 4.6, and 4.7 at $5/$25/Mtok — roughly 1/3 of Anthropic's published Opus 4
-  // family list price ($15 input / $75 output / $1.50 cache_read /
-  // $18.75 cache_write 5-min / $30 cache_write 1h per Mtok). The build-time
-  // Opus floor invariant in loadHostDefaultPricing() catches this regression
-  // and would refuse to build without an explicit host override. These rows
-  // pin the rates to Anthropic's public list price until LiteLLM upstream is
-  // corrected. When the upstream fix lands, run `just desktop-refresh-pricing`
-  // and delete these overrides. Both the unversioned key and the date-suffixed
-  // snapshot key are overridden because LiteLLM carries both shapes.
-  ["claude-opus-4-7%", "Claude Opus 4.7", 15, 75, 1.5, 18.75, 30],
-  ["claude-opus-4-7-20260416%", "Claude Opus 4.7", 15, 75, 1.5, 18.75, 30],
-  ["claude-opus-4-6%", "Claude Opus 4.6", 15, 75, 1.5, 18.75, 30],
-  ["claude-opus-4-6-20260205%", "Claude Opus 4.6", 15, 75, 1.5, 18.75, 30],
-  ["claude-opus-4-5%", "Claude Opus 4.5", 15, 75, 1.5, 18.75, 30],
-  ["claude-opus-4-5-20251101%", "Claude Opus 4.5", 15, 75, 1.5, 18.75, 30],
+  // FEA-1431-bugfix: the original FEA-1431 commit force-overrode Opus 4.5/4.6/4.7
+  // to $15/$75/Mtok based on the incorrect assumption that the published list
+  // price for those models matched Opus 4.1. Anthropic's pricing page
+  // (https://platform.claude.com/docs/en/about-claude/pricing) confirms the
+  // correct rates are $5 input / $25 output / $0.50 cache_read /
+  // $6.25 cache_write 5-min / $10 cache_write 1h per Mtok — exactly what
+  // LiteLLM upstream carries. The override rows that previously lived here
+  // have been deleted; LiteLLM now drives the rates. The "Opus floor" build
+  // invariant that rejected sub-$10 input on Opus 4-N rows was also wrong
+  // and has been removed.
+  //
   // FEA-1431 coverage gap: LiteLLM upstream carries only date-suffixed keys
   // for older Claude families (e.g. `claude-3-7-sonnet-20250219`) and omits
   // 3.5 Sonnet / 3.5 Haiku entirely. Customers commonly use the broader
@@ -485,36 +480,16 @@ export function loadHostDefaultPricing() {
 
   // Build-time invariants — fail fast with a clear error message.
   //
-  // Invariant #1: Opus 4.x floor. Anthropic's published list price for current
-  // Claude Opus 4 generations is well above $10/Mtok input. The pre-FEA-1431
-  // hand-curated seed mis-priced Opus 4.5/4.6/4.7 at $5/Mtok input. The legacy
-  // hand-curated overrides for `claude-opus-4-1` and `claude-opus-4-2` are
-  // intentionally exempted because they are accepted as-is. The regex covers
-  // both the unversioned key (`claude-opus-4-5%`) and the date-suffixed
-  // snapshot key (`claude-opus-4-5-20251101%`) — LiteLLM carries both shapes
-  // and either could go stale.
-  const opusUnderpriced = [];
-  for (const row of merged) {
-    const pattern = row[0];
-    const match = /^claude-opus-4-(\d+)(?:-\d{8})?%$/.exec(pattern);
-    if (!match) continue;
-    const minor = match[1];
-    if (minor === "1" || minor === "2") continue;
-    const inputRate = row[2];
-    if (typeof inputRate !== "number" || inputRate < 10) {
-      opusUnderpriced.push({ pattern, inputRate });
-    }
-  }
-  if (opusUnderpriced.length > 0) {
-    const detail = opusUnderpriced
-      .map((o) => `${o.pattern} input=${o.inputRate}`)
-      .join(", ");
-    throw new Error(
-      `Pricing invariant violated: Claude Opus 4.x rows must have input ≥ $10/Mtok. Offending: ${detail}`,
-    );
-  }
-
-  // Invariant #2 (FEA-1432): OpenAI cache pricing is vendor-specific.
+  // (FEA-1431-bugfix: the "Opus 4.x floor" invariant that previously lived
+  // here required input ≥ $10/Mtok on Opus 4.x rows. That assumption was
+  // wrong — Anthropic re-priced Opus starting with 4.5 down to $5/Mtok
+  // input. LiteLLM and the live Anthropic pricing page both confirm $5/$25
+  // for 4.5/4.6/4.7. The floor would now actively reject correct data; it
+  // has been removed. The remaining invariants below catch the bugs we
+  // still care about: OpenAI cache surcharge regressions and Anthropic
+  // 1h cache-write under-pricing.)
+  //
+  // Invariant #1 (FEA-1432): OpenAI cache pricing is vendor-specific.
   // Cached input reads at a 50% discount; cache writes carry no surcharge
   // (both 5-min and 1h columns must be 0). This is a hard build-time check —
   // a regression in the LiteLLM transformer or HOST_ONLY_OVERRIDES that
@@ -574,7 +549,7 @@ export function loadHostDefaultPricing() {
     );
   }
 
-  // Invariant #3 (FEA-1432): Anthropic 1-hour ephemeral cache writes are
+  // Invariant #2 (FEA-1432): Anthropic 1-hour ephemeral cache writes are
   // priced at input × 2.0 on Anthropic's published rate card. Apply a sanity
   // floor of input × 1.5 to leave headroom for Anthropic re-tiering before
   // failing the build. Skip rows with input = 0 (sentinel / free patterns).
@@ -1969,28 +1944,39 @@ function patchDbFile(file) {
     );
   }
 
-  // FEA-1431: migrate previously-seeded Claude Opus 4.5/4.6/4.7 rows that were
-  // mis-priced in 0.15.93 at Sonnet rates ($5/$25/0.5/6.25). The top-up loop
-  // above uses INSERT OR IGNORE so it never overwrites existing rows; without
-  // a one-shot correction every upgrader stays on the legacy bad price.
-  // The UPDATE is narrowly conditional on the exact legacy bad values to
-  // avoid clobbering rows a user deliberately edited.
-  const legacyMigrationNeedle = "addMissing(DEFAULT_PRICING);\n}\n";
-  if (!source.includes(legacyMigrationNeedle)) {
+  // FEA-1431-bugfix: undo the broken Opus 4.5+ migration that an earlier
+  // build of this branch shipped. That migration assumed Anthropic Opus 4.5/
+  // 4.6/4.7 were priced at $15/$75/Mtok (same as Opus 4.1) and rewrote any
+  // row matching the *correct* LiteLLM-derived $5/$25 values to those $15/$75
+  // values. Anthropic actually re-priced Opus starting at 4.5 to $5/$25;
+  // LiteLLM and the live pricing page both agree. The migration below now
+  // runs in REVERSE — it detects any row left in the bad
+  // (input=15, output=75, cache_read=1.5, cache_write=18.75) state on an
+  // Opus 4.5/4.6/4.7 pattern and resets all five rate columns (including
+  // cache_write_1h to $10, the correct Anthropic 1h tier for Opus 4.5+).
+  // The narrow tuple match means a user who deliberately set custom rates
+  // is not clobbered.
+  //
+  // This block is anchored AFTER the FEA-1432 cache_write_1h column add+
+  // backfill so the column is guaranteed to exist when the UPDATE runs.
+  const opusReverseAnchor =
+    "       AND cache_write_1h_per_mtok = 0\n  `).run();\n}\n";
+  if (!source.includes(opusReverseAnchor)) {
     throw new Error(
-      `Unable to patch ${file}: expected addMissing(DEFAULT_PRICING); block.`,
+      `Unable to patch ${file}: expected FEA-1432 cache_write_1h backfill end-of-block anchor.`,
     );
   }
-  if (!source.includes("FEA-1431: legacy Opus 4.x price correction")) {
-    const legacyMigrationBlock = [
+  if (!source.includes("FEA-1431-bugfix: reverse the bad Opus 4.x migration")) {
+    const reverseBlock = [
       "",
-      "// FEA-1431: legacy Opus 4.x price correction. Profiles seeded by",
-      "// 0.15.93 carry claude-opus-4-5/6/7 rows at Sonnet rates",
-      "// ($5 / $25 / 0.5 / 6.25). The top-up's INSERT OR IGNORE leaves them",
-      "// unchanged. This UPDATE rewrites only rows still matching the exact",
-      "// legacy bad rates so user-edited rows are preserved.",
+      "// FEA-1431-bugfix: reverse the bad Opus 4.x migration that earlier",
+      "// builds of this branch shipped. Any Opus 4.5/4.6/4.7 row in the",
+      "// (input=15, output=75, cache_read=1.5, cache_write=18.75) state",
+      "// is left over from the wrong migration and gets reset here to the",
+      "// correct LiteLLM-aligned (5/25/0.5/6.25/10) values. A user who set",
+      "// custom rates manually is preserved by the narrow tuple match.",
       "{",
-      "  const opusPatterns = [",
+      "  const opusBugfixPatterns = [",
       '    "claude-opus-4-7%",',
       '    "claude-opus-4-7-20260416%",',
       '    "claude-opus-4-6%",',
@@ -1998,29 +1984,30 @@ function patchDbFile(file) {
       '    "claude-opus-4-5%",',
       '    "claude-opus-4-5-20251101%",',
       "  ];",
-      "  const fixOpus = db.prepare(`",
+      "  const fixOpusBugfix = db.prepare(`",
       "    UPDATE model_pricing",
-      "       SET input_per_mtok = 15,",
-      "           output_per_mtok = 75,",
-      "           cache_read_per_mtok = 1.5,",
-      "           cache_write_per_mtok = 18.75,",
+      "       SET input_per_mtok = 5,",
+      "           output_per_mtok = 25,",
+      "           cache_read_per_mtok = 0.5,",
+      "           cache_write_per_mtok = 6.25,",
+      "           cache_write_1h_per_mtok = 10,",
       "           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
       "     WHERE model_pattern = ?",
-      "       AND input_per_mtok = 5",
-      "       AND output_per_mtok = 25",
-      "       AND cache_read_per_mtok = 0.5",
-      "       AND cache_write_per_mtok = 6.25",
+      "       AND input_per_mtok = 15",
+      "       AND output_per_mtok = 75",
+      "       AND cache_read_per_mtok = 1.5",
+      "       AND cache_write_per_mtok = 18.75",
       "  `);",
-      "  const fixAll = db.transaction((patterns) => {",
-      "    for (const p of patterns) fixOpus.run(p);",
+      "  const fixAllOpusBugfix = db.transaction((patterns) => {",
+      "    for (const p of patterns) fixOpusBugfix.run(p);",
       "  });",
-      "  fixAll(opusPatterns);",
+      "  fixAllOpusBugfix(opusBugfixPatterns);",
       "}",
       "",
     ].join("\n");
     source = source.replace(
-      legacyMigrationNeedle,
-      `${legacyMigrationNeedle}${legacyMigrationBlock}`,
+      opusReverseAnchor,
+      `${opusReverseAnchor}${reverseBlock}`,
     );
   }
 
