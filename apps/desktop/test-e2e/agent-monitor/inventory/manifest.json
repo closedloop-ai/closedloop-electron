@@ -821,11 +821,11 @@
       "status": "pending",
       "bug_ref": null,
       "selector": {
-        "value": "[data-testid='audit-tools-list-length']",
-        "present_in_code": false,
+        "value": "[data-testid='audit-tool-row']",
+        "present_in_code": true,
         "render_kind": "dom_count",
-        "renders_at": "scripts/agent-monitor-packs/client/Tools.tsx:123",
-        "followup": "Either add a numeric total element with a data-testid, or test by counting rendered items under a data-testid'd .map(tools) container."
+        "renders_at": "scripts/agent-monitor-packs/client/Tools.tsx (one button per distinct tool from /api/events/facets; testid added FEA-1437 Phase 4)",
+        "followup": "Done — each tool row has data-testid='audit-tool-row'; the audit asserts toHaveCount == events_facets_tool_names_length."
       }
     },
     {
@@ -891,11 +891,11 @@
       "status": "pending",
       "bug_ref": null,
       "selector": {
-        "value": "[data-testid='audit-plans-total']",
+        "value": "[data-testid='audit-plan-row']",
         "present_in_code": false,
         "render_kind": "dom_count",
-        "renders_at": "scripts/agent-monitor-plans/client/Plans.tsx:164",
-        "followup": "Either add a numeric total element with a data-testid, or test by counting rendered items under a data-testid'd .map(plans) container."
+        "renders_at": "scripts/agent-monitor-plans/client/Plans.tsx (one button per plan; data-testid='audit-plan-row' added FEA-1437 Phase 4)",
+        "followup": "testid + dom_count assertion ready, but UI audit is BLOCKED on fixture data — seed-fixture-db.mjs seeds no plans, so /api/plans returns 0. Before enabling: seed N plan rows, confirm planStore.listPlans count == countPlans (no version-join drop), then flip present_in_code true and add specs/audit/plans.ui-audit.spec.ts (dom_count branch already supports it)."
       }
     },
     {
@@ -917,8 +917,8 @@
         "value": "[data-testid='audit-tools-event-types-length']",
         "present_in_code": false,
         "render_kind": "dom_count",
-        "renders_at": "scripts/agent-monitor-packs/client/Tools.tsx:123",
-        "followup": "Either add a numeric total element with a data-testid, or test by counting rendered items under a data-testid'd .map(event facets) container."
+        "renders_at": "scripts/agent-monitor-packs/client/Tools.tsx — NOT rendered as a countable list. event_type only appears per-event in the right-hand detail panel; there is no distinct-event-types card list.",
+        "followup": "BLOCKED: no rendered element represents the distinct-event-types count. Add a count element (data-testid) on the Tools screen, or descope this tile. The Tools audit spec skips it (present_in_code false)."
       }
     },
     {

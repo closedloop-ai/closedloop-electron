@@ -54,7 +54,11 @@ export async function assertTileMatchesOracle(
     oracle: string;
     tile_kind?: string;
     trend_label?: string;
-    selector?: { value?: string; present_in_code?: boolean };
+    selector?: {
+      value?: string;
+      present_in_code?: boolean;
+      render_kind?: string;
+    };
   },
 ): Promise<void> {
   const db = openDb(resolveFixtureDbPath());
@@ -66,6 +70,22 @@ export async function assertTileMatchesOracle(
     expectedRaw = r.expected as number;
   } finally {
     db.close();
+  }
+
+  // dom_count tiles (list_length / section_card_count): there is no single
+  // numeric element — the tile's value IS the number of rendered item nodes.
+  // Assert the count of the item selector equals the oracle. selector.value is
+  // the per-item selector for these tiles (e.g. [data-testid='audit-plan-row']).
+  if (row.selector?.render_kind === "dom_count" && row.selector.present_in_code) {
+    const expectedCount = Number(expectedRaw);
+    await expect(
+      page.locator(row.selector.value as string),
+      `\n  manifest id: ${row.id}\n` +
+        `  oracle:      ${row.oracle} -> ${expectedRaw}\n` +
+        `  selector:    ${row.selector.value} (counted)\n` +
+        `  note:        dom_count tile — rendered item count must equal oracle.\n`,
+    ).toHaveCount(expectedCount);
+    return;
   }
 
   const region = await sliceForTile(page, row);
