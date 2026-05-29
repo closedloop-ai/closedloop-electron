@@ -131,6 +131,7 @@ import {
   runBootstrapIfNeeded,
   runLoopsSetupScript,
   SymphonyDirNotConfiguredError,
+  tagSpawnedSession,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
 import { detectBillingModeForHarness } from "../../main/billing-mode-detector.js";
@@ -7299,6 +7300,22 @@ async function handleLoopRequest(
         ...peerEnvVars,
       });
       clearUserVisibleLoopFailureMarker(claudeWorkDir);
+
+      // FEA-1434 (codex review follow-up): stamp harness + billing mode on
+      // the spawn cwd's launch-metadata so the sidecar can label every
+      // resulting session — Plan / Execute / RequestChanges / GeneratePrd /
+      // RequestPrdChanges / EvaluatePrd / EvaluateFeature / EvaluatePlan /
+      // EvaluateCode / Decompose / Bootstrap. Prior to this every main-loop
+      // spawn fell through to the schema default ('unknown') in the sidecar
+      // and the UI mis-bucketed API-keyed runs. The spawn cwd matches what
+      // the sidecar writes to `sessions.cwd`, so `resolveSessionBillingMode`
+      // picks it up via the launch-metadata lookup.
+      const tagCwd = worktreeDir ?? claudeWorkDir;
+      tagSpawnedSession({
+        worktreeDir: tagCwd,
+        harness: "claude",
+        env: spawnEnv,
+      });
 
       // Collect non-sensitive env snapshot: NODE_ENV + CLAUDE_CODE_USE_* keys only
       const envSnapshot: Record<string, string> = {};

@@ -704,6 +704,28 @@ export function recordSessionSpawn(args: {
 }
 
 /**
+ * One-call helper for spawn sites: detect the billing mode from the spawn
+ * env and stamp `launch-metadata.json`. Wraps `detectBillingModeForHarness`
+ * + `recordSessionSpawn` so each spawn site is a single line and the two
+ * steps stay in lockstep. Added FEA-1434 (codex review follow-up).
+ *
+ * Best-effort: callers must not assume metadata is persisted. The detector
+ * is pure (env + existence check) and `recordSessionSpawn` swallows write
+ * failures, so this function never throws.
+ */
+export function tagSpawnedSession(args: {
+  worktreeDir: string;
+  harness: "claude" | "codex" | "cursor" | "copilot" | "opencode";
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>;
+}): void {
+  recordSessionSpawn({
+    worktreeDir: args.worktreeDir,
+    harness: args.harness,
+    billingMode: detectBillingModeForHarness(args.harness, args.env),
+  });
+}
+
+/**
  * Acquire an atomic launch lock via O_CREAT | O_EXCL.
  * Returns { fd } on success, null on EEXIST (contention).
  */

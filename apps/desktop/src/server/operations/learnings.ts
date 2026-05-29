@@ -11,7 +11,7 @@ import { listAllWorktrees } from "./git-helpers.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { loadReposConfig } from "./repos-config-utils.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { assertRepoAllowed, expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, expandHome, resolveWorktreeDir, tagSpawnedSession } from "./symphony-utils.js";
 import { json } from "./response-utils.js";
 
 type ParsedLearningPattern = {
@@ -255,11 +255,21 @@ export function registerLearningsRoutes(
     const scriptPath = findPluginScript("self-learning", "process-chat-learnings.sh");
     if (scriptPath) {
       const logFile = path.join(claudeWorkDir, "process-learnings.log");
+      const learningsEnv = await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir });
+      // FEA-1434 (codex review follow-up): process-chat-learnings.sh invokes
+      // claude internally, so its session lands in the sidecar DB. Stamp the
+      // worktree's launch-metadata so the resulting session is bucketed into
+      // the correct billing ledger.
+      tagSpawnedSession({
+        worktreeDir,
+        harness: "claude",
+        env: learningsEnv,
+      });
       const child = spawn(scriptPath, [claudeWorkDir], {
         detached: true,
         stdio: "ignore",
         cwd: worktreeDir,
-        env: await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
+        env: learningsEnv,
       });
       child.on('error', (err: NodeJS.ErrnoException) => {
         gatewayLog.warn('learnings-launch', `detached-spawn-failed: ${err.message}`);

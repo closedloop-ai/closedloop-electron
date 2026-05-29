@@ -22,6 +22,7 @@ import {
   runLoopsSetupScript,
   sanitizeTicketId,
   saveWorktreeState,
+  tagSpawnedSession,
   writeLaunchMetadata,
 } from "../src/server/operations/symphony-utils.js";
 
@@ -463,6 +464,99 @@ describe("sanitizeTicketId", () => {
 });
 
 // --- runLoopsSetupScript ---
+
+// --- tagSpawnedSession (FEA-1434 codex review follow-up) ---
+
+describe("tagSpawnedSession", () => {
+  test("detects api mode from ANTHROPIC_API_KEY and writes launch-metadata", () => {
+    const dir = makeTempDir();
+    tagSpawnedSession({
+      worktreeDir: dir,
+      harness: "claude",
+      env: { ANTHROPIC_API_KEY: "sk-test-key" },
+    });
+
+    const meta = readLaunchMetadata(dir);
+    assert.equal(meta?.harness, "claude");
+    assert.equal(
+      meta?.billingMode,
+      "api",
+      "ANTHROPIC_API_KEY must produce billingMode='api'",
+    );
+  });
+
+  test("detects api mode for codex from OPENAI_API_KEY", () => {
+    const dir = makeTempDir();
+    tagSpawnedSession({
+      worktreeDir: dir,
+      harness: "codex",
+      env: { OPENAI_API_KEY: "sk-test-key" },
+    });
+
+    const meta = readLaunchMetadata(dir);
+    assert.equal(meta?.harness, "codex");
+    assert.equal(meta?.billingMode, "api");
+  });
+
+  test("falls back to harness-default for non-spawn harnesses", () => {
+    const dir = makeTempDir();
+    tagSpawnedSession({
+      worktreeDir: dir,
+      harness: "cursor",
+      env: {},
+    });
+
+    const meta = readLaunchMetadata(dir);
+    assert.equal(meta?.harness, "cursor");
+    assert.equal(meta?.billingMode, "cursor_pro");
+  });
+
+  test("is best-effort — does not throw on a malformed worktree", () => {
+    // Path with null bytes is reliably invalid across platforms — writes must
+    // fail but the helper must swallow the error.
+    tagSpawnedSession({
+      worktreeDir: "/nonexistent/ /path",
+      harness: "claude",
+      env: { ANTHROPIC_API_KEY: "sk-x" },
+    });
+    // No assertion — just must not throw.
+  });
+
+  test("main-loop spawn paths invoke tagSpawnedSession (regression for codex review P2)", () => {
+    // Pre-fix bug: recordSessionSpawn was wired up at the LLM-commit helper
+    // but NOT at the main handleLoopRequest spawn paths (Plan, Execute,
+    // RequestChanges, GeneratePrd, EvaluatePrd, EvaluateFeature,
+    // EvaluatePlan, EvaluateCode, Decompose, Bootstrap). This test guards
+    // the wiring by reading the source and asserting the shared helper is
+    // imported + invoked. Source-level guard because the full
+    // handleLoopRequest spawn path needs the gateway, plugins, and a real
+    // claude binary — out of scope for unit tests.
+    const symphonyLoopSource = readFileSync(
+      path.join(
+        import.meta.dirname,
+        "..",
+        "src",
+        "server",
+        "operations",
+        "symphony-loop.ts",
+      ),
+      "utf-8",
+    );
+    // Helper is imported.
+    assert.ok(
+      symphonyLoopSource.includes("tagSpawnedSession"),
+      "tagSpawnedSession must be imported into symphony-loop.ts",
+    );
+    // Helper is called at least once (the main-loop spawn block).
+    const tagSpawnedSessionCalls = (
+      symphonyLoopSource.match(/tagSpawnedSession\s*\(/g) ?? []
+    ).length;
+    assert.ok(
+      tagSpawnedSessionCalls >= 1,
+      `expected ≥1 tagSpawnedSession call in symphony-loop.ts, found ${tagSpawnedSessionCalls}`,
+    );
+  });
+});
 
 describe("runLoopsSetupScript", () => {
   test("runs script that exists and creates a marker file", async () => {

@@ -25,6 +25,31 @@ import { expandHomePath } from "../shared/path-utils.js";
 
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
+
+/**
+ * FEA-1434 (codex review follow-up): billing modes that the sidecar
+ * importers stamp as a *default* — i.e. the importer never observed an
+ * authoritative env signal, it just picked the harness-typical mode.
+ *
+ * When launch-metadata (written by desktop spawn sites with direct
+ * env-detection) carries a different mode, we treat launch-metadata as
+ * the higher-priority source and persist its value back into the row so
+ * the local UI matches the cloud relay's view of the same session. We
+ * never overwrite a mode outside this set — that would clobber a value
+ * the user (or a future code path) deliberately set.
+ *
+ * A future refactor can replace this hardcoded list with an explicit
+ * `priorityRank` per source ("launch-metadata" beats "importer-default"
+ * beats "schema-default"); for v1 the hardcoded set is sufficient and
+ * easier to audit.
+ */
+const BILLING_MODE_IMPORTER_DEFAULTS: ReadonlySet<string> = new Set([
+  "unknown",
+  "codex_chatgpt_pro",
+  "cursor_pro",
+  "copilot_seat",
+  "opencode",
+]);
 const MIN_INCREMENTAL_SYNC_INTERVAL_MS = 30_000;
 // Maximum number of candidate session IDs to pull from the queue per sync cycle.
 const INCREMENTAL_SESSION_BATCH_SIZE = 10;
@@ -277,6 +302,15 @@ export class AgentSessionSyncService {
         const db = new DatabaseSync(dbPath);
         try {
           db.exec("PRAGMA busy_timeout = 5000");
+          // FEA-1434 (codex review follow-up): the sidecar's build-time patch
+          // adds `billing_mode` via an additive ALTER TABLE on its first run.
+          // If the sync service races the sidecar (e.g. it boots before the
+          // sidecar finishes its startup, or the sidecar fails to start), the
+          // SELECT below would throw `no such column: billing_mode`. Apply the
+          // same additive, idempotent migration here so this service is
+          // self-sufficient — matches the existing pattern in
+          // build-agent-monitor.mjs's `db.js` patch.
+          ensureBillingModeColumn(db);
           this.initializeBackfillQueueIfNeeded(db);
           this.enqueueIncrementalUpdates(db);
 
@@ -683,6 +717,43 @@ export function listAllSessionCursorRows(db: DatabaseSync): SessionCursorRow[] {
     .all() as SessionCursorRow[];
 }
 
+/**
+ * FEA-1434 (codex review follow-up): idempotent additive migration that
+ * adds the `billing_mode` column if missing. Mirrors the patch in
+ * `apps/desktop/scripts/build-agent-monitor.mjs` so the sync service is
+ * resilient to a sidecar that hasn't yet applied its own migration (e.g.
+ * boot-order race, sidecar startup failure).
+ *
+ * The SELECT probe is cheap (one row) and the ALTER is additive — running
+ * this on every sync cycle is safe and matches the existing build-time
+ * pattern. The CREATE INDEX is also idempotent.
+ *
+ * Exported for tests; not used outside this module.
+ */
+export function ensureBillingModeColumn(db: DatabaseSync): void {
+  try {
+    db.prepare("SELECT billing_mode FROM sessions LIMIT 1").get();
+  } catch {
+    try {
+      db.prepare(
+        "ALTER TABLE sessions ADD COLUMN billing_mode TEXT NOT NULL DEFAULT 'unknown'",
+      ).run();
+    } catch {
+      // If the ALTER itself fails (e.g. sessions table doesn't exist yet —
+      // a brand-new sidecar that hasn't created its schema), give up
+      // silently. The next sync cycle will retry.
+      return;
+    }
+  }
+  try {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_sessions_billing_mode ON sessions(billing_mode)",
+    );
+  } catch {
+    // The index is a perf nicety; failing here doesn't break correctness.
+  }
+}
+
 export function listUpdatedSessionCursorRows(
   db: DatabaseSync,
   sinceUpdatedAt: string,
@@ -826,7 +897,16 @@ export function loadSyncedSessions(
   const eventsBySessionId = groupRowsBySessionId(eventRows);
   const tokenUsageBySessionId = groupRowsBySessionId(tokenRows);
 
-  return ids.flatMap((id) => {
+  // FEA-1434 (codex review follow-up): collect rows whose `billing_mode`
+  // column is a stale importer default but where launch-metadata carries the
+  // authoritative env-detected value. We persist these back in one batched
+  // UPDATE after the read loop so the local UI (which reads from the same
+  // sessions table) matches the cloud relay's view, which already uses the
+  // resolved mode. Run in the same DB connection so the read + write don't
+  // drift across SQLite reopenings.
+  const billingWritebacks: Array<{ id: string; mode: string }> = [];
+
+  const synced = ids.flatMap((id) => {
     const row = sessionsById.get(id);
     if (!row) {
       return [];
@@ -841,6 +921,19 @@ export function loadSyncedSessions(
       row.billing_mode,
       cache,
     );
+    // FEA-1434 (codex review follow-up): when launch-metadata produced a
+    // different mode and the row column is a known importer default (or the
+    // schema default 'unknown'), schedule a writeback so the UI sees the same
+    // truth the relay does. Never overwrite a non-default value — that would
+    // clobber an intentional setting.
+    if (
+      billingMode !== undefined &&
+      billingMode !== row.billing_mode &&
+      (row.billing_mode === null ||
+        BILLING_MODE_IMPORTER_DEFAULTS.has(row.billing_mode))
+    ) {
+      billingWritebacks.push({ id: row.id, mode: billingMode });
+    }
     const tokenUsageByModel: SyncedAgentSessionTokenUsage[] = (
       tokenUsageBySessionId.get(id) ?? []
     ).map((tokenRow) => ({
@@ -895,6 +988,28 @@ export function loadSyncedSessions(
       },
     ];
   });
+
+  // FEA-1434 (codex review follow-up): persist any launch-metadata overrides
+  // back to the sessions table so subsequent UI reads see the same billing
+  // mode as the synced payload. Best-effort: failures here must not block
+  // the sync cycle — the read result is already correct, this only catches
+  // up the local DB.
+  if (billingWritebacks.length > 0) {
+    try {
+      const update = db.prepare(
+        "UPDATE sessions SET billing_mode = ? WHERE id = ?",
+      );
+      for (const { id, mode } of billingWritebacks) {
+        update.run(mode, id);
+      }
+    } catch {
+      // Non-fatal — the sync payload already carries the resolved mode; the
+      // next sync cycle will retry the writeback if launch-metadata is still
+      // newer than the row.
+    }
+  }
+
+  return synced;
 }
 
 export function estimateTokenUsageCostUsd(

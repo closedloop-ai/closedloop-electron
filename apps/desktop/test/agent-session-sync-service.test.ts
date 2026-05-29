@@ -1209,3 +1209,178 @@ test("FEA-1434: schema bump to v2 is reflected in the contract constant", async 
   );
   assert.equal(AGENT_SESSION_SYNC_SCHEMA_VERSION, 2);
 });
+
+// ---------------------------------------------------------------------------
+// FEA-1434 (codex review follow-up): writeback + migration
+// ---------------------------------------------------------------------------
+
+test("FEA-1434 (codex review): launch-metadata override is persisted back to sessions.billing_mode", () => {
+  // Pre-fix bug: a Claude session spawned with ANTHROPIC_API_KEY had its
+  // launch-metadata stamped 'api' but the sessions.billing_mode column stayed
+  // at the schema default 'unknown' (the Claude hook doesn't read
+  // launch-metadata). The sync payload was correct ('api' wins) but
+  // Sessions.tsx reads from the column directly and mis-bucketed the row.
+  // This test asserts the writeback so local UI matches the cloud view.
+  const rootDir = mkdtempSync(
+    path.join(tmpdir(), "billing-mode-writeback-"),
+  );
+  const worktreeDir = path.join(rootDir, "worktree-writeback");
+  mkdirSync(path.join(worktreeDir, ".closedloop-ai", "work"), {
+    recursive: true,
+  });
+  writeFileSync(
+    path.join(worktreeDir, ".closedloop-ai", "work", "launch-metadata.json"),
+    JSON.stringify({ billingMode: "api" }),
+  );
+
+  const db = createServiceTestDatabase(rootDir);
+  insertBillingModeSessionRow(db, {
+    id: "sess-writeback",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "claude",
+    cwd: worktreeDir,
+    billingMode: "unknown",
+  });
+
+  const sessions = loadSyncedSessions(db, ["sess-writeback"]);
+
+  // Sync payload reports the resolved mode.
+  assert.equal(sessions[0].billingMode, "api");
+
+  // And the DB row is now updated so the next UI read sees the same mode.
+  const refreshed = db
+    .prepare("SELECT billing_mode FROM sessions WHERE id = ?")
+    .get("sess-writeback") as { billing_mode: string };
+  assert.equal(
+    refreshed.billing_mode,
+    "api",
+    "billing_mode column must be updated to match the resolved sync payload",
+  );
+
+  db.close();
+});
+
+test("FEA-1434 (codex review): writeback overwrites importer defaults but NOT explicit user values", () => {
+  // Hardcoded importer defaults (codex_chatgpt_pro / cursor_pro / copilot_seat
+  // / opencode / unknown) are safe to overwrite when launch-metadata
+  // disagrees. A non-default value (e.g. 'claude_max' or 'claude_pro')
+  // represents an intentional setting and must be preserved.
+  const rootDir = mkdtempSync(
+    path.join(tmpdir(), "billing-mode-writeback-respect-"),
+  );
+
+  // Worktree A: launch-metadata 'api', row 'codex_chatgpt_pro' → writeback.
+  const wtA = path.join(rootDir, "wt-a");
+  mkdirSync(path.join(wtA, ".closedloop-ai", "work"), { recursive: true });
+  writeFileSync(
+    path.join(wtA, ".closedloop-ai", "work", "launch-metadata.json"),
+    JSON.stringify({ billingMode: "api" }),
+  );
+
+  // Worktree B: launch-metadata 'api', row 'claude_max' (non-default) → keep.
+  const wtB = path.join(rootDir, "wt-b");
+  mkdirSync(path.join(wtB, ".closedloop-ai", "work"), { recursive: true });
+  writeFileSync(
+    path.join(wtB, ".closedloop-ai", "work", "launch-metadata.json"),
+    JSON.stringify({ billingMode: "api" }),
+  );
+
+  const db = createServiceTestDatabase(rootDir);
+  insertBillingModeSessionRow(db, {
+    id: "sess-overwrite",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "codex",
+    cwd: wtA,
+    billingMode: "codex_chatgpt_pro",
+  });
+  insertBillingModeSessionRow(db, {
+    id: "sess-preserve",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "claude",
+    cwd: wtB,
+    billingMode: "claude_max",
+  });
+
+  loadSyncedSessions(db, ["sess-overwrite", "sess-preserve"]);
+
+  const overwritten = db
+    .prepare("SELECT billing_mode FROM sessions WHERE id = ?")
+    .get("sess-overwrite") as { billing_mode: string };
+  assert.equal(
+    overwritten.billing_mode,
+    "api",
+    "importer default codex_chatgpt_pro must be overwritten by launch-metadata 'api'",
+  );
+
+  const preserved = db
+    .prepare("SELECT billing_mode FROM sessions WHERE id = ?")
+    .get("sess-preserve") as { billing_mode: string };
+  assert.equal(
+    preserved.billing_mode,
+    "claude_max",
+    "non-default claude_max must NOT be overwritten — only importer defaults are safe to clobber",
+  );
+
+  db.close();
+});
+
+test("FEA-1434 (codex review): sync service applies billing_mode migration on a pre-FEA-1434 DB", async () => {
+  // If the sync service opens a DB before the sidecar has applied its
+  // additive ALTER TABLE (or if the sidecar fails to start), the SELECT
+  // billing_mode would throw `no such column`. The sync service's own
+  // migration must make it self-sufficient.
+  const { ensureBillingModeColumn } = await import(
+    "../src/main/agent-session-sync-service.js"
+  );
+
+  const db = new DatabaseSync(":memory:");
+  // Mirror the pre-FEA-1434 schema: `harness` exists but `billing_mode` does
+  // not. (This is the same shape used by billing-mode-schema-migration.test.)
+  db.exec(`
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      status TEXT NOT NULL,
+      cwd TEXT,
+      model TEXT,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      ended_at TEXT,
+      awaiting_input_since TEXT,
+      metadata TEXT,
+      harness TEXT NOT NULL DEFAULT 'claude'
+    );
+  `);
+
+  // Sanity: column missing.
+  assert.throws(() => {
+    db.prepare("SELECT billing_mode FROM sessions LIMIT 1").get();
+  });
+
+  ensureBillingModeColumn(db);
+
+  // Column exists after migration.
+  const probe = db
+    .prepare("SELECT billing_mode FROM sessions LIMIT 1")
+    .get();
+  assert.equal(probe, undefined, "table is empty but the SELECT must succeed");
+
+  // Index was created.
+  const indexes = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions'",
+    )
+    .all() as Array<{ name: string }>;
+  assert.ok(
+    indexes.some((i) => i.name === "idx_sessions_billing_mode"),
+    "idx_sessions_billing_mode must be created by the migration",
+  );
+
+  // Idempotent — running again is a no-op.
+  ensureBillingModeColumn(db);
+
+  db.close();
+});
