@@ -67,7 +67,10 @@ import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch }
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
-import { AgentSessionSyncService } from "./agent-session-sync-service.js";
+import {
+  AgentSessionSyncService,
+  resolveAgentMonitorDatabasePath,
+} from "./agent-session-sync-service.js";
 import {
   isAgentMonitorHooksEnabled,
   setAgentMonitorHooksEnabled,
@@ -130,6 +133,10 @@ const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
+import { AnthropicAdminKeyStore } from "./anthropic-admin-key-store.js";
+import { OpenAIAdminKeyStore } from "./openai-admin-key-store.js";
+import { ReconciliationWorker } from "./reconciliation-worker.js";
+import { registerCostReconciliationIpc } from "./cost-reconciliation-ipc.js";
 import { prepareLoopCommandForExecution } from "./loop-command-preparer.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
 import {
@@ -198,6 +205,11 @@ export class DesktopApplication {
   private readonly commandKeyReconciler: CommandKeyReconciler;
   private readonly gatewaySigningKeyStore: GatewaySigningKeyStore;
   private readonly loopTokenStore: LoopTokenStore;
+  // FEA-1435: cost reconciliation. Created in constructor; worker initialized
+  // in boot() once at least one Admin Key is set and the feature is on.
+  private readonly anthropicAdminKeyStore: AnthropicAdminKeyStore;
+  private readonly openaiAdminKeyStore: OpenAIAdminKeyStore;
+  private readonly reconciliationWorker: ReconciliationWorker;
   private readonly tray: DesktopTray;
   private readonly desktopWindow: DesktopWindow;
   private readonly server: DesktopGatewayServer;
@@ -288,6 +300,18 @@ export class DesktopApplication {
       },
     });
     this.loopTokenStore = new LoopTokenStore();
+    // FEA-1435: Admin Key stores + reconciliation worker. Constructed eagerly
+    // so IPC handlers can call into them, but the worker is only `init()`-ed
+    // during boot when a key is set + the feature flag is on.
+    this.anthropicAdminKeyStore = new AnthropicAdminKeyStore();
+    this.openaiAdminKeyStore = new OpenAIAdminKeyStore();
+    this.reconciliationWorker = new ReconciliationWorker({
+      dbPath: resolveAgentMonitorDatabasePath(),
+      anthropicKeyStore: this.anthropicAdminKeyStore,
+      openaiKeyStore: this.openaiAdminKeyStore,
+      getIntervalHours: () => this.settingsStore.getReconciliationIntervalHours(),
+      isEnabled: () => this.settingsStore.getReconciliationEnabled(),
+    });
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
@@ -647,6 +671,19 @@ export class DesktopApplication {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
       this.agentSessionSync.start();
+    }
+
+    // FEA-1435: nightly cost reconciliation. Self-gates on
+    // reconciliationEnabled + at least one Admin Key being set. No-op
+    // otherwise. The worker schedules its own .unref()-ed interval so it
+    // never blocks app exit.
+    try {
+      this.reconciliationWorker.init();
+    } catch (err) {
+      gatewayLog.warn(
+        "reconciliation",
+        `boot init failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     try {
@@ -1709,6 +1746,9 @@ export class DesktopApplication {
     this.queueStatsTelemetryDebounce.cancel();
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
+    // FEA-1435: stop the reconciliation timer before the cloud/server shutdown
+    // sequence so it doesn't fire a vendor fetch mid-quit.
+    this.reconciliationWorker.stop();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -3369,6 +3409,21 @@ export class DesktopApplication {
       } catch {
         return { success: false };
       }
+    });
+
+    // FEA-1435: cost reconciliation IPC. Handlers + Zod payload validation live
+    // in cost-reconciliation-ipc.ts.
+    registerCostReconciliationIpc(ipcMain, {
+      anthropicKeyStore: this.anthropicAdminKeyStore,
+      openaiKeyStore: this.openaiAdminKeyStore,
+      worker: this.reconciliationWorker,
+      settingsStore: this.settingsStore,
+      reinitWorker: () => {
+        // Stop existing timer and re-init so the worker picks up the new
+        // key/setting state without an app restart.
+        this.reconciliationWorker.stop();
+        this.reconciliationWorker.init();
+      },
     });
   }
 

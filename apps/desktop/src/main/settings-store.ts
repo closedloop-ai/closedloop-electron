@@ -681,6 +681,32 @@ export class SettingsStore {
     return this.getAll();
   }
 
+  // --- Cost reconciliation (FEA-1435) ---
+
+  getReconciliationEnabled(): boolean {
+    return this.getFlag("reconciliationEnabled");
+  }
+
+  setReconciliationEnabled(enabled: boolean): void {
+    this.setFlag("reconciliationEnabled", enabled);
+  }
+
+  getReconciliationIntervalHours(): number {
+    const raw = this.store.get(
+      "reconciliationIntervalHours" as keyof DesktopSettings,
+      DEFAULT_DESKTOP_SETTINGS.reconciliationIntervalHours,
+    ) as number;
+    if (!Number.isFinite(raw)) {
+      return DEFAULT_DESKTOP_SETTINGS.reconciliationIntervalHours;
+    }
+    return Math.max(6, Math.floor(raw));
+  }
+
+  setReconciliationIntervalHours(hours: number): void {
+    const clamped = Math.max(6, Math.floor(hours));
+    this.store.set("reconciliationIntervalHours" as keyof DesktopSettings, clamped);
+  }
+
   // --- Managed-key hint getters/setters (D5 / AC-010) ---
 
   getManagedKeyHintDismissedAt(): string | null {

@@ -3423,6 +3423,8 @@
           <button data-settings-tab="policies">Policies</button>
           <button data-settings-tab="binary-paths">CLI Tools</button>
           <button data-settings-tab="feature-flags">Labs</button>
+          <!-- FEA-1435: Cost reconciliation sub-tab. -->
+          <button data-settings-tab="cost-reconciliation">Cost Reconciliation</button>
         </div>
 
         <!-- Relay / Gateway sub-tab -->
@@ -3793,6 +3795,61 @@
           </div>
           <div class="settings-tab-footer">
             <p class="muted" id="featureFlagsMessage"></p>
+          </div>
+        </div>
+
+        <!-- FEA-1435: Cost Reconciliation sub-tab. Admin Key fields, run-now,
+             status block. Renderer talks to the main process only via the
+             cost-reconciliation:* IPC channels exposed on window.desktopApi. -->
+        <div id="settings-cost-reconciliation" class="settings-sub-panel">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Cost Reconciliation</h3>
+            <p class="settings-group-desc">
+              Nightly cross-check of locally-estimated token costs against
+              authoritative vendor billing data. Requires an organization Admin
+              Key for each vendor you want to reconcile against. Admin Keys are
+              encrypted at rest via your OS keychain and never leave this
+              machine.
+            </p>
+            <div class="row">
+              <label for="anthropicAdminKey">Anthropic Admin Key</label>
+              <input id="anthropicAdminKey" type="password" placeholder="sk-ant-admin-..." autocomplete="off" />
+              <div class="actions" style="margin-top: 8px">
+                <button id="validateAnthropicAdminKey">Validate &amp; Save</button>
+                <button class="secondary" id="clearAnthropicAdminKey">Clear</button>
+              </div>
+              <p class="muted" id="anthropicAdminKeyStatus"></p>
+            </div>
+            <div class="row">
+              <label for="openaiAdminKey">OpenAI Admin Key</label>
+              <input id="openaiAdminKey" type="password" placeholder="sk-admin-..." autocomplete="off" />
+              <div class="actions" style="margin-top: 8px">
+                <button id="validateOpenAIAdminKey">Validate &amp; Save</button>
+                <button class="secondary" id="clearOpenAIAdminKey">Clear</button>
+              </div>
+              <p class="muted" id="openaiAdminKeyStatus"></p>
+            </div>
+            <div class="row">
+              <label>
+                <input id="reconciliationEnabled" type="checkbox" />
+                Enable nightly reconciliation
+              </label>
+              <p class="field-help">Disabled until at least one Admin Key is saved and validated.</p>
+            </div>
+            <div class="row">
+              <label>Run now</label>
+              <div class="actions" style="margin-top: 8px">
+                <button id="triggerReconciliationRun">Run reconciliation now</button>
+              </div>
+              <p class="muted" id="reconciliationRunMessage"></p>
+            </div>
+            <div class="row">
+              <label>Status</label>
+              <div id="reconciliationStatusBlock" class="muted" style="line-height: 1.6">Loading...</div>
+            </div>
+          </div>
+          <div class="settings-tab-footer">
+            <p class="muted" id="costReconciliationMessage"></p>
           </div>
         </div>
       </section>
@@ -6747,6 +6804,133 @@
       }
       document.getElementById("saveApiKey").addEventListener("click", saveApiKeyValue);
       document.getElementById("clearApiKey").addEventListener("click", clearApiKeyValue);
+
+      // FEA-1435: cost reconciliation settings panel.
+      const anthropicAdminKeyInput = document.getElementById("anthropicAdminKey");
+      const openaiAdminKeyInput = document.getElementById("openaiAdminKey");
+      const anthropicAdminKeyStatus = document.getElementById("anthropicAdminKeyStatus");
+      const openaiAdminKeyStatus = document.getElementById("openaiAdminKeyStatus");
+      const reconciliationEnabledCheckbox = document.getElementById("reconciliationEnabled");
+      const reconciliationStatusBlock = document.getElementById("reconciliationStatusBlock");
+      const reconciliationRunMessage = document.getElementById("reconciliationRunMessage");
+
+      function renderAdminKeyStatus(target, status) {
+        if (!status?.set) {
+          target.textContent = "Not set.";
+          target.classList.remove("error");
+          return;
+        }
+        const parts = ["Key set."];
+        if (status.lastValidatedAt) {
+          parts.push(`Last validated ${new Date(status.lastValidatedAt).toLocaleString()}.`);
+        }
+        target.textContent = parts.join(" ");
+        target.classList.remove("error");
+      }
+      function renderAdminKeyError(target, code) {
+        const labels = {
+          "401": "Invalid (401 — key rejected).",
+          "403": "Insufficient scope (403).",
+          "network": "Network error.",
+          "rate_limited": "Rate-limited by vendor — try again shortly.",
+          "malformed": "Vendor returned a malformed response.",
+          "safe_storage_unavailable": "OS keychain unavailable on this machine.",
+          "invalid_payload": "Invalid request.",
+        };
+        target.textContent = labels[code] ?? `Validation failed (${code}).`;
+      }
+      function renderReconciliationStatus(status) {
+        if (!status) {
+          reconciliationStatusBlock.textContent = "Status unavailable.";
+          return;
+        }
+        const lines = [];
+        lines.push(`Last run: ${status.lastRunAt ? new Date(status.lastRunAt).toLocaleString() : "never"}`);
+        if (status.dayRangeCovered) {
+          lines.push(`Days covered: ${status.dayRangeCovered.from} → ${status.dayRangeCovered.to}`);
+        } else {
+          lines.push("Days covered: none yet");
+        }
+        if (typeof status.avgDriftPct === "number") {
+          lines.push(`Average drift: ${status.avgDriftPct.toFixed(2)}%`);
+        }
+        lines.push(`Rows: ${status.rowCount}`);
+        lines.push(`Cadence: every ${status.intervalHours}h (jittered ±2h)`);
+        reconciliationStatusBlock.innerHTML = lines.map((l) => `<div>${l}</div>`).join("");
+      }
+      async function refreshReconciliationPanel() {
+        try {
+          const [aStatus, oStatus, runStatus] = await Promise.all([
+            api.getAnthropicAdminKeyStatus(),
+            api.getOpenAIAdminKeyStatus(),
+            api.getReconciliationStatus(),
+          ]);
+          renderAdminKeyStatus(anthropicAdminKeyStatus, aStatus);
+          renderAdminKeyStatus(openaiAdminKeyStatus, oStatus);
+          reconciliationEnabledCheckbox.checked = Boolean(runStatus?.enabled);
+          const anyKey = (aStatus?.set || oStatus?.set);
+          reconciliationEnabledCheckbox.disabled = !anyKey;
+          renderReconciliationStatus(runStatus);
+        } catch {
+          reconciliationStatusBlock.textContent = "Status unavailable.";
+        }
+      }
+
+      document.getElementById("validateAnthropicAdminKey").addEventListener("click", async () => {
+        const key = anthropicAdminKeyInput.value.trim();
+        if (!key) {
+          renderAdminKeyError(anthropicAdminKeyStatus, "invalid_payload");
+          return;
+        }
+        anthropicAdminKeyStatus.textContent = "Validating...";
+        const result = await api.setAnthropicAdminKey(key);
+        if (result?.success) {
+          anthropicAdminKeyInput.value = "";
+          await refreshReconciliationPanel();
+        } else {
+          renderAdminKeyError(anthropicAdminKeyStatus, result?.error ?? "unknown");
+        }
+      });
+      document.getElementById("clearAnthropicAdminKey").addEventListener("click", async () => {
+        await api.clearAnthropicAdminKey();
+        await refreshReconciliationPanel();
+      });
+      document.getElementById("validateOpenAIAdminKey").addEventListener("click", async () => {
+        const key = openaiAdminKeyInput.value.trim();
+        if (!key) {
+          renderAdminKeyError(openaiAdminKeyStatus, "invalid_payload");
+          return;
+        }
+        openaiAdminKeyStatus.textContent = "Validating...";
+        const result = await api.setOpenAIAdminKey(key);
+        if (result?.success) {
+          openaiAdminKeyInput.value = "";
+          await refreshReconciliationPanel();
+        } else {
+          renderAdminKeyError(openaiAdminKeyStatus, result?.error ?? "unknown");
+        }
+      });
+      document.getElementById("clearOpenAIAdminKey").addEventListener("click", async () => {
+        await api.clearOpenAIAdminKey();
+        await refreshReconciliationPanel();
+      });
+      reconciliationEnabledCheckbox.addEventListener("change", async () => {
+        await api.setReconciliationEnabled(reconciliationEnabledCheckbox.checked);
+        await refreshReconciliationPanel();
+      });
+      document.getElementById("triggerReconciliationRun").addEventListener("click", async () => {
+        reconciliationRunMessage.textContent = "Queuing...";
+        const result = await api.triggerReconciliationRun();
+        reconciliationRunMessage.textContent = result?.queued ? "Run queued." : "Already running.";
+        await refreshReconciliationPanel();
+      });
+
+      window.addEventListener("desktop:navigate-settings-tab", (event) => {
+        if (event.detail === "cost-reconciliation") {
+          void refreshReconciliationPanel();
+        }
+      });
+      void refreshReconciliationPanel();
       headerPauseToggle.addEventListener("change", async () => {
         await api.setCloudCommandsPaused(headerPauseToggle.checked);
         await refreshRuntime();

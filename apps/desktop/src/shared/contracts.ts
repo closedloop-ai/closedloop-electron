@@ -175,6 +175,10 @@ export interface DesktopSettings {
   updateAndRestartEnabled: boolean;
   /** Splits oversized agent sessions into chunked batches for sync. Requires relay support. */
   agentSessionChunkedSyncEnabled: boolean;
+  /** FEA-1435: nightly reconciliation worker on/off. Default off. */
+  reconciliationEnabled: boolean;
+  /** FEA-1435: cadence in hours. Min 6, default 24. */
+  reconciliationIntervalHours: number;
   /**
    * ISO timestamp when the user last dismissed the managed-key revival hint
    * (D5 / AC-010). Null means never dismissed.
@@ -211,6 +215,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   activeConfigId: null,
   updateAndRestartEnabled: false,
   agentSessionChunkedSyncEnabled: false,
+  reconciliationEnabled: false,
+  reconciliationIntervalHours: 24,
   managedKeyHintDismissedAt: null,
   managedKeyHintLastSeenProvenance: null,
 };

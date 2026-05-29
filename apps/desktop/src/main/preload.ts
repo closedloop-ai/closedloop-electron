@@ -179,7 +179,56 @@ const desktopApi = {
    * The renderer does not supply any arguments — provenance is main-process-only.
    */
   dismissManagedKeyHint: () =>
-    ipcRenderer.invoke("desktop:dismiss-managed-key-hint") as Promise<{ success: boolean }>
+    ipcRenderer.invoke("desktop:dismiss-managed-key-hint") as Promise<{ success: boolean }>,
+  // FEA-1435: Cost reconciliation Admin Keys + worker controls.
+  getAnthropicAdminKeyStatus: () =>
+    ipcRenderer.invoke("cost-reconciliation:get-anthropic-key-status") as Promise<{
+      set: boolean;
+      setAt?: string;
+      lastValidatedAt?: string;
+    }>,
+  setAnthropicAdminKey: (key: string) =>
+    ipcRenderer.invoke("cost-reconciliation:set-anthropic-key", { key }) as Promise<{
+      success: boolean;
+      error?: string;
+      entriesReturned?: number;
+    }>,
+  clearAnthropicAdminKey: () =>
+    ipcRenderer.invoke("cost-reconciliation:clear-anthropic-key") as Promise<{
+      success: boolean;
+    }>,
+  getOpenAIAdminKeyStatus: () =>
+    ipcRenderer.invoke("cost-reconciliation:get-openai-key-status") as Promise<{
+      set: boolean;
+      setAt?: string;
+      lastValidatedAt?: string;
+    }>,
+  setOpenAIAdminKey: (key: string) =>
+    ipcRenderer.invoke("cost-reconciliation:set-openai-key", { key }) as Promise<{
+      success: boolean;
+      error?: string;
+      entriesReturned?: number;
+    }>,
+  clearOpenAIAdminKey: () =>
+    ipcRenderer.invoke("cost-reconciliation:clear-openai-key") as Promise<{
+      success: boolean;
+    }>,
+  triggerReconciliationRun: () =>
+    ipcRenderer.invoke("cost-reconciliation:trigger-run") as Promise<{ queued: boolean }>,
+  getReconciliationStatus: () =>
+    ipcRenderer.invoke("cost-reconciliation:get-status") as Promise<{
+      lastRunAt: string | null;
+      dayRangeCovered: { from: string; to: string } | null;
+      avgDriftPct: number | null;
+      rowCount: number;
+      enabled: boolean;
+      intervalHours: number;
+    }>,
+  setReconciliationEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke("cost-reconciliation:set-enabled", { enabled }) as Promise<{
+      success: boolean;
+      enabled: boolean;
+    }>,
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

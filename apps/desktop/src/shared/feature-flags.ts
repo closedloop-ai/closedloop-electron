@@ -77,6 +77,17 @@ const FEATURE_FLAGS_INTERNAL = [
       "Splits oversized agent sessions into multiple smaller batches for sync. Enable after the relay supports chunked ingestion.",
     category: "Experimental" as const,
   },
+  {
+    // FEA-1435 nightly reconciliation against Anthropic + OpenAI Cost APIs.
+    // Off by default; the worker only initializes when this is on AND at least
+    // one Admin Key has been validated + persisted.
+    key: "reconciliationEnabled" as const,
+    default: false,
+    label: "Cost Reconciliation",
+    description:
+      "Nightly reconciliation of local token-cost estimates against authoritative Anthropic + OpenAI Cost API data. Requires an organization Admin Key.",
+    category: "Experimental" as const,
+  },
 ] as const;
 
 export type FlagKey = (typeof FEATURE_FLAGS_INTERNAL)[number]["key"];
