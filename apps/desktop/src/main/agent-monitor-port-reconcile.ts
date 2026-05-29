@@ -78,9 +78,12 @@ export function parseFirstPid(lsofOutput: string): number | null {
   return null;
 }
 
-// Parse a single `ps -o uid=,ppid=,command=` line into a PortHolder.
+// Parse a single `ps -o uid=,ppid=,command=` line into a PortHolder. Only the
+// first non-empty line is considered, so a trailing/wrapped newline from an
+// exotic `ps` implementation cannot defeat the single-line regex.
 export function parsePsLine(pid: number, psOutput: string): PortHolder | null {
-  const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(psOutput.trim());
+  const firstLine = psOutput.trim().split("\n", 1)[0] ?? "";
+  const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(firstLine);
   if (!match) {
     return null;
   }
@@ -170,7 +173,7 @@ export async function reconcileAgentMonitorPort(
   }
 
   if (klass === "orphan") {
-    if (await reclaimFromHolder(holder.pid)) {
+    if (await reclaimFromHolder(holder.pid, port, selfUid)) {
       gatewayLog.info(
         TAG,
         `reclaimed port ${port} from orphaned sidecar pid=${holder.pid}`,
@@ -193,7 +196,7 @@ export async function reconcileAgentMonitorPort(
     );
     return "blocked-live";
   }
-  if (await reclaimFromHolder(holder.pid)) {
+  if (await reclaimFromHolder(holder.pid, port, selfUid)) {
     gatewayLog.info(
       TAG,
       `reclaimed port ${port} from live ClosedLoop instance pid=${holder.pid} (user requested)`,
@@ -207,7 +210,32 @@ export async function reconcileAgentMonitorPort(
 // SIGKILL (group + bare pid, since a reparented orphan keeps its own pgid but
 // the bare-pid fallback covers any edge case). Returns true once the process
 // is gone — at which point the kernel has released its listening socket.
-async function reclaimFromHolder(pid: number): Promise<boolean> {
+//
+// TOCTOU guard: the holder was classified from an earlier lsof/ps snapshot. Re-
+// confirm, immediately before signaling, that the same pid still holds the port
+// AND is still ours (uid + command marker). This closes the window where the
+// original holder exited and the OS recycled its pid for an unrelated process.
+async function reclaimFromHolder(
+  pid: number,
+  port: number,
+  selfUid: number,
+): Promise<boolean> {
+  const current = await findPortHolder(port);
+  if (!current) {
+    return true; // port already free — nothing to reclaim.
+  }
+  if (
+    current.pid !== pid ||
+    current.uid !== selfUid ||
+    !current.command.includes(SIDECAR_COMMAND_MARKER)
+  ) {
+    gatewayLog.warn(
+      TAG,
+      `aborting reclaim: port ${port} holder changed since classification (now pid=${current.pid})`,
+    );
+    return false;
+  }
+
   signalProcess(pid, "SIGTERM", { group: true });
   if (await waitForProcessExit(pid, KILL_GRACE_MS)) {
     return true;

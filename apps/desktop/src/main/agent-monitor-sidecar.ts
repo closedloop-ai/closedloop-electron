@@ -1,4 +1,4 @@
-import { app, dialog } from "electron";
+import { app, BrowserWindow, dialog } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -159,8 +159,8 @@ export class AgentMonitorSidecar {
   // without explicit user consent. Default/cancel is the non-destructive
   // "quit it first"; only an explicit "Kill It" click force-reclaims it.
   private async confirmKillLiveInstance(holder: PortHolder): Promise<boolean> {
-    const result = await dialog.showMessageBox({
-      type: "warning",
+    const options = {
+      type: "warning" as const,
       buttons: ["Quit it first", "Kill It"],
       defaultId: 0,
       cancelId: 0,
@@ -168,7 +168,14 @@ export class AgentMonitorSidecar {
       title: "Agent dashboard port in use",
       message: `Another ClosedLoop instance (PID ${holder.pid}) is using the dashboard port ${this.port}.`,
       detail: `Process: ${holder.command}\n\nQuit that instance first, or force-kill it to free the dashboard port.`,
-    });
+    };
+    // Attach to the main window so the prompt is a sheet on top of the app
+    // rather than a free-floating window that can hide behind it (macOS).
+    const parent =
+      BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null;
+    const result = parent
+      ? await dialog.showMessageBox(parent, options)
+      : await dialog.showMessageBox(options);
     return result.response === 1;
   }
 

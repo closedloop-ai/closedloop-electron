@@ -118,6 +118,10 @@ describe("parsePsLine", () => {
     assert.equal(parsePsLine(200, ""), null);
     assert.equal(parsePsLine(200, "garbage"), null);
   });
+  test("trailing/extra lines are ignored (first data line wins)", () => {
+    const holder = parsePsLine(200, "501 1 /opt/app/agent-monitor/server/index.js\n\n");
+    assert.equal(holder?.command, "/opt/app/agent-monitor/server/index.js");
+  });
 });
 
 describe("PID file helpers", () => {
