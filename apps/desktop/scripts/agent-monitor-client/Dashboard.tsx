@@ -549,6 +549,8 @@ function StatPill({
   sub,
   icon: Icon,
   color = "text-accent",
+  testid,
+  subTestid,
 }: {
   label: string;
   value: string | number;
@@ -556,6 +558,8 @@ function StatPill({
   sub?: string;
   icon: React.ElementType;
   color?: string;
+  testid?: string;
+  subTestid?: string;
 }) {
   return (
     <div className="card p-5 flex flex-col gap-2">
@@ -563,8 +567,14 @@ function StatPill({
         <span className="text-xs text-gray-500 uppercase tracking-wider">{label}</span>
         <Icon className={`w-4 h-4 ${color}`} />
       </div>
-      <p className={`text-2xl font-bold ${color}`}>{raw ? <Tip raw={raw}>{value}</Tip> : value}</p>
-      {sub && <p className="text-[11px] text-gray-500">{sub}</p>}
+      <p className={`text-2xl font-bold ${color}`} data-testid={testid}>
+        {raw ? <Tip raw={raw}>{value}</Tip> : value}
+      </p>
+      {sub && (
+        <p className="text-[11px] text-gray-500" data-testid={subTestid}>
+          {sub}
+        </p>
+      )}
     </div>
   );
 }
@@ -1806,6 +1816,8 @@ export function Dashboard() {
               sub={`${analyticsData?.overview.active_sessions ?? stats?.active_sessions ?? 0} active`}
               icon={FolderOpen}
               color="text-blue-400"
+              testid="audit-dashboard-monitor-total-sessions"
+              subTestid="audit-dashboard-monitor-total-sessions-trend-active"
             />
             <StatPill
               label="Total Agents"
@@ -1834,6 +1846,7 @@ export function Dashboard() {
               }
               icon={DollarSign}
               color="text-emerald-400"
+              testid="audit-dashboard-monitor-total-cost"
             />
             <StatPill
               label="Total Events"
@@ -1846,6 +1859,7 @@ export function Dashboard() {
               sub={`~${analyticsData?.avg_events_per_session ?? 0} per session`}
               icon={Zap}
               color="text-yellow-400"
+              testid="audit-dashboard-monitor-total-events"
             />
           </div>
 

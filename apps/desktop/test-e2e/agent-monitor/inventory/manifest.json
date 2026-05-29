@@ -21,10 +21,10 @@
       "bug_ref": null,
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-total-sessions']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text",
-        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1800",
-        "followup": "Add data-testid to the StatPill value element, keyed per tile."
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill value element."
       }
     },
     {
@@ -46,10 +46,10 @@
       "bug_ref": null,
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-total-sessions-trend-active']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text_sub",
-        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1806",
-        "followup": "Add data-testid to the StatPill.sub secondary (sub) text element."
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill sub, subTestid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill sub element."
       }
     },
     {
@@ -169,10 +169,10 @@
       "bug_ref": null,
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-total-events']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text",
-        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1840",
-        "followup": "Add data-testid to the StatPill value element, keyed per tile."
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill value element."
       }
     },
     {
@@ -194,10 +194,10 @@
       "notes": "Oracle replicates the per-row pricing formula: sum over token_usage of (input*input_per_mtok + output*output_per_mtok + cache_read*cache_read_per_mtok + cache_write*cache_write_per_mtok) / 1e6.",
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-total-cost']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text",
-        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1828",
-        "followup": "Add data-testid to the StatPill value element, keyed per tile."
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill value element."
       }
     },
     {

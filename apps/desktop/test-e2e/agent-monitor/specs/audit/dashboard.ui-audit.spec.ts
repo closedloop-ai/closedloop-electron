@@ -15,6 +15,8 @@ import {
   tilesForScreen,
 } from "../../inventory/manifest-loader.mjs";
 import { computeOracle, openDb } from "../../inventory/audit-runner.mjs";
+// @ts-expect-error — .ts helper imported by Playwright's ts loader
+import { sliceForTile } from "../../helpers/playwright-region";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -37,19 +39,12 @@ function resolveFixtureDbPath(): string {
   );
 }
 
-// Slice the main innerText to a region near a known label, so we don't depend
-// on data-testid attributes that the upstream agent-dashboard package doesn't
-// expose. Matches the pattern used in dashboard-tiles.spec.ts.
-async function sliceAtLabel(
-  page: import("@playwright/test").Page,
-  label: string,
-  windowChars = 80,
-): Promise<string> {
-  const text = await page.locator("main").innerText();
-  const idx = text.toLowerCase().indexOf(label.toLowerCase());
-  expect(idx, `label "${label}" must appear in <main>`).toBeGreaterThan(-1);
-  return text.slice(idx, idx + windowChars);
-}
+// Region slicing lives in helpers/playwright-region.ts. `sliceForTile` prefers
+// the tile's data-testid selector when the manifest records one as present in
+// code (selector.present_in_code), and falls back to slicing <main> innerText
+// near the tile's label otherwise. FEA-1437 Phase 3 added data-testids to the
+// Monitor StatPills, so those tiles now bind by selector; the rest still slice
+// by label.
 
 const manifest = loadManifest();
 const dashboardTiles = tilesForScreen(manifest, "Dashboard", "Monitor");
@@ -99,8 +94,9 @@ test.describe("Dashboard tiles · UI audit (manifest-driven)", () => {
         db.close();
       }
 
-      // Slice the page near the label and assert the formatted value appears.
-      const region = await sliceAtLabel(page, row.label);
+      // Resolve the tile's region: data-testid selector when present, else
+      // label slice. See helpers/playwright-region.ts.
+      const region = await sliceForTile(page, row);
 
       if (row.tile_kind === "trend") {
         // Trends render like "{n} active" or "{n} total" beneath the big
