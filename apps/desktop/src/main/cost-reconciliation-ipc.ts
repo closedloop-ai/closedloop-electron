@@ -27,6 +27,19 @@ const SetEnabledSchema = z.object({
   enabled: z.boolean(),
 });
 
+const GetDriftRowsSchema = z.object({
+  daysBack: z.number().int().positive().max(365).optional(),
+});
+
+const ExportDaySchema = z.object({
+  // YYYY-MM-DD
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  vendor: z.enum(["anthropic", "openai"]),
+  // Bound the model identifier to avoid pathological inputs; lowercased
+  // upstream in the worker aggregation.
+  model: z.string().min(1).max(128),
+});
+
 export interface CostReconciliationIpcDeps {
   anthropicKeyStore: AnthropicAdminKeyStore;
   openaiKeyStore: OpenAIAdminKeyStore;
@@ -62,6 +75,10 @@ export function registerCostReconciliationIpc(
         );
         return { success: false, error: outcome.error };
       }
+      // FEA-1436: a new key may belong to a different org — clear cached
+      // per-user analytics + capability flag so we don't show stale data
+      // and so the next run re-probes the endpoint.
+      deps.worker.resetClaudeCodeAnalyticsState();
       deps.reinitWorker();
       return { success: true };
     } catch {
@@ -72,6 +89,9 @@ export function registerCostReconciliationIpc(
 
   ipcMain.handle("cost-reconciliation:clear-anthropic-key", () => {
     deps.anthropicKeyStore.clear();
+    // FEA-1436: clear cached analytics + capability so a future key for a
+    // different org doesn't inherit the previous org's data.
+    deps.worker.resetClaudeCodeAnalyticsState();
     deps.reinitWorker();
     return { success: true };
   });
@@ -128,5 +148,39 @@ export function registerCostReconciliationIpc(
     deps.settingsStore.setReconciliationEnabled(parsed.data.enabled);
     deps.reinitWorker();
     return { success: true, enabled: parsed.data.enabled };
+  });
+
+  // FEA-1436: drift diagnostics queries. Read-only — no key/admin material
+  // crosses these channels.
+  ipcMain.handle("cost-reconciliation:get-drift-rows", (_event, payload) => {
+    const parsed = GetDriftRowsSchema.safeParse(payload ?? {});
+    if (!parsed.success) {
+      return { rows: [] };
+    }
+    const rows = deps.worker.getDriftRows(parsed.data.daysBack ?? 30);
+    return { rows };
+  });
+
+  ipcMain.handle("cost-reconciliation:get-drift-rollup", () => {
+    return deps.worker.getDriftRollup();
+  });
+
+  ipcMain.handle("cost-reconciliation:export-day", (_event, payload) => {
+    const parsed = ExportDaySchema.safeParse(payload);
+    if (!parsed.success) {
+      return { ok: false, error: "invalid_payload" as const };
+    }
+    const blob = deps.worker.exportDay(parsed.data);
+    if (!blob) {
+      return { ok: false, error: "not_found" as const };
+    }
+    return { ok: true, blob };
+  });
+
+  // FEA-1436: per-user Claude Code Analytics. Returns empty rows when the
+  // org's plan tier doesn't support the endpoint (sets a capability flag in
+  // the worker DB so subsequent runs skip the upstream call).
+  ipcMain.handle("cost-reconciliation:get-claude-code-analytics", () => {
+    return deps.worker.getClaudeCodeAnalytics();
   });
 }

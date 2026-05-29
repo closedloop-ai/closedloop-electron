@@ -1708,6 +1708,118 @@
         border-top: 1px solid var(--border);
       }
 
+      /* FEA-1436: drift diagnostics rollup card + tables. */
+      .recon-rollup-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 16px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--card);
+        margin-bottom: 16px;
+      }
+      .recon-rollup-stats {
+        display: flex;
+        gap: 24px;
+      }
+      .recon-rollup-stat-label {
+        font-size: 11px;
+        color: var(--muted-foreground, #888);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .recon-rollup-stat-value {
+        font-size: 18px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      .recon-sparkline {
+        flex-shrink: 0;
+      }
+      .recon-sparkline .recon-sparkline-line {
+        fill: none;
+        stroke: var(--primary, #5a8dee);
+        stroke-width: 1.5;
+        stroke-linejoin: round;
+      }
+      .recon-sparkline .recon-sparkline-axis {
+        stroke: var(--border, #2a2a2a);
+        stroke-width: 0.5;
+        stroke-dasharray: 2 2;
+      }
+      .recon-drift-table,
+      .recon-cc-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      .recon-drift-table th,
+      .recon-drift-table td,
+      .recon-cc-table th,
+      .recon-cc-table td {
+        padding: 6px 8px;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+      }
+      .recon-drift-table th.num,
+      .recon-drift-table td.num,
+      .recon-cc-table th.num,
+      .recon-cc-table td.num {
+        text-align: right;
+      }
+      .recon-drift-table tr.flagged td:first-child::before {
+        /* Notice icon — pure CSS-rendered so we don't depend on emoji fonts. */
+        content: "!";
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        line-height: 14px;
+        text-align: center;
+        margin-right: 6px;
+        background: var(--warning-bg, #fff8e1);
+        color: var(--warning-fg, #b78900);
+        border: 1px solid var(--warning-border, #f5c518);
+        border-radius: 50%;
+        font-weight: 700;
+        font-size: 10px;
+        vertical-align: middle;
+      }
+      .recon-drift-table .recon-drift-explain {
+        background: none;
+        border: none;
+        color: var(--primary, #5a8dee);
+        cursor: pointer;
+        padding: 0;
+        font-size: 12px;
+      }
+      .recon-drift-table .recon-drift-explain:hover {
+        text-decoration: underline;
+      }
+      .recon-drift-table tr.explain-row td {
+        background: var(--card, #1a1a1a);
+        font-size: 12px;
+        color: var(--muted-foreground, #888);
+        padding: 8px 16px;
+      }
+      .recon-drift-table .recon-drift-export {
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .recon-drift-table .recon-drift-export:hover {
+        border-color: var(--primary);
+      }
+      .recon-cc-table .recon-cc-gap-flagged {
+        color: var(--warning-fg, #b78900);
+        font-weight: 600;
+      }
+
       .saved-configs-group {
         margin-top: 20px;
       }
@@ -3847,6 +3959,92 @@
               <label>Status</label>
               <div id="reconciliationStatusBlock" class="muted" style="line-height: 1.6">Loading...</div>
             </div>
+          </div>
+
+          <!-- FEA-1436: drift diagnostics. Headline rollup card with inline-SVG
+               sparkline, drift row table, and (when present) per-user Claude
+               Code Analytics breakdown. -->
+          <div class="settings-group" id="reconciliationDiagnosticsGroup">
+            <h3 class="settings-group-title">Drift diagnostics</h3>
+            <p class="settings-group-desc">
+              Last 30 days of vendor-vs-local cost reconciliation. Rows above
+              5% drift are flagged for review; click <em>Explain</em> for the
+              suspected cause or <em>Export</em> to package the day's data for
+              a support ticket.
+            </p>
+            <div id="reconciliationDiagnosticsEmpty" class="muted" style="padding: 12px 0">
+              No data yet — add an Admin Key in Settings → Cost Reconciliation
+              to start.
+            </div>
+            <div id="reconciliationDiagnosticsContent" style="display: none">
+              <!-- Headline rollup card with inline SVG sparkline. -->
+              <div class="recon-rollup-card" id="reconciliationRollupCard">
+                <div class="recon-rollup-stats">
+                  <div class="recon-rollup-stat">
+                    <div class="recon-rollup-stat-label">Rolling 30-day drift</div>
+                    <div class="recon-rollup-stat-value" id="reconRollupAvgDrift">—</div>
+                  </div>
+                  <div class="recon-rollup-stat">
+                    <div class="recon-rollup-stat-label">Total |drift|</div>
+                    <div class="recon-rollup-stat-value" id="reconRollupTotalDrift">—</div>
+                  </div>
+                  <div class="recon-rollup-stat">
+                    <div class="recon-rollup-stat-label">Days covered</div>
+                    <div class="recon-rollup-stat-value" id="reconRollupDaysCovered">—</div>
+                  </div>
+                </div>
+                <!-- Inline SVG sparkline. ~30 LOC inline, no chart library.
+                     Math (documented in renderSparkline()): map [minDriftPct,
+                     maxDriftPct] linearly onto a 100x30 viewBox; X is evenly
+                     spaced across the day count; rows with null drift get
+                     interpolated y = midline so the curve doesn't break. -->
+                <svg id="reconRollupSparkline" class="recon-sparkline" width="160" height="36" viewBox="0 0 160 36" aria-label="30-day drift sparkline" role="img"></svg>
+              </div>
+              <!-- Drift row table. -->
+              <table class="recon-drift-table" id="reconDriftTable">
+                <thead>
+                  <tr>
+                    <th>Day</th>
+                    <th>Vendor</th>
+                    <th>Model</th>
+                    <th class="num">Local</th>
+                    <th class="num">Vendor</th>
+                    <th class="num">Drift %</th>
+                    <th>Cause</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="reconDriftTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- FEA-1436: per-user attribution. Rendered only when
+               claude_code_analytics_daily has rows (Team/Enterprise gated). -->
+          <div class="settings-group" id="reconciliationCcAnalyticsGroup" style="display: none">
+            <h3 class="settings-group-title">
+              Per-user attribution (Anthropic Team/Enterprise)
+            </h3>
+            <p class="settings-group-desc">
+              Aggregated per-user Claude Code activity for the last 30 days
+              from the Anthropic Claude Code Analytics API. Users with
+              sessions on Anthropic's side but no local activity may be
+              running Claude Code outside this Electron app.
+            </p>
+            <table class="recon-cc-table" id="reconCcAnalyticsTable">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th class="num">Days active</th>
+                  <th class="num">Sessions</th>
+                  <th class="num">Tokens</th>
+                  <th class="num">Anthropic est. $</th>
+                  <th class="num">Local est. $</th>
+                  <th class="num">Gap</th>
+                </tr>
+              </thead>
+              <tbody id="reconCcAnalyticsTableBody"></tbody>
+            </table>
           </div>
           <div class="settings-tab-footer">
             <p class="muted" id="costReconciliationMessage"></p>
@@ -6925,12 +7123,264 @@
         await refreshReconciliationPanel();
       });
 
+      // FEA-1436: drift diagnostics. Human-readable cause-hint explanations
+      // mirror the CAUSE_HINT_EXPLANATIONS map in
+      // src/main/reconciliation-cause-hint.ts. Keeping a copy here avoids a
+      // round-trip just to render hint text.
+      const CAUSE_HINT_EXPLANATIONS = {
+        cache_write_1h_unmodeled:
+          "Vendor billed for 1-hour ephemeral cache writes that our live cost model doesn't currently price separately.",
+        batch_api_discount:
+          "Vendor billed roughly half of the local estimate — consistent with the Batch API 50% discount.",
+        priority_tier_premium:
+          "Vendor billed above the local estimate — consistent with Anthropic's priority service tier.",
+        server_side_tool_use:
+          "Vendor billed for server-side tool use (web search or code execution) that the live estimator doesn't model as a billable line.",
+        trial_credit_applied:
+          "Vendor billed approximately zero while the local estimate is non-zero — trial credits or promotional discounts likely applied at the vendor.",
+        model_alias_mismatch:
+          "Large drift with no other structured signal — local pricing may be using a different model SKU than the vendor (e.g. aliased to a Sonnet rate while the vendor billed at Opus rates).",
+        unknown:
+          "Drift exceeds the 5% tolerance band but matches no known cause pattern. Investigation needed.",
+      };
+
+      function fmtMicroCentsUsd(microCents) {
+        const dollars = (microCents || 0) / 1_000_000;
+        return `$${dollars.toFixed(4)}`;
+      }
+      function fmtDollars(dollars) {
+        return `$${(dollars || 0).toFixed(4)}`;
+      }
+
+      /**
+       * Inline SVG sparkline renderer. ~30 LOC, no chart library.
+       *
+       * Math:
+       * - Drop entries whose driftPct is null (no vendor billing for that day).
+       * - Find min/max of remaining driftPct values; pad by 5% so a flat
+       *   series doesn't degenerate to a zero-height line.
+       * - Map x = i * (viewW / (n - 1)) so points are evenly spaced; map y
+       *   linearly from [min, max] onto [viewH, 0] (top is the highest drift).
+       * - Emit a single <polyline> + a zero-axis dashed line when 0 is in
+       *   the visible range.
+       */
+      function renderSparkline(svg, sparkline) {
+        // Reset.
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        const data = (sparkline || []).filter(
+          (d) => typeof d.driftPct === "number",
+        );
+        if (data.length < 2) {
+          return; // Too sparse — keep the svg empty.
+        }
+        const viewW = 160;
+        const viewH = 36;
+        const margin = 2;
+        let min = Math.min(...data.map((d) => d.driftPct));
+        let max = Math.max(...data.map((d) => d.driftPct));
+        // Pad so a perfectly-flat series still renders.
+        const pad = Math.max(1, (max - min) * 0.05);
+        min -= pad;
+        max += pad;
+        const range = max - min || 1;
+        const pts = data.map((d, i) => {
+          const x = margin + (i * (viewW - 2 * margin)) / (data.length - 1);
+          const y = viewH - margin - ((d.driftPct - min) / range) * (viewH - 2 * margin);
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        });
+        // Zero-axis dashed line, if 0 is in range.
+        if (min < 0 && max > 0) {
+          const zeroY = viewH - margin - ((0 - min) / range) * (viewH - 2 * margin);
+          const axis = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          axis.setAttribute("class", "recon-sparkline-axis");
+          axis.setAttribute("x1", String(margin));
+          axis.setAttribute("y1", zeroY.toFixed(1));
+          axis.setAttribute("x2", String(viewW - margin));
+          axis.setAttribute("y2", zeroY.toFixed(1));
+          svg.appendChild(axis);
+        }
+        const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+        polyline.setAttribute("class", "recon-sparkline-line");
+        polyline.setAttribute("points", pts.join(" "));
+        svg.appendChild(polyline);
+      }
+
+      const reconDiagEmpty = document.getElementById("reconciliationDiagnosticsEmpty");
+      const reconDiagContent = document.getElementById("reconciliationDiagnosticsContent");
+      const reconRollupAvgDrift = document.getElementById("reconRollupAvgDrift");
+      const reconRollupTotalDrift = document.getElementById("reconRollupTotalDrift");
+      const reconRollupDaysCovered = document.getElementById("reconRollupDaysCovered");
+      const reconRollupSparkline = document.getElementById("reconRollupSparkline");
+      const reconDriftTableBody = document.getElementById("reconDriftTableBody");
+      const reconCcGroup = document.getElementById("reconciliationCcAnalyticsGroup");
+      const reconCcTableBody = document.getElementById("reconCcAnalyticsTableBody");
+
+      // FEA-1436: XSS-safe DOM helpers. Vendor-controlled fields (model
+      // identifier, cause hint, Anthropic user emails/api-key names) flow
+      // through createElement + textContent rather than string interpolation
+      // into innerHTML so a hostile payload can't inject script tags.
+      function appendCell(parent, text, opts) {
+        const td = document.createElement("td");
+        if (opts?.numeric) td.className = "num";
+        if (opts?.classes) td.className = (td.className ? td.className + " " : "") + opts.classes;
+        td.textContent = text;
+        parent.appendChild(td);
+        return td;
+      }
+
+      function renderDriftTable(rows) {
+        reconDriftTableBody.innerHTML = "";
+        for (const row of rows) {
+          const tr = document.createElement("tr");
+          const drift = row.driftPct;
+          const flagged = typeof drift === "number" && Math.abs(drift) > 5;
+          if (flagged) tr.classList.add("flagged");
+          appendCell(tr, row.day);
+          appendCell(tr, row.vendor);
+          appendCell(tr, row.model);
+          appendCell(tr, fmtMicroCentsUsd(row.localEstimateMicroCents), { numeric: true });
+          appendCell(tr, fmtMicroCentsUsd(row.vendorBilledMicroCents), { numeric: true });
+          appendCell(
+            tr,
+            typeof drift === "number" ? drift.toFixed(2) + "%" : "—",
+            { numeric: true },
+          );
+          appendCell(tr, row.causeHint ?? "");
+          const actionCell = document.createElement("td");
+          let explainBtn = null;
+          if (row.causeHint) {
+            explainBtn = document.createElement("button");
+            explainBtn.type = "button";
+            explainBtn.className = "recon-drift-explain";
+            explainBtn.textContent = "Explain";
+            actionCell.appendChild(explainBtn);
+            actionCell.appendChild(document.createTextNode(" "));
+          }
+          const exportBtn = document.createElement("button");
+          exportBtn.type = "button";
+          exportBtn.className = "recon-drift-export";
+          exportBtn.textContent = "Export";
+          actionCell.appendChild(exportBtn);
+          tr.appendChild(actionCell);
+          reconDriftTableBody.appendChild(tr);
+
+          if (explainBtn) {
+            explainBtn.addEventListener("click", () => {
+              const next = tr.nextElementSibling;
+              if (next && next.classList.contains("explain-row")) {
+                next.remove();
+                return;
+              }
+              const explainRow = document.createElement("tr");
+              explainRow.className = "explain-row";
+              const td = document.createElement("td");
+              td.colSpan = 8;
+              td.textContent =
+                CAUSE_HINT_EXPLANATIONS[row.causeHint] ??
+                "No additional information available.";
+              explainRow.appendChild(td);
+              tr.parentNode.insertBefore(explainRow, tr.nextSibling);
+            });
+          }
+          exportBtn.addEventListener("click", async () => {
+            exportBtn.disabled = true;
+            exportBtn.textContent = "Exporting...";
+            try {
+              const result = await api.exportReconciliationDay(
+                row.day,
+                row.vendor,
+                row.model,
+              );
+              if (result?.ok && result.blob) {
+                const json = JSON.stringify(result.blob, null, 2);
+                const blob = new Blob([json], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                // Slug the filename so a hostile model field can't produce
+                // a path-traversal `download` attribute.
+                const safe = (s) => String(s).replace(/[^a-zA-Z0-9_.-]/g, "_");
+                a.download = `reconciliation-${safe(row.day)}-${safe(row.vendor)}-${safe(row.model)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              }
+            } finally {
+              exportBtn.disabled = false;
+              exportBtn.textContent = "Export";
+            }
+          });
+        }
+      }
+
+      function renderCcAnalyticsTable(users) {
+        reconCcTableBody.innerHTML = "";
+        for (const u of users) {
+          const tr = document.createElement("tr");
+          // userId comes from Anthropic actor data — render as text only.
+          appendCell(tr, u.userId);
+          appendCell(tr, String(u.daysActive), { numeric: true });
+          appendCell(tr, String(u.sessions), { numeric: true });
+          appendCell(tr, u.tokens.toLocaleString(), { numeric: true });
+          appendCell(tr, fmtDollars(u.anthropicEstimateUsd), { numeric: true });
+          appendCell(
+            tr,
+            u.localEstimateUsd === null ? "—" : fmtDollars(u.localEstimateUsd),
+            { numeric: true },
+          );
+          const gap = typeof u.gapUsd === "number" ? u.gapUsd : null;
+          if (gap === null) {
+            appendCell(tr, "—", { numeric: true });
+          } else {
+            appendCell(tr, fmtDollars(gap), {
+              numeric: true,
+              classes: "recon-cc-gap-flagged",
+            });
+          }
+          reconCcTableBody.appendChild(tr);
+        }
+      }
+
+      async function refreshReconciliationDiagnostics() {
+        try {
+          const [rollup, rowsResult, ccAnalytics] = await Promise.all([
+            api.getReconciliationDriftRollup(),
+            api.getReconciliationDriftRows(30),
+            api.getClaudeCodeAnalytics(),
+          ]);
+          const hasData = rollup && rollup.rowCount > 0;
+          reconDiagEmpty.style.display = hasData ? "none" : "";
+          reconDiagContent.style.display = hasData ? "" : "none";
+          if (hasData) {
+            reconRollupAvgDrift.textContent =
+              typeof rollup.avgDriftPct === "number"
+                ? rollup.avgDriftPct.toFixed(2) + "%"
+                : "—";
+            reconRollupTotalDrift.textContent = fmtDollars(rollup.totalDriftDollars);
+            reconRollupDaysCovered.textContent = String(rollup.daysCovered);
+            renderSparkline(reconRollupSparkline, rollup.sparklineDaily);
+            renderDriftTable(rowsResult?.rows ?? []);
+          }
+          if (ccAnalytics && ccAnalytics.users && ccAnalytics.users.length > 0) {
+            reconCcGroup.style.display = "";
+            renderCcAnalyticsTable(ccAnalytics.users);
+          } else {
+            reconCcGroup.style.display = "none";
+          }
+        } catch {
+          // Soft-fail — diagnostics aren't load-bearing.
+        }
+      }
+
       window.addEventListener("desktop:navigate-settings-tab", (event) => {
         if (event.detail === "cost-reconciliation") {
           void refreshReconciliationPanel();
+          void refreshReconciliationDiagnostics();
         }
       });
       void refreshReconciliationPanel();
+      void refreshReconciliationDiagnostics();
       headerPauseToggle.addEventListener("change", async () => {
         await api.setCloudCommandsPaused(headerPauseToggle.checked);
         await refreshRuntime();

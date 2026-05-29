@@ -229,6 +229,54 @@ const desktopApi = {
       success: boolean;
       enabled: boolean;
     }>,
+  // FEA-1436: drift diagnostics.
+  getReconciliationDriftRows: (daysBack?: number) =>
+    ipcRenderer.invoke("cost-reconciliation:get-drift-rows", { daysBack }) as Promise<{
+      rows: {
+        day: string;
+        vendor: string;
+        model: string;
+        localEstimateMicroCents: number;
+        vendorBilledMicroCents: number;
+        driftMicroCents: number;
+        driftPct: number | null;
+        causeHint: string | null;
+        computedAt: string;
+      }[];
+    }>,
+  getReconciliationDriftRollup: () =>
+    ipcRenderer.invoke("cost-reconciliation:get-drift-rollup") as Promise<{
+      avgDriftPct: number | null;
+      totalDriftDollars: number;
+      rowCount: number;
+      daysCovered: number;
+      sparklineDaily: { day: string; driftPct: number | null }[];
+    }>,
+  exportReconciliationDay: (day: string, vendor: string, model: string) =>
+    ipcRenderer.invoke("cost-reconciliation:export-day", { day, vendor, model }) as Promise<
+      | {
+          ok: true;
+          blob: {
+            schemaVersion: 1;
+            generatedAt: string;
+            reconciliation: unknown;
+            tokenUsage: unknown[];
+          };
+        }
+      | { ok: false; error: string }
+    >,
+  getClaudeCodeAnalytics: () =>
+    ipcRenderer.invoke("cost-reconciliation:get-claude-code-analytics") as Promise<{
+      users: {
+        userId: string;
+        daysActive: number;
+        sessions: number;
+        tokens: number;
+        anthropicEstimateUsd: number;
+        localEstimateUsd: number | null;
+        gapUsd: number | null;
+      }[];
+    }>,
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

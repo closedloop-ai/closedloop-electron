@@ -57,8 +57,14 @@ import {
   classifyReconciliationCause,
   type ReconciliationCauseHint,
 } from "./reconciliation-cause-hint.js";
+import {
+  fetchClaudeCodeAnalytics,
+  ClaudeCodeAnalyticsUnsupportedError,
+  type ClaudeCodeAnalyticsUserDay,
+} from "./claude-code-analytics-client.js";
 
 const BACKFILL_DAYS = 30;
+const CLAUDE_CODE_ANALYTICS_CAPABILITY_KEY = "claude_code_analytics_supported";
 const DEFAULT_INTERVAL_HOURS = 24;
 const MIN_INTERVAL_HOURS = 6;
 const JITTER_HOURS = 2;
@@ -77,6 +83,8 @@ export interface ReconciliationWorkerOptions {
   fetchAnthropic?: typeof fetchAnthropicCostReport;
   /** Test-only override of the fetcher. Production omits this. */
   fetchOpenAI?: typeof fetchOpenAICosts;
+  /** Test-only override of the fetcher. Production omits this. */
+  fetchClaudeCodeAnalytics?: typeof fetchClaudeCodeAnalytics;
   /** Test-only override of the clock. Production omits this. */
   now?: () => Date;
   /** Test-only override of the timer factory. Production omits this. */
@@ -109,9 +117,108 @@ interface LocalUsageRow {
   micro_cents: number;
 }
 
+/**
+ * FEA-1436: shape returned to the renderer via the
+ * `cost-reconciliation:get-drift-rows` IPC channel. Numbers are kept as
+ * microcents so the renderer can format them consistently with the worker.
+ */
+export interface DriftDiagnosticsRow {
+  day: string;
+  vendor: string;
+  model: string;
+  localEstimateMicroCents: number;
+  vendorBilledMicroCents: number;
+  driftMicroCents: number;
+  driftPct: number | null;
+  causeHint: ReconciliationCauseHint | null;
+  computedAt: string;
+}
+
+export interface DriftRollup {
+  avgDriftPct: number | null;
+  /** SUM(ABS(drift_micro_cents)) converted to dollars for headline display. */
+  totalDriftDollars: number;
+  rowCount: number;
+  daysCovered: number;
+  /**
+   * Per-day average drift % across vendors+models. Sparkline-ready. Empty when
+   * the reconciliation table has no rows.
+   */
+  sparklineDaily: { day: string; driftPct: number | null }[];
+}
+
+export interface TokenUsageExportRow {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}
+
+export interface DriftExportBlob {
+  schemaVersion: 1;
+  generatedAt: string;
+  reconciliation: DriftDiagnosticsRow;
+  tokenUsage: TokenUsageExportRow[];
+}
+
+/**
+ * FEA-1436: per-user Claude Code Analytics view for the renderer. Empty
+ * `users` is the "not supported on this plan tier" signal — the renderer
+ * hides the per-user sub-section in that case.
+ *
+ * `localEstimateUsd` and `gapUsd` are null in v1 because local token_usage
+ * has no per-user attribution path (single-tenant Electron app).
+ */
+export interface ClaudeCodeAnalyticsView {
+  users: {
+    userId: string;
+    daysActive: number;
+    sessions: number;
+    tokens: number;
+    anthropicEstimateUsd: number;
+    localEstimateUsd: number | null;
+    gapUsd: number | null;
+  }[];
+}
+
+interface DriftRowRecord {
+  day: string;
+  vendor: string;
+  model: string;
+  local_estimate_micro_cents: number;
+  vendor_billed_micro_cents: number;
+  drift_micro_cents: number;
+  drift_pct: number | null;
+  cause_hint: string | null;
+  computed_at: string;
+}
+
+function toDriftDiagnosticsRow(row: DriftRowRecord): DriftDiagnosticsRow {
+  return {
+    day: row.day,
+    vendor: row.vendor,
+    model: row.model,
+    localEstimateMicroCents: row.local_estimate_micro_cents,
+    vendorBilledMicroCents: row.vendor_billed_micro_cents,
+    driftMicroCents: row.drift_micro_cents,
+    driftPct: row.drift_pct,
+    causeHint: (row.cause_hint as ReconciliationCauseHint | null) ?? null,
+    computedAt: row.computed_at,
+  };
+}
+
 export class ReconciliationWorker {
   private readonly options: Required<
-    Pick<ReconciliationWorkerOptions, "fetchAnthropic" | "fetchOpenAI" | "now" | "scheduleTimer" | "clearTimer">
+    Pick<
+      ReconciliationWorkerOptions,
+      | "fetchAnthropic"
+      | "fetchOpenAI"
+      | "fetchClaudeCodeAnalytics"
+      | "now"
+      | "scheduleTimer"
+      | "clearTimer"
+    >
   > &
     ReconciliationWorkerOptions;
   private timer: NodeJS.Timeout | null = null;
@@ -123,6 +230,8 @@ export class ReconciliationWorker {
       ...options,
       fetchAnthropic: options.fetchAnthropic ?? fetchAnthropicCostReport,
       fetchOpenAI: options.fetchOpenAI ?? fetchOpenAICosts,
+      fetchClaudeCodeAnalytics:
+        options.fetchClaudeCodeAnalytics ?? fetchClaudeCodeAnalytics,
       now: options.now ?? (() => new Date()),
       scheduleTimer: options.scheduleTimer ?? ((cb, ms) => setTimeout(cb, ms)),
       clearTimer: options.clearTimer ?? ((h) => clearTimeout(h)),
@@ -174,8 +283,53 @@ export class ReconciliationWorker {
     if (this.running) {
       return { queued: false };
     }
+    // FEA-1436: manual runs re-probe Claude Code Analytics even if a prior
+    // run cached a negative capability. The user may have upgraded their
+    // plan tier or rotated to an Admin Key with the right permission.
+    this.clearClaudeCodeAnalyticsCapability();
     void this.runOnce({ trigger: "manual" });
     return { queued: true };
+  }
+
+  private clearClaudeCodeAnalyticsCapability(): void {
+    try {
+      const db = this.openDb();
+      try {
+        ensureFeatureCapabilitySchema(db);
+        db.prepare(`DELETE FROM feature_capability WHERE key = ?`).run(
+          CLAUDE_CODE_ANALYTICS_CAPABILITY_KEY,
+        );
+      } finally {
+        db.close();
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * FEA-1436: called from the IPC layer when the Anthropic Admin Key is
+   * cleared or rotated. Removes the cached analytics rows so a key swap
+   * between organizations doesn't expose stale per-user attribution from
+   * the previous org. Also clears the capability flag so the next probe
+   * runs.
+   */
+  resetClaudeCodeAnalyticsState(): void {
+    try {
+      const db = this.openDb();
+      try {
+        ensureClaudeCodeAnalyticsSchema(db);
+        ensureFeatureCapabilitySchema(db);
+        db.exec(`DELETE FROM claude_code_analytics_daily`);
+        db.prepare(`DELETE FROM feature_capability WHERE key = ?`).run(
+          CLAUDE_CODE_ANALYTICS_CAPABILITY_KEY,
+        );
+      } finally {
+        db.close();
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 
   getStatus(): ReconciliationStatus {
@@ -214,6 +368,155 @@ export class ReconciliationWorker {
         avgDriftPct: null,
         rowCount: 0,
       };
+    }
+  }
+
+  /**
+   * FEA-1436: returns the last `daysBack` days of reconciliation rows, ordered
+   * by day DESC then drift magnitude DESC. Defaults to 30 days. Used by the
+   * Cost Reconciliation diagnostics tab.
+   */
+  getDriftRows(daysBack = 30): DriftDiagnosticsRow[] {
+    const clamped = Math.max(1, Math.min(365, Math.floor(daysBack)));
+    const sinceDate = new Date(this.options.now());
+    sinceDate.setUTCDate(sinceDate.getUTCDate() - clamped);
+    const since = sinceDate.toISOString().slice(0, 10);
+    try {
+      const db = this.openDb();
+      try {
+        ensureReconciliationSchema(db);
+        const rows = db
+          .prepare(
+            `SELECT day, vendor, model, local_estimate_micro_cents, vendor_billed_micro_cents,
+                    drift_micro_cents, drift_pct, cause_hint, computed_at
+             FROM reconciliation
+             WHERE day >= ?
+             ORDER BY day DESC, ABS(COALESCE(drift_pct, 0)) DESC`,
+          )
+          .all(since) as unknown as DriftRowRecord[];
+        return rows.map(toDriftDiagnosticsRow);
+      } finally {
+        db.close();
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * FEA-1436: 30-day rollup with per-day drift sparkline data. Used by the
+   * Cost Reconciliation diagnostics tab.
+   */
+  getDriftRollup(): DriftRollup {
+    try {
+      const db = this.openDb();
+      try {
+        ensureReconciliationSchema(db);
+        const rollup = db
+          .prepare(
+            // FEA-1436: AVG(ABS()) so positive + negative drift on different
+            // days don't silently cancel and report 0% when both are real.
+            `SELECT AVG(ABS(drift_pct)) AS avg_drift, COUNT(*) AS row_count,
+                    SUM(ABS(drift_micro_cents)) AS total_drift_micro_cents
+             FROM reconciliation
+             WHERE day >= date('now', '-30 days')`,
+          )
+          .get() as
+          | { avg_drift: number | null; row_count: number; total_drift_micro_cents: number | null }
+          | undefined;
+        // Per-day average drift % for the sparkline. Averaging across vendors+
+        // models per day collapses the multi-row breakdown into a single y-value.
+        const sparkRows = db
+          .prepare(
+            `SELECT day, AVG(drift_pct) AS drift_pct
+             FROM reconciliation
+             WHERE day >= date('now', '-30 days')
+             GROUP BY day
+             ORDER BY day ASC`,
+          )
+          .all() as { day: string; drift_pct: number | null }[];
+        const totalMicroCents = rollup?.total_drift_micro_cents ?? 0;
+        return {
+          avgDriftPct: rollup?.avg_drift ?? null,
+          totalDriftDollars: totalMicroCents / 1_000_000,
+          rowCount: rollup?.row_count ?? 0,
+          daysCovered: sparkRows.length,
+          sparklineDaily: sparkRows.map((r) => ({
+            day: r.day,
+            driftPct: r.drift_pct,
+          })),
+        };
+      } finally {
+        db.close();
+      }
+    } catch {
+      return {
+        avgDriftPct: null,
+        totalDriftDollars: 0,
+        rowCount: 0,
+        daysCovered: 0,
+        sparklineDaily: [],
+      };
+    }
+  }
+
+  /**
+   * FEA-1436: returns a self-contained JSON blob with the matching
+   * reconciliation row + the underlying token_usage rows for the day. Powers
+   * the "Export for support" button — the user can attach the file to a
+   * support ticket without exposing credentials. Admin Keys, session IDs, and
+   * other PII are NOT included.
+   */
+  exportDay(input: { day: string; vendor: string; model: string }): DriftExportBlob | null {
+    try {
+      const db = this.openDb();
+      try {
+        ensureReconciliationSchema(db);
+        const reconRow = db
+          .prepare(
+            `SELECT day, vendor, model, local_estimate_micro_cents, vendor_billed_micro_cents,
+                    drift_micro_cents, drift_pct, cause_hint, computed_at
+             FROM reconciliation
+             WHERE day = ? AND vendor = ? AND model = ?`,
+          )
+          .get(input.day, input.vendor, input.model) as DriftRowRecord | undefined;
+        if (!reconRow) {
+          return null;
+        }
+        // Best-effort token_usage pull. We deliberately omit session_id (PII)
+        // and project them to model+token counts only — enough to reproduce
+        // the local-estimate math without exposing user content.
+        let tokenRows: TokenUsageExportRow[] = [];
+        try {
+          tokenRows = db
+            .prepare(
+              `SELECT LOWER(tu.model) AS model,
+                      SUM(tu.input_tokens + COALESCE(tu.baseline_input, 0)) AS input_tokens,
+                      SUM(tu.output_tokens + COALESCE(tu.baseline_output, 0)) AS output_tokens,
+                      SUM(tu.cache_read_tokens + COALESCE(tu.baseline_cache_read, 0)) AS cache_read_tokens,
+                      SUM(tu.cache_write_tokens + COALESCE(tu.baseline_cache_write, 0)) AS cache_write_tokens
+               FROM token_usage tu
+               JOIN sessions s ON s.id = tu.session_id
+               WHERE substr(s.started_at, 1, 10) = ?
+                 AND LOWER(tu.model) = ?
+               GROUP BY LOWER(tu.model)`,
+            )
+            .all(input.day, input.model.toLowerCase()) as unknown as TokenUsageExportRow[];
+        } catch {
+          // sessions / token_usage may not exist yet on a freshly-installed
+          // app. The export still ships the reconciliation row.
+        }
+        return {
+          schemaVersion: 1,
+          generatedAt: this.options.now().toISOString(),
+          reconciliation: toDriftDiagnosticsRow(reconRow),
+          tokenUsage: tokenRows,
+        };
+      } finally {
+        db.close();
+      }
+    } catch {
+      return null;
     }
   }
 
@@ -329,13 +632,233 @@ export class ReconciliationWorker {
       if (rows.length > 0) {
         this.persistRows(rows);
       }
+
+      // FEA-1436: Claude Code Analytics (Team/Enterprise gated).
+      //
+      // The endpoint only exists for orgs with the right Admin API permission;
+      // Solo/Pro plans return 404 and unauthorized Team keys return 403. We
+      // cache that negative as a feature_capability flag so subsequent runs
+      // don't re-hit the endpoint just to be rejected. The cached negative is
+      // cleared when the user clears or rotates their Anthropic Admin Key.
+      let claudeCodeAttempts = 0;
+      let claudeCodeRows = 0;
+      if (anthropicKey && this.isClaudeCodeAnalyticsSupported()) {
+        claudeCodeAttempts = 1;
+        try {
+          const analyticsResult = await this.options.fetchClaudeCodeAnalytics(
+            anthropicKey,
+            {
+              startingAt: startDate.toISOString(),
+              endingAt: endDate.toISOString(),
+            },
+          );
+          if (analyticsResult.users.length > 0) {
+            claudeCodeRows = this.persistClaudeCodeAnalyticsRows(
+              analyticsResult.users,
+            );
+          }
+        } catch (err) {
+          if (err instanceof ClaudeCodeAnalyticsUnsupportedError) {
+            // Persist the negative capability so we don't retry on every run.
+            this.setClaudeCodeAnalyticsCapability(false);
+            gatewayLog.info(
+              "reconciliation",
+              `claude_code_analytics unsupported status=${err.status}; capability flag cached, skipping on subsequent runs`,
+            );
+          } else {
+            gatewayLog.warn(
+              "reconciliation",
+              `claude_code_analytics fetch failed trigger=${meta.trigger} error=${classifyError(err)}`,
+            );
+          }
+        }
+      }
+
       this.lastRunAt = this.options.now().toISOString();
       gatewayLog.info(
         "reconciliation",
-        `run complete trigger=${meta.trigger} days=${days.length} rows=${rows.length}`,
+        `run complete trigger=${meta.trigger} days=${days.length} rows=${rows.length} cc_attempts=${claudeCodeAttempts} cc_rows=${claudeCodeRows}`,
       );
     } finally {
       this.running = false;
+    }
+  }
+
+  /**
+   * FEA-1436: returns true unless we've persisted a negative capability flag
+   * from a prior run. Default-true so the first run actually probes the
+   * endpoint; the negative gets cached after a single 403/404.
+   */
+  private isClaudeCodeAnalyticsSupported(): boolean {
+    try {
+      const db = this.openDb();
+      try {
+        ensureFeatureCapabilitySchema(db);
+        const row = db
+          .prepare(
+            `SELECT value FROM feature_capability WHERE key = ?`,
+          )
+          .get(CLAUDE_CODE_ANALYTICS_CAPABILITY_KEY) as
+          | { value: string | null }
+          | undefined;
+        if (!row) {
+          return true;
+        }
+        return row.value !== "false";
+      } finally {
+        db.close();
+      }
+    } catch {
+      return true;
+    }
+  }
+
+  private setClaudeCodeAnalyticsCapability(supported: boolean): void {
+    try {
+      const db = this.openDb();
+      try {
+        ensureFeatureCapabilitySchema(db);
+        db.prepare(
+          `INSERT INTO feature_capability (key, value, computed_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET
+             value = excluded.value,
+             computed_at = excluded.computed_at`,
+        ).run(
+          CLAUDE_CODE_ANALYTICS_CAPABILITY_KEY,
+          supported ? "true" : "false",
+          this.options.now().toISOString(),
+        );
+      } finally {
+        db.close();
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  private persistClaudeCodeAnalyticsRows(
+    users: ClaudeCodeAnalyticsUserDay[],
+  ): number {
+    try {
+      const db = this.openDb();
+      try {
+        ensureClaudeCodeAnalyticsSchema(db);
+        // FEA-1436: the Claude Code Analytics API can return multiple records
+        // per user/day when the same user used Claude Code from different
+        // terminal_types or under multiple customer_types. We fold by
+        // (day, userId) before insert so the upsert doesn't overwrite
+        // earlier rows with later, partial data.
+        const folded = new Map<
+          string,
+          {
+            day: string;
+            userId: string;
+            sessions: number;
+            tokens: number;
+            microCents: number;
+          }
+        >();
+        for (const u of users) {
+          const key = `${u.day}::${u.userId}`;
+          const microCents = Math.round(u.estimatedCostUsd * 1_000_000);
+          const existing = folded.get(key);
+          if (existing) {
+            existing.sessions += u.sessions;
+            existing.tokens += u.tokens;
+            existing.microCents += microCents;
+          } else {
+            folded.set(key, {
+              day: u.day,
+              userId: u.userId,
+              sessions: u.sessions,
+              tokens: u.tokens,
+              microCents,
+            });
+          }
+        }
+        const insert = db.prepare(`
+          INSERT INTO claude_code_analytics_daily (
+            day, user_id, sessions, tokens, estimated_cost_micro_cents, computed_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(day, user_id) DO UPDATE SET
+            sessions = excluded.sessions,
+            tokens = excluded.tokens,
+            estimated_cost_micro_cents = excluded.estimated_cost_micro_cents,
+            computed_at = excluded.computed_at
+        `);
+        const computedAt = this.options.now().toISOString();
+        let written = 0;
+        for (const f of folded.values()) {
+          insert.run(
+            f.day,
+            f.userId,
+            f.sessions,
+            f.tokens,
+            f.microCents,
+            computedAt,
+          );
+          written += 1;
+        }
+        return written;
+      } finally {
+        db.close();
+      }
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * FEA-1436: returns per-user Claude Code analytics rows joined against the
+   * local token-usage estimate. Empty when the table doesn't exist yet (i.e.
+   * the org's plan tier doesn't include the endpoint). Used by the
+   * Per-user attribution sub-section in the Cost Reconciliation tab.
+   */
+  getClaudeCodeAnalytics(): ClaudeCodeAnalyticsView {
+    try {
+      const db = this.openDb();
+      try {
+        ensureClaudeCodeAnalyticsSchema(db);
+        const rows = db
+          .prepare(
+            `SELECT user_id,
+                    COUNT(DISTINCT day) AS days_active,
+                    SUM(sessions) AS sessions,
+                    SUM(tokens) AS tokens,
+                    SUM(estimated_cost_micro_cents) AS anthropic_micro_cents
+             FROM claude_code_analytics_daily
+             WHERE day >= date('now', '-30 days')
+             GROUP BY user_id
+             ORDER BY tokens DESC`,
+          )
+          .all() as {
+          user_id: string;
+          days_active: number;
+          sessions: number;
+          tokens: number;
+          anthropic_micro_cents: number;
+        }[];
+        return {
+          users: rows.map((r) => ({
+            userId: r.user_id,
+            daysActive: r.days_active,
+            sessions: r.sessions,
+            tokens: r.tokens,
+            anthropicEstimateUsd: (r.anthropic_micro_cents ?? 0) / 1_000_000,
+            // FEA-1436 v1 ships without a local-by-user attribution path —
+            // local token_usage has no user_id (single-tenant app). Surface
+            // as null so the renderer can render a "—" placeholder rather
+            // than fabricate a number.
+            localEstimateUsd: null,
+            gapUsd: null,
+          })),
+        };
+      } finally {
+        db.close();
+      }
+    } catch {
+      return { users: [] };
     }
   }
 
@@ -497,6 +1020,43 @@ export function ensureReconciliationSchema(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_reconciliation_day ON reconciliation(day DESC);
     CREATE INDEX IF NOT EXISTS idx_reconciliation_drift ON reconciliation(ABS(drift_pct) DESC);
+  `);
+}
+
+/**
+ * FEA-1436: small key/value table for plan-tier capability flags discovered
+ * at runtime. Currently holds `claude_code_analytics_supported` — the row is
+ * absent on first boot (treated as supported, the next run probes) and is
+ * upserted to `"false"` after a 403/404 so subsequent runs short-circuit.
+ * Idempotent.
+ */
+export function ensureFeatureCapabilitySchema(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feature_capability (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      computed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+  `);
+}
+
+/**
+ * FEA-1436: per-user-per-day rollup persisted from the Claude Code Analytics
+ * API. Created on first successful fetch. Schema matches the FEA-1436 spec.
+ * Idempotent.
+ */
+export function ensureClaudeCodeAnalyticsSchema(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS claude_code_analytics_daily (
+      day TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      sessions INTEGER NOT NULL,
+      tokens INTEGER NOT NULL,
+      estimated_cost_micro_cents INTEGER NOT NULL,
+      computed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      PRIMARY KEY (day, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cc_analytics_day ON claude_code_analytics_daily(day DESC);
   `);
 }
 

@@ -1453,6 +1453,57 @@ function patchDbFile(file) {
     source = source.replace(stmtsNeedle, `\n${replacement}`);
   }
 
+  // CLOSEDLOOP FEA-1436: reconciliation diagnostics prepared statements. The
+  // table is created by the main-process reconciliation worker (FEA-1435), but
+  // we mirror the prepared-statement shape in the sidecar `stmts` block so any
+  // future sidecar route can read drift data without re-deriving the SQL.
+  // Wrapped in CREATE TABLE IF NOT EXISTS so the first sidecar boot before the
+  // worker fires its own init() still succeeds.
+  if (!source.includes("recentReconciliation: db.prepare")) {
+    const reconAnchor = "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),";
+    if (!source.includes(reconAnchor)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the setSessionHarness anchor (reconciliation prepared statements, FEA-1436).`,
+      );
+    }
+    const reconBlock = [
+      reconAnchor,
+      "  // CLOSEDLOOP FEA-1436: reconciliation diagnostics. The reconciliation",
+      "  // table is created by the main-process worker (FEA-1435 schema). We",
+      "  // ensure it here so the sidecar can read drift rows even on first boot.",
+      "  _reconciliationTable: (() => {",
+      "    try {",
+      "      db.exec(`",
+      "        CREATE TABLE IF NOT EXISTS reconciliation (",
+      "          day TEXT NOT NULL,",
+      "          vendor TEXT NOT NULL,",
+      "          model TEXT NOT NULL,",
+      "          local_estimate_micro_cents INTEGER NOT NULL DEFAULT 0,",
+      "          vendor_billed_micro_cents INTEGER NOT NULL DEFAULT 0,",
+      "          drift_micro_cents INTEGER NOT NULL DEFAULT 0,",
+      "          drift_pct REAL,",
+      "          cause_hint TEXT,",
+      "          computed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),",
+      "          PRIMARY KEY (day, vendor, model)",
+      "        );",
+      "      `);",
+      "    } catch (_e) { /* worker-managed */ }",
+      "    return null;",
+      "  })(),",
+      "  // Last 30 days of reconciliation rows ordered by day DESC then drift DESC,",
+      "  // so the loudest rows surface first within a day.",
+      "  recentReconciliation: db.prepare(",
+      "    \"SELECT * FROM reconciliation WHERE day >= ? ORDER BY day DESC, ABS(COALESCE(drift_pct, 0)) DESC\"",
+      "  ),",
+      "  // Rolling 30-day rollup. ABS aggregate on both avg_drift and total",
+      "  // so positive and negative drift on different days don't cancel out.",
+      "  driftRollup30d: db.prepare(",
+      "    \"SELECT AVG(ABS(drift_pct)) AS avg_drift, COUNT(*) AS row_count, SUM(ABS(drift_micro_cents)) AS total_drift_micro_cents FROM reconciliation WHERE day >= date('now', '-30 days')\"",
+      "  ),",
+    ].join("\n");
+    source = source.replace(reconAnchor, reconBlock);
+  }
+
   const sessionTotalsNeedle = [
     "  sessionTokenTotals: db.prepare(`",
     "    SELECT",
