@@ -17,8 +17,11 @@ const sessionTiles = tilesForScreen(manifest, "Sessions");
 test.describe("Sessions tiles · UI audit (manifest-driven)", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/sessions");
-    // The subtitle shows "0 sessions" until the list loads. Poll until a digit
-    // appears in the testid'd subtitle element.
+    // The subtitle renders "0 sessions" as its initial placeholder BEFORE
+    // api.sessions.list() resolves, so polling for any digit (/\d/) would match
+    // that "0" and let the assertion read a stale zero. The fixture seeds a
+    // non-zero session count, so wait for a non-zero leading digit ([1-9]) —
+    // same anti-race trick the Dashboard audit uses for "Total Sessions".
     await expect
       .poll(
         async () => {
@@ -29,7 +32,7 @@ test.describe("Sessions tiles · UI audit (manifest-driven)", () => {
         },
         { timeout: 10_000 },
       )
-      .toMatch(/\d/);
+      .toMatch(/[1-9]/);
   });
 
   for (const row of sessionTiles) {
