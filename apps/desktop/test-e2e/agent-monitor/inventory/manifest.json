@@ -71,9 +71,9 @@
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-active-agents']",
         "present_in_code": false,
-        "render_kind": "text",
-        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1814",
-        "followup": "Add data-testid to the StatPill value element, keyed per tile."
+        "render_kind": "text_sub",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx — 'Total Agents' StatPill SUB line ('{active_agents} active'); the pill VALUE is overview.total_agents, a different number",
+        "followup": "Add data-testid to the StatPill SUB element (subTestid), NOT the value element — the value renders total_agents, but this tile's oracle is active_agents. There is no standalone 'Active Agents' pill; active_agents only appears in the Total Agents pill's sub text."
       }
     },
     {

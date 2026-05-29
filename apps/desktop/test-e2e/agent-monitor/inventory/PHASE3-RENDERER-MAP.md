@@ -26,7 +26,7 @@
 |---|---|---|---|---|---|
 | `dashboard.monitor.total_sessions` | Monitor | ✅ text | `scripts/agent-monitor-client/Dashboard.tsx:1800` | StatPill | fmt(analyticsData?.overview.total_sessions ?? stats?.total_sessions ?? 0) |
 | `dashboard.monitor.total_sessions.trend_active` | Monitor | ✅ text (sub) | `scripts/agent-monitor-client/Dashboard.tsx:1806` | StatPill.sub | …active_sessions… (sub line) |
-| `dashboard.monitor.active_agents` | Monitor | ✅ text | `scripts/agent-monitor-client/Dashboard.tsx:1814` | StatPill | fmt(analyticsData?.overview.active_agents ?? stats?.active_agents ?? 0) |
+| `dashboard.monitor.active_agents` | Monitor | ✅ text (sub) | `scripts/agent-monitor-client/Dashboard.tsx` (Total Agents pill SUB) | StatPill.sub | `${active_agents} active` — pill VALUE is overview.total_agents (different number); active_agents only in the sub. Selector must target the sub, not the value. |
 | `dashboard.monitor.active_subagents` | Monitor | ⚠️ DOM count | `scripts/agent-monitor-client/Dashboard.tsx:1485` | agent-tree (allSubagents) | derived from allSubagents[] tree — no stat pill |
 | `dashboard.monitor.active_subagents.trend_total` | Monitor | ⚠️ DOM count | `scripts/agent-monitor-client/Dashboard.tsx:1485` | agent-tree (allSubagents) | derived from allSubagents[] tree — no text |
 | `dashboard.monitor.events_today` | Monitor | ❌ absent | `scripts/agent-monitor-client/Dashboard.tsx` | — | 0 matches for events_today / 'Events Today' in the overlay |
