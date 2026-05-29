@@ -80,7 +80,7 @@ function sanitizeLoopPerfRawBytes(rawBytes: string): string {
 
 function sanitizeLoopPerfErrorMessage(errorMessage: string): string {
   return truncateUtf8(
-    stripUnsafeText(errorMessage),
+    redactCredentialLikeText(stripUnsafeText(errorMessage)),
     LOOP_PERF_PARSE_FAILURE_ERROR_MESSAGE_MAX_BYTES,
   );
 }

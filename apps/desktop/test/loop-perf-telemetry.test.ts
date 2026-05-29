@@ -992,6 +992,25 @@ test("PLN-750: non-string command emits bounded parse_failure instead of normal 
   assert.ok(Buffer.byteLength(loopPerf.rawBytes, "utf-8") <= 1024);
 });
 
+test("PLN-750: malformed JSON parse_failure redacts echoed credential snippets in errorMessage", () => {
+  const { emitter, events } = makeMockEmitter();
+
+  parseAndEmitChunk(toChunk("ghp_secret_value_that_json_parse_echoes\n"), {
+    phaseState: createRunningPhaseState(),
+    priorLineBuffer: "",
+    telemetryEmitter: emitter,
+    traceContext: TRACE,
+    lineNumberBase: 0,
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.category, "loop.perf.parse_failure");
+  const loopPerf = events[0]?.diagnostics?.loopPerf;
+  assert.ok(loopPerf && loopPerf.event === "parse_failure");
+  assert.equal(loopPerf.rawBytes, "[redacted]");
+  assert.equal(loopPerf.errorMessage, "[redacted]");
+});
+
 test("PLN-750: malformed bursts are capped, redacted, and later valid command rows continue", () => {
   const { emitter, events } = makeMockEmitter();
   const secretLine = `{"event":"iteration","command":"token=${"x".repeat(4096)}`;
