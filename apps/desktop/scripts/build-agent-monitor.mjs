@@ -310,52 +310,204 @@ const CLIENT_FULL_FILE_OVERRIDES = [
   },
 ];
 
-// Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
-// These keep cost stats working without requiring users to hand-enter common
-// rules after startup. Rates are per 1M tokens.
-const HOST_DEFAULT_PRICING = [
-  // Opus family
-  ["claude-opus-4-7%", "Claude Opus 4.7", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-6%", "Claude Opus 4.6", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-5%", "Claude Opus 4.5", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-1%", "Claude Opus 4.1", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-2%", "Claude Opus 4", 15, 75, 1.5, 18.75],
-  // Sonnet family
-  ["claude-sonnet-4-6%", "Claude Sonnet 4.6", 3, 15, 0.3, 3.75],
-  ["claude-sonnet-4-5%", "Claude Sonnet 4.5", 3, 15, 0.3, 3.75],
-  ["claude-sonnet-4-2%", "Claude Sonnet 4", 3, 15, 0.3, 3.75],
-  ["claude-3-7-sonnet%", "Claude Sonnet 3.7", 3, 15, 0.3, 3.75],
-  ["claude-3-5-sonnet%", "Claude Sonnet 3.5", 3, 15, 0.3, 3.75],
-  // Haiku family
-  ["claude-haiku-4-5%", "Claude Haiku 4.5", 1, 5, 0.1, 1.25],
-  ["claude-3-5-haiku%", "Claude Haiku 3.5", 0.8, 4, 0.08, 1],
-  ["claude-3-haiku%", "Claude Haiku 3", 0.25, 1.25, 0.03, 0.3],
-  // GPT-5 family — cache_write rates are the prompt caching write rate
-  // (typically equal to the input rate per 1M tokens for cached writes).
-  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 5],
-  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0.75],
-  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0.2],
-  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 2.5],
-  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 1.25],
-  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0.25],
-  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0.05],
-  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 1.25],
-  // OpenCode-hosted free models
+// Host-owned overrides for model patterns LiteLLM does not carry. These keep
+// fallback / synthetic model IDs (used when a harness parser cannot identify
+// the underlying model) routed to a sensible pricing rule. They are merged on
+// top of the LiteLLM-derived rows in loadHostDefaultPricing() with override
+// precedence by model_pattern.
+//
+// Do NOT add Claude/GPT rates here just because LiteLLM's value looks off — the
+// build-time invariants below catch real regressions. The right fix for a
+// genuine LiteLLM rate bug is to raise it upstream and document the deviation
+// inline with a TODO + ticket reference.
+const HOST_ONLY_OVERRIDES = [
+  // OpenCode-hosted free models (not in LiteLLM)
   ["big-pickle%", "Big Pickle", 0, 0, 0, 0],
   ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0],
   // Fallback patterns for non-Claude harness parsers — when the model
   // field is missing from the raw data, each parser falls back to a
   // hardcoded default key (e.g. "gpt-codex", "cursor-default", etc.).
-  // These entries ensure the fallback key has a reasonable pricing match,
-  // even if the exact model is unknown. The broadest pattern comes last
-  // so more specific rules match first.
+  // These entries ensure the fallback key has a reasonable pricing match
+  // even if the exact model is unknown. None of these synthetic ids live
+  // in LiteLLM's catalog.
   ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.125, 1.25],
   ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3],
   ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3],
   ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0],
-  // Legacy
-  ["claude-3-opus%", "Claude Opus 3", 15, 75, 1.5, 18.75],
+  // FEA-1431 deviation: LiteLLM upstream currently carries Claude Opus 4.5,
+  // 4.6, and 4.7 at $5/$25/Mtok — roughly 1/3 of Anthropic's published Opus 4
+  // family list price ($15 input / $75 output / $1.50 cache_read /
+  // $18.75 cache_write per Mtok). The build-time Opus floor invariant in
+  // loadHostDefaultPricing() catches this regression and would refuse to
+  // build without an explicit host override. These rows pin the rates to
+  // Anthropic's public list price until LiteLLM upstream is corrected.
+  // When the upstream fix lands, run `just desktop-refresh-pricing` and
+  // delete these overrides. Both the unversioned key and the date-suffixed
+  // snapshot key are overridden because LiteLLM carries both shapes.
+  ["claude-opus-4-7%", "Claude Opus 4.7", 15, 75, 1.5, 18.75],
+  ["claude-opus-4-7-20260416%", "Claude Opus 4.7", 15, 75, 1.5, 18.75],
+  ["claude-opus-4-6%", "Claude Opus 4.6", 15, 75, 1.5, 18.75],
+  ["claude-opus-4-6-20260205%", "Claude Opus 4.6", 15, 75, 1.5, 18.75],
+  ["claude-opus-4-5%", "Claude Opus 4.5", 15, 75, 1.5, 18.75],
+  ["claude-opus-4-5-20251101%", "Claude Opus 4.5", 15, 75, 1.5, 18.75],
+  // FEA-1431 coverage gap: LiteLLM upstream carries only date-suffixed keys
+  // for older Claude families (e.g. `claude-3-7-sonnet-20250219`) and omits
+  // 3.5 Sonnet / 3.5 Haiku entirely. Customers commonly use the broader
+  // family aliases (`claude-3-7-sonnet-latest`, `claude-3-5-sonnet`,
+  // `claude-3-opus-latest`, etc.); without these overrides those ids fall
+  // through to the OpenCode/Cursor fallback rules and price at $0. Keep in
+  // sync with Anthropic's public list price; revisit when LiteLLM ships the
+  // broader aliases upstream.
+  ["claude-3-5-sonnet%", "Claude 3.5 Sonnet", 3, 15, 0.3, 3.75],
+  ["claude-3-5-haiku%", "Claude 3.5 Haiku", 0.8, 4, 0.08, 1],
+  ["claude-3-7-sonnet%", "Claude 3.7 Sonnet", 3, 15, 0.3, 3.75],
+  ["claude-3-haiku%", "Claude 3 Haiku", 0.25, 1.25, 0.03, 0.3],
+  ["claude-3-opus%", "Claude 3 Opus", 15, 75, 1.5, 18.75],
 ];
+
+const litellmPricingPath = path.join(scriptDir, "litellm-pricing.json");
+
+/**
+ * Throw if a pricing row is not a strict 6-tuple of
+ * [string, string, number, number, number, number] with finite, non-negative
+ * rates. This protects the generated db.js source from being rendered with
+ * `undefined`, `null`, or `NaN` baked in as rate literals.
+ *
+ * @param {unknown} row
+ * @param {string} sourceLabel
+ */
+function assertWellFormedPricingRow(row, sourceLabel) {
+  if (!Array.isArray(row) || row.length !== 6) {
+    throw new Error(
+      `Malformed pricing row in ${sourceLabel}: ${JSON.stringify(row)}`,
+    );
+  }
+  const [pattern, name, input, output, cacheRead, cacheWrite] = row;
+  if (typeof pattern !== "string" || pattern.length === 0) {
+    throw new Error(
+      `Pricing row in ${sourceLabel} has invalid pattern: ${JSON.stringify(row)}`,
+    );
+  }
+  if (typeof name !== "string" || name.length === 0) {
+    throw new Error(
+      `Pricing row in ${sourceLabel} has invalid display name: ${JSON.stringify(row)}`,
+    );
+  }
+  for (const [label, value] of [
+    ["input", input],
+    ["output", output],
+    ["cache_read", cacheRead],
+    ["cache_write", cacheWrite],
+  ]) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `Pricing row in ${sourceLabel} has invalid ${label} rate (${value}): ${JSON.stringify(row)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Load the vendored LiteLLM pricing JSON and merge HOST_ONLY_OVERRIDES on top
+ * (overrides win on a model_pattern collision). Validates build-time pricing
+ * invariants and throws with actionable context if any fail.
+ *
+ * Exposed as a named export via dynamic import in
+ * test/build-agent-monitor-pricing-invariants.test.ts.
+ */
+export function loadHostDefaultPricing() {
+  if (!existsSync(litellmPricingPath)) {
+    throw new Error(
+      `Missing vendored LiteLLM pricing at ${litellmPricingPath}. ` +
+        `Run \`node apps/desktop/scripts/fetch-litellm-pricing.mjs --out-dir apps/desktop/scripts\` to vendor it.`,
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(litellmPricingPath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Unable to parse ${litellmPricingPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `Expected ${litellmPricingPath} to be a JSON array of 6-tuples, got ${typeof parsed}.`,
+    );
+  }
+
+  /** @type {Map<string, [string, string, number, number, number, number]>} */
+  const byPattern = new Map();
+  for (const row of parsed) {
+    assertWellFormedPricingRow(row, litellmPricingPath);
+    byPattern.set(row[0], /** @type {any} */ (row));
+  }
+  // HOST_ONLY_OVERRIDES win on collision.
+  for (const row of HOST_ONLY_OVERRIDES) {
+    assertWellFormedPricingRow(row, "HOST_ONLY_OVERRIDES");
+    byPattern.set(row[0], /** @type {any} */ (row));
+  }
+
+  const merged = Array.from(byPattern.values());
+
+  // Build-time invariants — fail fast with a clear error message.
+  //
+  // Invariant #1: Opus 4.x floor. Anthropic's published list price for current
+  // Claude Opus 4 generations is well above $10/Mtok input. The pre-FEA-1431
+  // hand-curated seed mis-priced Opus 4.5/4.6/4.7 at $5/Mtok input. The legacy
+  // hand-curated overrides for `claude-opus-4-1` and `claude-opus-4-2` are
+  // intentionally exempted because they are accepted as-is. The regex covers
+  // both the unversioned key (`claude-opus-4-5%`) and the date-suffixed
+  // snapshot key (`claude-opus-4-5-20251101%`) — LiteLLM carries both shapes
+  // and either could go stale.
+  const opusUnderpriced = [];
+  for (const row of merged) {
+    const pattern = row[0];
+    const match = /^claude-opus-4-(\d+)(?:-\d{8})?%$/.exec(pattern);
+    if (!match) continue;
+    const minor = match[1];
+    if (minor === "1" || minor === "2") continue;
+    const inputRate = row[2];
+    if (typeof inputRate !== "number" || inputRate < 10) {
+      opusUnderpriced.push({ pattern, inputRate });
+    }
+  }
+  if (opusUnderpriced.length > 0) {
+    const detail = opusUnderpriced
+      .map((o) => `${o.pattern} input=${o.inputRate}`)
+      .join(", ");
+    throw new Error(
+      `Pricing invariant violated: Claude Opus 4.x rows must have input ≥ $10/Mtok. Offending: ${detail}`,
+    );
+  }
+
+  // Invariant #2: OpenAI cache_read discount sanity. OpenAI's prompt caching
+  // is currently advertised at ~50% of the input rate (cached input is
+  // discounted, never premium). LiteLLM is the upstream source of truth, so
+  // we soft-warn here rather than throw — a genuine pricing policy change
+  // upstream shouldn't block the build. FEA-1432 will fix the downstream
+  // cache math; tighten this to an assertion once that lands.
+  for (const row of merged) {
+    const pattern = row[0];
+    if (!pattern.startsWith("gpt-")) continue;
+    const inputRate = row[2];
+    const cacheReadRate = row[4];
+    if (typeof inputRate !== "number" || typeof cacheReadRate !== "number") {
+      continue;
+    }
+    if (inputRate === 0) continue;
+    if (cacheReadRate > inputRate * 0.55) {
+      // TODO(FEA-1432): promote to assertion once downstream cache math is
+      // fixed. Until then, log only so a stale upstream doesn't gate the
+      // build.
+      console.warn(
+        `[build-agent-monitor] Pricing warning: ${pattern} cache_read=${cacheReadRate} > 55% of input=${inputRate}. (TODO FEA-1432)`,
+      );
+    }
+  }
+
+  return merged;
+}
 
 const force =
   process.argv.includes("--force") ||
@@ -484,13 +636,16 @@ function currentStamp() {
     embedTailwindSource,
     clientOverlayStatusBadgeSource,
     clientOverlaySessionsSource,
+    // Vendored LiteLLM pricing — a refresh must invalidate the cached stamp
+    // so the generated db.js is re-baked with the new rates.
+    litellmPricingPath,
   ]) {
     h.update(readFileSync(file));
   }
   return h.digest("hex");
 }
 
-function renderDefaultPricingSource(rows = HOST_DEFAULT_PRICING) {
+function renderDefaultPricingSource(rows = loadHostDefaultPricing()) {
   return [
     "const DEFAULT_PRICING = [",
     ...rows.map(
@@ -3791,27 +3946,35 @@ if (require.main === module) {
 module.exports = { uninstallHooks };
 `;
 
-assertSourcePackages();
+// Main entry: only run the build when this module is invoked directly
+// (`node build-agent-monitor.mjs`). Tests and the refresh wrapper import
+// `loadHostDefaultPricing` and must NOT trigger a full rebuild on import.
+const isMainModule =
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 
-const stamp = currentStamp();
-if (
-  !force &&
-  existsSync(generatedServerEntry) &&
-  existsSync(generatedClientIndex) &&
-  existsSync(generatedUninstallHooks) &&
-  existsSync(stampFile) &&
-  readFileSync(stampFile, "utf8").trim() === stamp
-) {
-  console.log(
-    "[build:agent-monitor] up to date — skipping (use --force to rebuild).",
-  );
-  process.exit(0);
+if (isMainModule) {
+  assertSourcePackages();
+
+  const stamp = currentStamp();
+  if (
+    !force &&
+    existsSync(generatedServerEntry) &&
+    existsSync(generatedClientIndex) &&
+    existsSync(generatedUninstallHooks) &&
+    existsSync(stampFile) &&
+    readFileSync(stampFile, "utf8").trim() === stamp
+  ) {
+    console.log(
+      "[build:agent-monitor] up to date — skipping (use --force to rebuild).",
+    );
+    process.exit(0);
+  }
+
+  buildClient();
+  materializeRuntimeTree();
+  assertGeneratedTree();
+  runSqliteGate();
+
+  writeFileSync(stampFile, `${stamp}\n`);
+  console.log("[build:agent-monitor] done.");
 }
-
-buildClient();
-materializeRuntimeTree();
-assertGeneratedTree();
-runSqliteGate();
-
-writeFileSync(stampFile, `${stamp}\n`);
-console.log("[build:agent-monitor] done.");

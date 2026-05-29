@@ -59,3 +59,7 @@ desktop-no-auth:
 # Start Electron blocking non-production origins (use when gateway is connected to production relay).
 desktop-prod-origins:
   CL_LOCAL_GATEWAY_PROD_ORIGINS_ONLY=1 pnpm -C apps/desktop dev
+
+# Refresh the vendored LiteLLM pricing JSON (commits should be reviewed for upstream regressions).
+desktop-refresh-pricing:
+  pnpm -C apps/desktop refresh:pricing

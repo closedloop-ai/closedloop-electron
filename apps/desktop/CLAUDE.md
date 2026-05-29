@@ -136,6 +136,45 @@ Typical log locations:
 
 The Diagnostics tab shows the current in-memory gateway log plus a bounded previous-session tail read from `main.log` at startup. First-run or unreadable log files must not block boot; return an empty previous-session tail and continue.
 
+## Pricing Data
+
+Model pricing rules baked into the generated agent-monitor `db.js` come from
+two sources, merged at build time by `loadHostDefaultPricing()` in
+`scripts/build-agent-monitor.mjs`:
+
+1. **`scripts/litellm-pricing.json`** — auto-generated, sorted 6-tuples
+   (`pattern`, `display_name`, `input/Mtok`, `output/Mtok`,
+   `cache_read/Mtok`, `cache_write/Mtok`) derived from LiteLLM's
+   `model_prices_and_context_window.json`. Filtered to vendor prefixes
+   `claude-`, `gpt-`, `o1-`, `o3-`, `gemini-`. Committed.
+2. **`HOST_ONLY_OVERRIDES`** in `scripts/build-agent-monitor.mjs` — rows
+   LiteLLM does not carry (fallback patterns like `cursor-default`,
+   OpenCode-hosted free models), plus any *temporary* upstream-deviation
+   overrides documented inline with a TODO + ticket reference.
+
+The build runs two invariants. Failures throw with an actionable message:
+
+- **Opus 4.x floor** — every `claude-opus-4-N` pattern (except the legacy
+  `claude-opus-4-1` and `claude-opus-4-2`) must price input ≥ $10/Mtok.
+- **OpenAI cache discount sanity** — `gpt-*` cache_read should be ≤ 55% of
+  input. Soft-warn for now (FEA-1432 will tighten to a hard assertion once
+  downstream cache math is fixed).
+
+### Refreshing pricing
+
+```bash
+just desktop-refresh-pricing   # or: pnpm -C apps/desktop refresh:pricing
+```
+
+The wrapper fetches upstream, writes `litellm-pricing.json` +
+`litellm-pricing.meta.json` (with SHA pin + ISO timestamp), and then runs the
+build-time invariants. A regression in upstream rates (Opus floor) blocks the
+refresh — review the diff, then either add a temporary override row to
+`HOST_ONLY_OVERRIDES` or back out the refresh. Refresh roughly weekly.
+
+The JSON sits inside the `currentStamp()` hash inputs so a fresh refresh
+forces a rebuild of `agent-monitor/.generated/server/db.js`.
+
 ## Agent Monitor Sidecar
 
 The desktop app bundles the MIT-licensed `Claude-Code-Agent-Monitor`
