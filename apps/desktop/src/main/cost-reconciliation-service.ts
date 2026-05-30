@@ -41,6 +41,7 @@ import {
   runReconciliation,
   type DriftNotice,
   type MeteredUsageRow,
+  type ReconciliationResult,
 } from "./reconciliation-worker.js";
 import { AnthropicAdminClient } from "./anthropic-admin-client.js";
 import { OpenAiAdminClient } from "./openai-admin-client.js";
@@ -91,6 +92,15 @@ export interface VendorRunError {
 export interface ReconciliationRunSummary {
   /** Vendors whose pass completed without throwing. */
   vendorsReconciled: AdminKeyVendor[];
+  /**
+   * Vendors whose billing API was ACTUALLY called this run. A vendor in
+   * `vendorsReconciled` but NOT here completed without error yet made no vendor
+   * request (no local usage window to reconcile against), so its Admin key was
+   * never contacted. The UI uses this to avoid claiming a key was "verified"
+   * when no vendor request occurred (e.g. on a fresh install with no metered
+   * sessions yet).
+   */
+  vendorsQueried: AdminKeyVendor[];
   /** Total reconciliation rows persisted across all vendor passes. */
   rowsWritten: number;
   /** Drift notices (over threshold) across all vendor passes. */
@@ -205,6 +215,7 @@ export class CostReconciliationService {
     if (this.running) {
       return {
         vendorsReconciled: [],
+        vendorsQueried: [],
         rowsWritten: 0,
         notices: [],
         errors: [],
@@ -267,6 +278,7 @@ export class CostReconciliationService {
     if (vendors.length === 0) {
       return {
         vendorsReconciled: [],
+        vendorsQueried: [],
         rowsWritten: 0,
         notices: [],
         errors: [],
@@ -283,6 +295,7 @@ export class CostReconciliationService {
     const notices: DriftNotice[] = [];
     const errors: VendorRunError[] = [];
     const vendorsReconciled: AdminKeyVendor[] = [];
+    const vendorsQueried: AdminKeyVendor[] = [];
 
     for (const vendor of vendors) {
       try {
@@ -290,6 +303,10 @@ export class CostReconciliationService {
         rowsWritten += result.rowsWritten;
         notices.push(...result.notices);
         vendorsReconciled.push(vendor);
+        // The vendor's API was only contacted if the pass had a usage window.
+        if (result.queriedVendors.includes(vendor)) {
+          vendorsQueried.push(vendor);
+        }
       } catch (err) {
         errors.push({ vendor, message: errorMessage(err) });
         this.log(`cost reconciliation failed for ${vendor}: ${errorMessage(err)}`);
@@ -298,6 +315,7 @@ export class CostReconciliationService {
 
     return {
       vendorsReconciled,
+      vendorsQueried,
       rowsWritten,
       notices,
       errors,
@@ -310,11 +328,11 @@ export class CostReconciliationService {
   private async reconcileVendor(
     vendor: AdminKeyVendor,
     loadUsageRows: () => MeteredUsageRow[],
-  ): Promise<{ rowsWritten: number; notices: DriftNotice[] }> {
+  ): Promise<ReconciliationResult> {
     const apiKey = this.storeFor(vendor).getKey();
     if (!apiKey) {
       // Cleared between the has-key check and use; nothing to reconcile.
-      return { rowsWritten: 0, notices: [] };
+      return { rowsWritten: 0, notices: [], queriedVendors: [] };
     }
     if (vendor === "anthropic") {
       const client = this.createAnthropicClient(apiKey);

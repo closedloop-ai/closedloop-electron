@@ -188,8 +188,16 @@ export class ClaudeCodeAnalyticsClient {
       );
       const parsed = parseAnalyticsPage(payload, day);
       records.push(...parsed.records);
-      if (!parsed.hasMore || !parsed.nextPage) {
+      if (!parsed.hasMore) {
         return records;
+      }
+      // has_more is true: a missing/non-string cursor means we cannot fetch the
+      // rest of the day, so returning now would silently understate usage. Fail
+      // loud on the malformed (untrusted) payload instead.
+      if (!parsed.nextPage) {
+        throw new Error(
+          `Claude Code analytics for ${day} claimed more pages (has_more) but returned no page cursor; aborting to avoid a partial usage picture`,
+        );
       }
       page = parsed.nextPage;
     }

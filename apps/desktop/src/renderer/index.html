@@ -4935,12 +4935,22 @@
           const vendorError = (summary && Array.isArray(summary.errors) ? summary.errors : []).find(
             (e) => e.vendor === vendor,
           );
+          const vendorQueried =
+            summary &&
+            Array.isArray(summary.vendorsQueried) &&
+            summary.vendorsQueried.includes(vendor);
           if (vendorError) {
             statusEl.textContent = `Saved, but verification failed: ${vendorError.message}`;
           } else if (summary && summary.skippedBusy) {
             statusEl.textContent = "Saved. A reconciliation run is already in progress.";
-          } else {
+          } else if (vendorQueried) {
             statusEl.textContent = "Saved and verified.";
+          } else {
+            // The key was saved, but with no local metered usage to reconcile
+            // against, no vendor request was made — so we cannot claim the key
+            // was verified. It will be checked on the next run that has usage.
+            statusEl.textContent =
+              "Saved. No recent local usage to verify against yet — the key will be checked automatically once metered sessions are recorded.";
           }
         } catch (error) {
           statusEl.textContent = `Saved, but verification run failed: ${error.message}`;

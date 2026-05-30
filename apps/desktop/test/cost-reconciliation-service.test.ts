@@ -190,6 +190,9 @@ test("reconciles each configured vendor in its own pass, summing results", async
   assert.equal(summary.skippedBusy, false);
   assert.equal(summary.errors.length, 0);
   assert.deepEqual(summary.vendorsReconciled.sort(), ["anthropic", "openai"]);
+  // Both vendors' billing APIs were actually called (usage window existed), so
+  // both keys are genuinely verified.
+  assert.deepEqual([...summary.vendorsQueried].sort(), ["anthropic", "openai"]);
   // One reconciliation row per vendor (one day, one cell each).
   assert.equal(summary.rowsWritten, 2);
   assert.equal(summary.computedAt, FIXED_NOW().toISOString());
@@ -290,6 +293,35 @@ test("with no keys configured a run is a no-op", async () => {
   assert.equal(summary.rowsWritten, 0);
   assert.equal(summary.computedAt, null);
   assert.equal(loaded, 0, "usage must not be loaded when there is nothing to reconcile");
+});
+
+test("a key configured but no local usage: pass completes but no vendor is queried", async () => {
+  // The fresh-install case: the user saves an Admin key before any metered
+  // session exists. The pass completes without error, but with no usage window
+  // the vendor API is never called — so vendorsQueried is empty and the UI must
+  // NOT claim the key was "verified".
+  const store = makeStore();
+  const anthropic = makeAnthropicClient([
+    { day: "2026-05-20", model: "claude-opus-4-5", amountMicroCents: 5_000_000, label: null },
+  ]);
+  const service = new CostReconciliationService({
+    anthropicKeyStore: makeKeyStore("anthropic", "sk-ant-admin"),
+    openaiKeyStore: makeKeyStore("openai"),
+    store: store.store,
+    loadUsageRows: () => [], // no metered usage yet
+    createAnthropicClient: () => anthropic,
+    now: FIXED_NOW,
+  });
+
+  const summary = await service.runReconciliationNow();
+
+  // The pass ran without error (so it is "reconciled")...
+  assert.deepEqual(summary.vendorsReconciled, ["anthropic"]);
+  // ...but no vendor request was made, so nothing was actually verified.
+  assert.deepEqual(summary.vendorsQueried, []);
+  assert.equal(anthropic.calls.length, 0, "no usage window → vendor API not called");
+  assert.equal(summary.errors.length, 0);
+  assert.equal(summary.rowsWritten, 0);
 });
 
 test("usage rows are loaded exactly once per run across vendor passes", async () => {

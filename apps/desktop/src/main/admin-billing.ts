@@ -121,7 +121,21 @@ export async function requestAdminJson(
   fetchImpl: AdminFetchLike,
   vendorLabel: string,
 ): Promise<unknown> {
-  const response = await fetchImpl(url, { method: "GET", headers });
+  let response: AdminFetchResponse;
+  try {
+    response = await fetchImpl(url, { method: "GET", headers });
+  } catch (err) {
+    // The fetch call can throw BEFORE any response — most notably for an
+    // invalid header value, whose message echoes the raw header (the Admin key).
+    // Scrub any key-shaped token before the message can reach a thrown error,
+    // an IPC reply, or the log file. (setKey already rejects non-header-safe
+    // keys; this is defense in depth for a key stored before that guard, and
+    // for any other transport error that might surface key-shaped text.)
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${vendorLabel} admin API request failed: ${redactKeyLikeTokens(message)}`,
+    );
+  }
   if (!response.ok) {
     let bodyHint = "";
     try {

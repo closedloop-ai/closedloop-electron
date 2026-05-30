@@ -175,6 +175,44 @@ test("setKey trims surrounding whitespace before persisting", () => {
   assert.equal(store.getKey(), "sk-ant-admin-PADDED");
 });
 
+test("setKey rejects a key with control characters and persists nothing", () => {
+  // A key carrying an embedded newline (e.g. a corrupted paste) is later placed
+  // in an HTTP header value; fetch then throws an "invalid header value" error
+  // that ECHOES the raw key. Reject such keys at this IPC boundary so the value
+  // can never reach that leak path — and confirm the rejection error itself does
+  // not contain the key.
+  const dir = makeTempDir();
+  const store = new AdminKeyStore({
+    vendor: "anthropic",
+    cwd: dir,
+    safeStorage: makeSafeStorage(),
+  });
+
+  const badKey = "sk-ant-admin-SECRET\nINJECTED";
+  assert.throws(
+    () => store.setKey(badKey),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /contains invalid characters/);
+      // The rejection message must never echo the key material.
+      assert.ok(!err.message.includes("SECRET"));
+      return true;
+    },
+  );
+  assert.equal(store.getKey(), null);
+  assert.equal(store.getStatus().hasKey, false);
+  // Nothing — encrypted or plaintext — was persisted for the rejected key.
+  assert.equal(readAllFiles(dir).includes("SECRET"), false);
+
+  // A tab and a raw non-ASCII byte are likewise rejected.
+  assert.throws(() => store.setKey("sk-ant-admin-\tTAB"), /contains invalid characters/);
+  assert.throws(() => store.setKey("sk-ant-admin-café"), /contains invalid characters/);
+
+  // A normal key with only visible ASCII still saves.
+  store.setKey("sk-ant-admin-OK_value-123");
+  assert.equal(store.getKey(), "sk-ant-admin-OK_value-123");
+});
+
 test("safeStorage unavailable: setKey throws and nothing is persisted", () => {
   const dir = makeTempDir();
   const store = new AdminKeyStore({

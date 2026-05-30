@@ -112,11 +112,31 @@ export class AdminKeyStore {
     return { vendor: this.vendor, hasKey: this.getKey() !== null };
   }
 
-  /** Encrypts and persists the Admin API key at rest. Rejects an empty key. */
+  /**
+   * Encrypts and persists the Admin API key at rest. Rejects an empty key and
+   * any key that is not a header-safe token.
+   *
+   * `setKey` is reached from the untrusted `desktop:set-admin-key` IPC boundary,
+   * and the stored key is later sent verbatim as an HTTP header value
+   * (`x-api-key` / `Authorization`). A key carrying a control character — e.g. an
+   * embedded newline from a corrupted paste — would pass `fetch` a malformed
+   * header value; `fetch` throws `Headers.append: "<value>" is an invalid header
+   * value`, echoing the raw key into a message the reconciliation/analytics
+   * services log and surface over IPC. Rejecting non-header-safe characters here
+   * keeps such a value from ever being stored, so it can never reach that path.
+   * Real Admin keys are all visible ASCII (`sk-…` alphanumerics, `-`, `_`); the
+   * error never includes the key itself.
+   */
   setKey(key: string): void {
     const trimmed = key.trim();
     if (trimmed.length === 0) {
       throw new Error("Admin API key must not be empty");
+    }
+    // Anything outside header-safe visible ASCII (0x21–0x7E) — control chars,
+    // spaces, non-ASCII — is rejected before storage. Note 0x20 (space) is
+    // excluded too: a valid key has no interior whitespace post-trim.
+    if (/[^\x21-\x7E]/.test(trimmed)) {
+      throw new Error("Admin API key contains invalid characters");
     }
     if (!this.safeStorage.isEncryptionAvailable()) {
       throw new Error("safeStorage is not available on this system");

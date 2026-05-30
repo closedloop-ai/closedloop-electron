@@ -291,6 +291,34 @@ test("exceeding the per-day page cap throws instead of returning partial usage",
   assert.equal(calls.length, 3);
 });
 
+test("has_more without a page cursor throws rather than returning a partial day", async () => {
+  // The day claims more pages but gives no cursor — we cannot fetch the rest, so
+  // returning the first page as complete would understate the day's usage.
+  const { fetch, calls } = makeFetch([
+    {
+      data: [
+        {
+          actor: { type: "user_actor", email_address: "a@example.com" },
+          model_breakdown: [
+            { model: "m1", estimated_cost: { amount: 1, currency: "USD" }, tokens: {} },
+          ],
+        },
+      ],
+      has_more: true,
+      next_page: null,
+    },
+  ]);
+  const client = new ClaudeCodeAnalyticsClient({
+    apiKey: "sk-ant-admin-TEST",
+    fetch,
+  });
+  await assert.rejects(
+    () => client.fetchUsage({ startDay: "2026-05-20", endDay: "2026-05-20" }),
+    /claimed more pages .* no page cursor/,
+  );
+  assert.equal(calls.length, 1);
+});
+
 test("an unknown actor shape is surfaced under a stable label, not dropped", async () => {
   const { fetch } = makeFetch([
     {

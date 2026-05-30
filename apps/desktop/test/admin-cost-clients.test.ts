@@ -12,13 +12,18 @@
  *   (3) Anthropic amounts (decimal-string cents) and OpenAI amounts (USD number)
  *       are converted to exact integer micro-cents, with the day taken from the
  *       time-bucket start;
- *   (4) pagination follows next_page and concatenates pages, and exceeding the
- *       page cap throws rather than returning a partial (understated) bill;
+ *   (4) pagination follows next_page and concatenates pages; exceeding the page
+ *       cap throws rather than returning a partial (understated) bill; and a
+ *       payload that claims has_more without a usable cursor throws rather than
+ *       silently returning the partial pages fetched so far;
  *   (5) a non-2xx response throws with the status, and malformed money throws
  *       rather than silently dropping a charge;
  *   (6) the thrown non-2xx error is scrubbed of any key-shaped token the vendor
  *       echoes back in its error body, so the Admin key never lands in an error
- *       message (and from there an IPC reply or the log file).
+ *       message (and from there an IPC reply or the log file);
+ *   (7) an error thrown by the fetch CALL itself (e.g. an invalid header value,
+ *       whose message echoes the raw header — the key) is likewise scrubbed
+ *       before it can reach a thrown error, an IPC reply, or the log file.
  *
  * The network is never touched: a recording fake fetch returns canned bodies.
  */
@@ -27,6 +32,8 @@ import { test } from "node:test";
 import {
   assertAllowedAdminHost,
   redactKeyLikeTokens,
+  requestAdminJson,
+  type AdminFetchLike,
 } from "../src/main/admin-billing.js";
 import { AnthropicAdminClient } from "../src/main/anthropic-admin-client.js";
 import { OpenAiAdminClient } from "../src/main/openai-admin-client.js";
@@ -158,6 +165,30 @@ test("Anthropic: follows next_page pagination and concatenates results", async (
   // Second request carries the page token from the first response.
   assert.equal(calls.length, 2);
   assert.ok(calls[1].url.includes("page=PAGE_2_TOKEN"));
+});
+
+test("Anthropic: has_more without a page cursor throws rather than understating", async () => {
+  // The vendor says there are more pages but gives no cursor — we cannot fetch
+  // the rest, so returning the first page as complete would understate the bill.
+  const { fetch, calls } = makeFetch([
+    {
+      data: [
+        {
+          starting_at: "2026-05-20T00:00:00Z",
+          results: [{ amount: "100", cost_type: "tokens", model: "m1" }],
+        },
+      ],
+      has_more: true,
+      next_page: null,
+    },
+  ]);
+  const client = new AnthropicAdminClient({ apiKey: "sk-ant-admin-TEST", fetch });
+  await assert.rejects(
+    () => client.fetchCostReport({ startingAt: "2026-05-20T00:00:00Z" }),
+    /claimed more pages .* no page cursor/,
+  );
+  // It stopped after the first page; it did not loop to the page cap.
+  assert.equal(calls.length, 1);
 });
 
 test("Anthropic: a non-2xx response throws with the status, key scrubbed from the body", async () => {
@@ -330,6 +361,58 @@ test("OpenAI: follows next_page pagination", async () => {
   );
   assert.equal(calls.length, 2);
   assert.ok(calls[1].url.includes("page=OPENAI_PAGE_2"));
+});
+
+test("OpenAI: has_more without a page cursor throws rather than understating", async () => {
+  const t1 = Math.floor(Date.parse("2026-05-20T00:00:00Z") / 1000);
+  const { fetch, calls } = makeFetch([
+    {
+      data: [
+        {
+          start_time: t1,
+          results: [{ amount: { value: 1, currency: "usd" } }],
+        },
+      ],
+      has_more: true,
+      next_page: null,
+    },
+  ]);
+  const client = new OpenAiAdminClient({ apiKey: "sk-admin-TEST", fetch });
+  await assert.rejects(
+    () => client.fetchCosts({ startTime: t1 }),
+    /claimed more pages .* no page cursor/,
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("requestAdminJson scrubs a key echoed by a fetch-call (invalid header) error", async () => {
+  // The fetch call can throw BEFORE any response — e.g. an invalid header value,
+  // whose message echoes the raw header (the Admin key). That error must be
+  // scrubbed before it can reach an IPC reply or the log.
+  const throwingFetch: AdminFetchLike = async () => {
+    throw new Error(
+      'Headers.append: "sk-ant-admin-SECRET12345" is an invalid header value.',
+    );
+  };
+  await assert.rejects(
+    () =>
+      requestAdminJson(
+        "https://api.anthropic.com/v1/x",
+        { "x-api-key": "sk-ant-admin-SECRET12345" },
+        throwingFetch,
+        "Anthropic",
+      ),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, /Anthropic admin API request failed/);
+      assert.ok(
+        !message.includes("sk-ant-admin-SECRET12345"),
+        "the fetch-call error must not echo the Admin key",
+      );
+      assert.match(message, /sk-\[redacted\]/);
+      return true;
+    },
+  );
 });
 
 test("OpenAI: malformed amount throws rather than dropping a charge", async () => {

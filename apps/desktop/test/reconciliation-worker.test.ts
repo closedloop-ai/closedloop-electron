@@ -158,6 +158,8 @@ test("reconciles each vendor at its grain with zero drift when the bill matches"
 
   assert.equal(result.rowsWritten, 2);
   assert.equal(result.notices.length, 0);
+  // Both vendors had a usage window and were actually queried.
+  assert.deepEqual([...result.queriedVendors].sort(), ["anthropic", "openai"]);
 
   const rows = last();
   const aRow = rows.find((r) => r.vendor === "anthropic");
@@ -355,6 +357,9 @@ test("subscription (non-metered) usage is excluded and no vendor call is made", 
   assert.equal(result.notices.length, 0);
   // No metered usage → no window → the vendor API is never hit.
   assert.equal(anthropicCalled, false);
+  // ...and the result reports that no vendor was actually queried, so callers
+  // can avoid claiming the key was "verified" when no request was made.
+  assert.deepEqual(result.queriedVendors, []);
 });
 
 test("an unpriced model contributes nothing (no silent $0)", async () => {
@@ -401,6 +406,8 @@ test("a vendor with no fetch function (no Admin key) is not reconciled against a
   assert.equal(rows.length, 1);
   assert.equal(rows[0].vendor, "openai");
   assert.equal(result.notices.length, 0);
+  // Only the vendor with a fetch function (and a usage window) was queried.
+  assert.deepEqual(result.queriedVendors, ["openai"]);
 });
 
 test("persists reconciled rows into a real ReconciliationStore", async () => {

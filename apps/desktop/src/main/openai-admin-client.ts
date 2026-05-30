@@ -96,8 +96,16 @@ export class OpenAiAdminClient {
       );
       const parsed = parseCostsPage(payload);
       entries.push(...parsed.entries);
-      if (!parsed.hasMore || !parsed.nextPage) {
+      if (!parsed.hasMore) {
         return entries;
+      }
+      // has_more is true: a missing/non-string cursor means we cannot fetch the
+      // rest, so returning now would silently understate the bill. Fail loud on
+      // the malformed (untrusted) payload instead.
+      if (!parsed.nextPage) {
+        throw new Error(
+          "OpenAI costs claimed more pages (has_more) but returned no page cursor; aborting to avoid a partial (understated) bill",
+        );
       }
       page = parsed.nextPage;
     }
