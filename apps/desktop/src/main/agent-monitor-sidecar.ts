@@ -141,13 +141,21 @@ export class AgentMonitorSidecar {
   // Detect-and-reconcile preflight: identify any process already holding the
   // fixed port and decide whether to reclaim it. Wrapped so a failure here can
   // never block boot — we simply proceed and let the bind attempt decide.
-  private async reconcilePort(): Promise<ReconcileOutcome> {
+  //
+  // `interactive` is true only for a user-initiated start (boot, settings
+  // toggle, manual restart). The crash-restart path passes false so the
+  // live-instance consent dialog can never pop up mid-session while the user is
+  // working (PR #257 review, P2) — a live holder during background recovery
+  // just stops the supervisor (blocked-live) instead of prompting.
+  private async reconcilePort(interactive: boolean): Promise<ReconcileOutcome> {
     try {
       return await reconcileAgentMonitorPort({
         port: this.port,
         pidFilePath: this.pidFilePath,
         selfUid: typeof process.getuid === "function" ? process.getuid() : -1,
-        confirmKillLive: (holder) => this.confirmKillLiveInstance(holder),
+        confirmKillLive: interactive
+          ? (holder) => this.confirmKillLiveInstance(holder)
+          : async () => false,
       });
     } catch (error) {
       gatewayLog.warn(TAG, `port reconcile skipped: ${describe(error)}`);
@@ -188,7 +196,10 @@ export class AgentMonitorSidecar {
     }
   }
 
-  private async launch(): Promise<void> {
+  // `interactive` defaults true for user-initiated starts; the crash-restart
+  // path calls launch(false) so the live-instance consent dialog never appears
+  // during background recovery.
+  private async launch(interactive = true): Promise<void> {
     if (!this.started || this.stopping) {
       return;
     }
@@ -208,7 +219,7 @@ export class AgentMonitorSidecar {
     // previous unclean exit so we don't burn the restart budget and degrade to
     // a blank dashboard. A dialog (live-instance case) can take arbitrary time,
     // so re-check our lifecycle flags after it returns.
-    const outcome = await this.reconcilePort();
+    const outcome = await this.reconcilePort(interactive);
     if (!this.started || this.stopping) {
       return;
     }
@@ -353,7 +364,7 @@ export class AgentMonitorSidecar {
       if (!this.started || this.stopping) {
         return;
       }
-      this.launch().catch((error) =>
+      this.launch(false).catch((error) =>
         gatewayLog.error(TAG, `restart failed: ${describe(error)}`),
       );
     }, backoff);

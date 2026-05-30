@@ -78,9 +78,9 @@ const classifyCases: ClassifyCase[] = [
 ];
 
 describe("classifyHolder", () => {
-  for (const { label, holder, recordedPid, expected } of classifyCases) {
+  for (const { label, holder, expected } of classifyCases) {
     test(label, () => {
-      assert.equal(classifyHolder(holder, SELF_UID, recordedPid), expected);
+      assert.equal(classifyHolder(holder, SELF_UID), expected);
     });
   }
 });

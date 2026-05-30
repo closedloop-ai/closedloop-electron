@@ -50,18 +50,19 @@ export interface ReconcileOptions {
 
 // Pure classifier — the heart of the three-guard decision. Kept side-effect
 // free so the full truth table can be asserted in unit tests.
-export function classifyHolder(
-  holder: PortHolder,
-  selfUid: number,
-  recordedPid: number | null,
-): HolderClass {
+export function classifyHolder(holder: PortHolder, selfUid: number): HolderClass {
   const ownedByUs =
     holder.uid === selfUid && holder.command.includes(SIDECAR_COMMAND_MARKER);
   if (!ownedByUs) {
     return "foreign";
   }
-  const matchesPidFile = recordedPid !== null && holder.pid === recordedPid;
-  if (holder.ppid === 1 || matchesPidFile) {
+  // Orphan requires positive proof the parent is gone: a detached sidecar whose
+  // parent died is reparented to init (PPID 1). A PID-file match is deliberately
+  // NOT treated as an orphan signal — parallel worktrees share one userData dir
+  // (hence one sidecar.pid), so a *live* instance's holder pid can match the
+  // recorded pid. Killing on that match would silently terminate a running
+  // instance (PR #257 review, P1). Any live-parent holder goes through consent.
+  if (holder.ppid === 1) {
     return "orphan";
   }
   return "live";
@@ -128,9 +129,13 @@ export async function findPortHolder(port: number): Promise<PortHolder | null> {
   if (process.platform === "win32") {
     return null;
   }
+  // Match ANY address bound to the port, not just 127.0.0.1 — a foreign holder
+  // bound to 0.0.0.0/* (a stray dev server) would be missed by an @127.0.0.1
+  // filter, fall through to spawn, and reproduce the silent EADDRINUSE degrade
+  // (PR #257 review, P2). classifyHolder decides ours (loopback) vs foreign.
   const lsofOut = await runCapture(
     "lsof",
-    ["-nP", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-t"],
+    ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
     LSOF_TIMEOUT_MS,
   );
   if (lsofOut === null) {
@@ -162,7 +167,7 @@ export async function reconcileAgentMonitorPort(
     return "no-holder";
   }
 
-  const klass = classifyHolder(holder, selfUid, readRecordedPid(pidFilePath));
+  const klass = classifyHolder(holder, selfUid);
 
   if (klass === "foreign") {
     gatewayLog.warn(
@@ -173,10 +178,15 @@ export async function reconcileAgentMonitorPort(
   }
 
   if (klass === "orphan") {
+    // The PID file does not gate the kill (PPID 1 already proves orphan); it
+    // only annotates whether this was our own prior process vs another
+    // worktree's orphan, both of which we reclaim the same way.
+    const provenance =
+      readRecordedPid(pidFilePath) === holder.pid ? " (our prior instance)" : "";
     if (await reclaimFromHolder(holder.pid, port, selfUid)) {
       gatewayLog.info(
         TAG,
-        `reclaimed port ${port} from orphaned sidecar pid=${holder.pid}`,
+        `reclaimed port ${port} from orphaned sidecar pid=${holder.pid}${provenance}`,
       );
       return "killed-orphan";
     }
