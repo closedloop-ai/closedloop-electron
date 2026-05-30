@@ -296,35 +296,41 @@ export class AgentSessionSyncService {
 
           const nowMs = Date.now();
           let candidateIds: string[] = [];
+          // FEA-1461: try incremental first. `pickReadyCandidates` may filter
+          // out every queued session (all in rate-limit backoff). When that
+          // happens, fall through to backfill so it does not get starved
+          // for the whole backoff window — previously the early-return
+          // below would skip backfill entirely on every tick.
           if (
             this.incrementalQueue.length > 0 &&
             nowMs - this.lastIncrementalBatchAttemptedAtMs >=
               MIN_INCREMENTAL_SYNC_INTERVAL_MS
           ) {
-            syncMode = "incremental";
-            // FEA-1461: iterate rather than slice so a session under
-            // rate-limit backoff at the head of the queue does not
-            // head-of-line-block siblings behind it.
             candidateIds = this.pickReadyCandidates(
               this.incrementalQueue,
               INCREMENTAL_SESSION_BATCH_SIZE,
               nowMs,
             );
-            // FEA-1461: only stamp the throttle timestamp if we actually
-            // selected at least one ready candidate. Stamping when every
-            // candidate was filtered by backoff would unnecessarily delay
-            // a session added to the queue moments later by the full
-            // MIN_INCREMENTAL_SYNC_INTERVAL_MS window.
             if (candidateIds.length > 0) {
+              syncMode = "incremental";
+              // Only stamp the throttle timestamp if we actually selected
+              // at least one ready candidate. Stamping when every candidate
+              // was filtered by backoff would unnecessarily delay a session
+              // added to the queue moments later by the full
+              // MIN_INCREMENTAL_SYNC_INTERVAL_MS window.
               this.lastIncrementalBatchAttemptedAtMs = nowMs;
             }
-          } else if (this.backfillQueue.length > 0) {
-            syncMode = "backfill";
-            candidateIds = this.pickReadyCandidates(
+          }
+          if (candidateIds.length === 0 && this.backfillQueue.length > 0) {
+            const backfillCandidates = this.pickReadyCandidates(
               this.backfillQueue,
               BACKFILL_SESSION_BATCH_SIZE,
               nowMs,
             );
+            if (backfillCandidates.length > 0) {
+              syncMode = "backfill";
+              candidateIds = backfillCandidates;
+            }
           }
 
           if (!syncMode || candidateIds.length === 0) {
@@ -644,12 +650,23 @@ export class AgentSessionSyncService {
       // log only, no counter, no dead-letter, no dequeue, no backoff. For an
       // oversized session that's permanently throttled, that produced an
       // infinite retry loop (re-chunking + log spam every 5s).
+      //
+      // FEA-1461 review fix (PR #258, Codex P1): `cloud-socket.sendAgentSessions`
+      // returns `RateLimited` for BOTH server-side payload throttling AND
+      // local transport unavailability (`!isRelayReady()` or socket
+      // disconnected after the batch was prepared). Treating a relay flap
+      // as a session-payload problem would dead-letter perfectly good
+      // sessions after 5 disconnects. Re-check relay readiness here: if the
+      // relay is down right now, the ack came from the transport layer —
+      // defer with backoff but do NOT increment the dead-letter counter.
+      const relayHealthy = this.options.isRelayReady();
       const deadLettered: string[] = [];
       const deferred: string[] = [];
       const retryDeadline = Date.now() + RATE_LIMIT_BACKOFF_MS;
       for (const id of ids) {
-        const count = (this.rateLimitedCountById.get(id) ?? 0) + 1;
-        if (count >= MAX_CONSECUTIVE_RATE_LIMITED) {
+        const previousCount = this.rateLimitedCountById.get(id) ?? 0;
+        const count = relayHealthy ? previousCount + 1 : previousCount;
+        if (relayHealthy && count >= MAX_CONSECUTIVE_RATE_LIMITED) {
           deadLettered.push(id);
           this.rateLimitedCountById.delete(id);
           this.nextRetryAfterMs.delete(id);
@@ -658,7 +675,9 @@ export class AgentSessionSyncService {
           this.timeoutCountById.delete(id);
           this.deadLetteredIds.add(id);
         } else {
-          this.rateLimitedCountById.set(id, count);
+          if (relayHealthy) {
+            this.rateLimitedCountById.set(id, count);
+          }
           this.nextRetryAfterMs.set(id, retryDeadline);
           deferred.push(id);
         }
@@ -677,7 +696,8 @@ export class AgentSessionSyncService {
         const attempt = this.rateLimitedCountById.get(sampleId) ?? 0;
         gatewayLog.info(
           TAG,
-          `agent-session batch (${syncMode}, ~${formatBytes(payloadBytes)}) rate_limited by server; ` +
+          `agent-session batch (${syncMode}, ~${formatBytes(payloadBytes)}) rate_limited ` +
+            `(${relayHealthy ? "server payload throttle" : "transport unavailable"}); ` +
             `deferring ${deferred.length} session(s) for ${Math.round(RATE_LIMIT_BACKOFF_MS / 1000)}s ` +
             `(attempt ${attempt}/${MAX_CONSECUTIVE_RATE_LIMITED}); batch left queued for retry`,
         );
