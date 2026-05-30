@@ -34,7 +34,6 @@ const OURS = "/Applications/Electron --some-flag /opt/app/agent-monitor/server/i
 interface ClassifyCase {
   label: string;
   holder: PortHolder;
-  recordedPid: number | null;
   expected: HolderClass;
 }
 
@@ -42,37 +41,30 @@ const classifyCases: ClassifyCase[] = [
   {
     label: "different uid → foreign (never touch another user's process)",
     holder: { pid: 200, uid: 0, ppid: 1, command: OURS },
-    recordedPid: null,
     expected: "foreign",
   },
   {
     label: "our uid but unrelated command → foreign",
     holder: { pid: 200, uid: SELF_UID, ppid: 1, command: "/usr/bin/python -m http.server 4820" },
-    recordedPid: null,
     expected: "foreign",
   },
   {
     label: "ours + PPID 1 → orphan (parent died in an unclean exit)",
     holder: { pid: 200, uid: SELF_UID, ppid: 1, command: OURS },
-    recordedPid: null,
     expected: "orphan",
   },
   {
-    label: "ours + pid matches PID file → orphan (high-confidence prior process)",
+    // P1 (PR #257): parallel worktrees share one userData dir → one sidecar.pid,
+    // so a LIVE instance's holder pid can match the recorded pid. A live parent
+    // must classify as live (consent), never orphan (silent kill). classifyHolder
+    // no longer accepts a PID-file match, so this is now decided purely on ppid.
+    label: "ours + live parent → live (PID-file match must NOT force orphan)",
     holder: { pid: 200, uid: SELF_UID, ppid: 9999, command: OURS },
-    recordedPid: 200,
-    expected: "orphan",
-  },
-  {
-    label: "ours + live parent + no PID-file match → live (another instance)",
-    holder: { pid: 200, uid: SELF_UID, ppid: 9999, command: OURS },
-    recordedPid: 7,
     expected: "live",
   },
   {
-    label: "ours + live parent + null PID file → live",
+    label: "ours + live parent (different pid) → live (another running instance)",
     holder: { pid: 200, uid: SELF_UID, ppid: 4242, command: OURS },
-    recordedPid: null,
     expected: "live",
   },
 ];
