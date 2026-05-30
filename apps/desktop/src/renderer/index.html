@@ -3405,10 +3405,13 @@
           <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
         </div>
         <!-- FEA-1444: opt-in toggle for Codex hook ingestion. Sibling of the
-             Claude toggle above. Requires `[features].codex_hooks = true` in
-             ~/.codex/config.toml on the Codex side. -->
+             Claude toggle above. Requires `[features].hooks = true` in
+             ~/.codex/config.toml AND that the user trust the installed
+             non-managed command hook via Codex's `/hooks` slash command;
+             without trust, Codex skips the command silently and this falls
+             back to the rollout-tail watcher. -->
         <div id="codexDashConsent" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
-          <label class="toggle-switch" title="Installs Codex CLI hooks in ~/.codex/hooks.json so this dashboard receives live session events from Codex (in addition to the rollout-tail watcher that already runs). Requires `[features].codex_hooks = true` in ~/.codex/config.toml. Off by default; fully removable.">
+          <label class="toggle-switch" title="Installs Codex CLI hooks in ~/.codex/hooks.json so this dashboard receives live session events from Codex (in addition to the rollout-tail watcher that already runs). Requires `[features].hooks = true` in ~/.codex/config.toml AND `/hooks` trust on the installed command. Off by default; fully removable.">
             <input type="checkbox" id="codexDashHooksToggle" />
             <span class="toggle-track"></span>
           </label>
@@ -4166,7 +4169,7 @@
           toggle.disabled = false;
           if (hint) {
             hint.textContent = optedIn
-              ? "— on (Codex hooks installed in ~/.codex/hooks.json; also set [features].codex_hooks = true in ~/.codex/config.toml)"
+              ? "— on (installed in ~/.codex/hooks.json; finish Codex setup: [features].hooks=true in ~/.codex/config.toml + run /hooks in Codex to trust the command)"
               : "— off (rollout-tail watcher continues)";
           }
         } catch (_) { /* leave as-is */ }

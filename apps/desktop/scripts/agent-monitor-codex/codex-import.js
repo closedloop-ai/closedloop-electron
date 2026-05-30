@@ -11,6 +11,9 @@
  *
  * Part of CLOSEDLOOP VENDOR Addition #6 (see vendor/agent-monitor/VENDOR.md).
  */
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { parseRolloutFile } = require("./codex-parser");
 const { listAllRolloutFiles } = require("./codex-home");
 const { importSession } = require("../../scripts/import-history");
@@ -62,6 +65,54 @@ function importCodexSession(dbModule, session) {
  * No-op when session.events is empty or the events query fails (best-effort;
  * never block the import on a dedup-time error).
  */
+// FEA-1444 review (PR #259, Codex P2): the filter has no hook-source
+// discriminator, so without an upstream gate it can incorrectly drop
+// rollout-tail events that look like duplicates but aren't (e.g., two
+// same-second tool calls in rapid succession). Gate the filter on
+// "does the user actually have our Codex hook handler installed?" —
+// when it isn't installed there are no possible hook-sourced rows to
+// dedup against, so the filter must be a no-op. Cases where hooks ARE
+// installed but miss an event (b/c in the reviewer's framing) remain a
+// known v1 limitation; tracked for a follow-up FEA that adds a real
+// `source` column to the events table.
+const HOOK_HANDLER_FILENAME = "codex-hook-handler.js";
+
+let cachedCodexHooksInstalled = null;
+
+function codexHooksInstalled() {
+  if (cachedCodexHooksInstalled !== null) {
+    return cachedCodexHooksInstalled;
+  }
+  cachedCodexHooksInstalled = detectCodexHooksInstalled();
+  return cachedCodexHooksInstalled;
+}
+
+function detectCodexHooksInstalled() {
+  try {
+    const codexHomeRaw = process.env.CODEX_HOME;
+    const codexHome = codexHomeRaw && codexHomeRaw.trim()
+      ? codexHomeRaw.split(",")[0].trim().replace(/^~(?=\/)/, os.homedir())
+      : path.join(os.homedir(), ".codex");
+    const hooksPath = path.join(codexHome, "hooks.json");
+    if (!fs.existsSync(hooksPath)) {
+      return false;
+    }
+    const raw = fs.readFileSync(hooksPath, "utf8");
+    return raw.includes(HOOK_HANDLER_FILENAME);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * FEA-1444: test-only hook to reset the install-state cache. Exposed via
+ * module.exports for the regression tests so a single process can exercise
+ * both the "hooks installed" and "hooks not installed" paths.
+ */
+function resetCodexHooksInstalledCache() {
+  cachedCodexHooksInstalled = null;
+}
+
 // FEA-1444 dedup-stmt cache: the filter runs per-session inside
 // importCodexSession, which itself runs inside the importBatch transaction
 // loop. Caching the prepared statement on the dbModule keeps us at O(1)
@@ -87,6 +138,15 @@ function getDedupCheckStmt(dbModule) {
 
 function filterEventsAlreadyCapturedByHooks(dbModule, session) {
   if (!session || !Array.isArray(session.events) || session.events.length === 0) {
+    return;
+  }
+  // FEA-1444 review fix: only run the dedup query when Codex hooks are
+  // actually installed. Without this gate, every existing rollout-tail-
+  // sourced row matching the tuple looks like a hook duplicate and gets
+  // dropped — which silently loses legitimate rapid same-second tool
+  // calls on rollout-tail re-imports. The gate eliminates the most common
+  // false-positive vector (~99% of users who never opt into Codex hooks).
+  if (!codexHooksInstalled()) {
     return;
   }
   let checkStmt;
@@ -189,4 +249,5 @@ module.exports = {
   importCodexSession,
   // Exposed for regression coverage of FEA-1444 dedup.
   filterEventsAlreadyCapturedByHooks,
+  resetCodexHooksInstalledCache,
 };

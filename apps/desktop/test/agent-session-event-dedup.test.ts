@@ -10,7 +10,7 @@
 // JS module under .generated/agent-monitor/server/lib/codex-import.js.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -45,18 +45,52 @@ type CodexImport = {
       }>;
     },
   ) => void;
+  resetCodexHooksInstalledCache: () => void;
 };
 
 let tempRoot = "";
 
 beforeEach(() => {
   tempRoot = mkdtempSync(join(tmpdir(), "fea1444-dedup-"));
+  // FEA-1444 review fix (PR #259, Codex P2): dedup is now gated on
+  // `~/.codex/hooks.json` containing our handler. Set CODEX_HOME to a
+  // tmp dir where we DO install a synthetic hooks.json so the existing
+  // dedup tests still exercise the filter path. The gate-off test
+  // overrides this with a tmp dir that has no hooks.json.
+  const codexHome = join(tempRoot, "codex");
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(
+    join(codexHome, "hooks.json"),
+    JSON.stringify({
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command:
+                  'ELECTRON_RUN_AS_NODE=1 "/fake/Electron" "/fake/userData/agent-monitor/codex-hook-handler.js" "SessionStart"',
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  );
+  process.env.CODEX_HOME = codexHome;
+  // Reset the module-level install-detection cache so each test sees a
+  // fresh check against the CODEX_HOME we just set.
+  if (!skipReason) {
+    const mod = createRequire(generatedCodexImport)("./codex-import.js") as CodexImport;
+    mod.resetCodexHooksInstalledCache();
+  }
 });
 
 afterEach(() => {
   if (tempRoot) {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+  delete process.env.CODEX_HOME;
 });
 
 function createTestDb(): DatabaseSync {
@@ -199,5 +233,48 @@ test("dedup: empty events array is a no-op", skipReason ? { skip: skipReason } :
   ) as CodexImport;
   filterEventsAlreadyCapturedByHooks({ db } as { db: DatabaseSync }, session);
   assert.equal(session.events.length, 0);
+  db.close();
+});
+
+test("dedup: gate-off when Codex hooks are not installed — filter is a no-op", skipReason ? { skip: skipReason } : undefined, () => {
+  // PR #259 review fix (Codex P2): with no hook handler installed there
+  // are no possible hook-sourced rows in the events table — so any tuple
+  // match against an existing row would be a FALSE POSITIVE (the row
+  // came from a prior rollout-tail import of the same logical event).
+  // The filter must skip these cases entirely.
+  //
+  // Override the beforeEach-installed hooks.json with a hooks-empty
+  // CODEX_HOME so the install-detection cache resolves to false on the
+  // next reset.
+  const codexHomeEmpty = join(tempRoot, "codex-empty");
+  mkdirSync(codexHomeEmpty, { recursive: true });
+  // No hooks.json here.
+  process.env.CODEX_HOME = codexHomeEmpty;
+  const mod = createRequire(generatedCodexImport)("./codex-import.js") as CodexImport;
+  mod.resetCodexHooksInstalledCache();
+
+  const db = createTestDb();
+  // Seed a row that the dedup would normally treat as a hook duplicate.
+  insertEvent(db, "sess-E", "PreToolUse", "Read", "2026-05-29T19:00:00.000Z");
+  // Inbound rollout-tail event with the same tuple — represents a
+  // legitimate distinct event (or a re-import of the same event from
+  // a changed rollout file). Without the install gate, the filter would
+  // drop it as a false-positive hook duplicate.
+  const session = {
+    sessionId: "sess-E",
+    events: [
+      {
+        event_type: "PreToolUse",
+        tool_name: "Read",
+        created_at: "2026-05-29T19:00:00.500Z",
+      },
+    ],
+  };
+  mod.filterEventsAlreadyCapturedByHooks({ db } as { db: DatabaseSync }, session);
+  assert.equal(
+    session.events.length,
+    1,
+    "filter must be a no-op when Codex hooks are not installed",
+  );
   db.close();
 });
