@@ -2982,7 +2982,8 @@
       .page > .panel {
         margin: 0;
       }
-      #claude-dashboard.panel.active {
+      #claude-dashboard.panel.active,
+      #symphony-web.panel.active {
         display: flex;
         flex-direction: column;
         min-height: 100%;
@@ -2992,7 +2993,8 @@
         flex-direction: column;
         height: 100%;
       }
-      #claudeDashStatus {
+      #claudeDashStatus,
+      #symphonyWebStatus {
         flex: 1;
       }
       .app.agent-view .page {
@@ -3406,6 +3408,10 @@
         </div>
         <div id="claudeDashStatus" class="dash-loading" aria-live="polite"></div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
+      </section>
+      <section id="symphony-web" class="panel">
+        <div id="symphonyWebStatus" class="dash-loading" aria-live="polite"></div>
+        <iframe id="symphonyWebFrame" title="Symphony Web POC" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
       <section id="settings" class="panel">
         <!-- D5 / AC-010: Revival limitation hint for non-DESKTOP_MANAGED keys.
@@ -3843,6 +3849,8 @@
         { id: "packs",          label: "Packs",          icon: "package",     kind: "agent",   route: "/packs" },
         { id: "pull-requests",  label: "Pull Requests",  icon: "git-pull-request", kind: "agent", route: "/pull-requests" },
         { id: "agent-settings", label: "Agent Settings", icon: "settings",    kind: "agent",   route: "/settings" },
+        { type: "group", label: "Symphony", symphonyWebOnly: true },
+        { id: "symphony-web",   label: "Web App POC",    icon: "sparkles",    kind: "symphony", panel: "symphony-web", symphonyWebOnly: true },
         { type: "group", label: "Gateway" },
         { id: "approvals",      label: "Approvals",      icon: "shield",      kind: "gateway", panel: "approvals", count: true },
         { id: "requests",       label: "Requests",       icon: "inbox",       kind: "gateway", panel: "activity" },
@@ -3864,10 +3872,13 @@
       let pendingAgentRoute = "/";
       let bootNavDone = false;
       let cachedPlanExtractionEnabled = false;
+      let cachedSymphonyWebPocEnabled = false;
       let agentMonitorFrameOrigin = null;
 
       function shouldShowNavItem(item) {
-        return !item.planExtractionOnly || cachedPlanExtractionEnabled;
+        if (item.planExtractionOnly && !cachedPlanExtractionEnabled) return false;
+        if (item.symphonyWebOnly && !cachedSymphonyWebPocEnabled) return false;
+        return true;
       }
 
       function buildSidebar() {
@@ -3875,6 +3886,9 @@
         nav.innerHTML = "";
         for (const item of NAV_ITEMS) {
           if (item.type === "group") {
+            if (!shouldShowNavItem(item)) {
+              continue;
+            }
             const group = document.createElement("div");
             group.className = "sb-section";
             group.textContent = item.label;
@@ -3907,7 +3921,12 @@
       function setBreadcrumb(item) {
         const group = document.getElementById("crumbGroup");
         const sep = document.getElementById("crumbSep");
-        group.textContent = item.kind === "agent" ? "Agents" : "Gateway";
+        group.textContent =
+          item.kind === "agent"
+            ? "Agents"
+            : item.kind === "symphony"
+              ? "Symphony"
+              : "Gateway";
         group.hidden = false;
         sep.hidden = false;
         document.getElementById("crumbHere").textContent = item.label;
@@ -3948,14 +3967,22 @@
           activateSettingsTab("relay-gateway");
           return;
         }
+        if (item.kind === "symphony" && !cachedSymphonyWebPocEnabled) {
+          activateNav("settings");
+          activateSettingsTab("feature-flags");
+          return;
+        }
         currentNavId = id;
         document.querySelectorAll("#sidebarNav .sb-item").forEach((el) => {
           el.classList.toggle("active", el.dataset.nav === id);
         });
         const panelId = item.kind === "agent" ? "claude-dashboard" : item.panel;
         PANELS.forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
-        // Agent views render the iframe full-bleed (no .page padding).
-        appShell.classList.toggle("agent-view", item.kind === "agent");
+        // Iframe-backed views render full-bleed (no .page padding).
+        appShell.classList.toggle(
+          "agent-view",
+          item.kind === "agent" || item.kind === "symphony",
+        );
         setBreadcrumb(item);
         if (panelId === "logs") {
           void pollLogs();
@@ -3973,8 +4000,13 @@
           }
           startClaudeDashboard();
           navigateAgentRoute(item.route);
+          stopSymphonyWebPocPoll();
+        } else if (item.kind === "symphony") {
+          stopClaudeDashboardPoll();
+          startSymphonyWebPoc();
         } else {
           stopClaudeDashboardPoll();
+          stopSymphonyWebPocPoll();
         }
       }
 
@@ -3996,6 +4028,7 @@
           /* localStorage unavailable */
         }
         sizeClaudeFrame();
+        sizeSymphonyFrame();
       });
       try {
         if (localStorage.getItem("cl:sidebar-collapsed") === "1") {
@@ -4083,7 +4116,20 @@
           : window.innerHeight;
         frame.style.height = Math.max(320, bottom - top) + "px";
       }
-      window.addEventListener("resize", sizeClaudeFrame);
+      function sizeSymphonyFrame() {
+        const frame = document.getElementById("symphonyWebFrame");
+        if (!frame || frame.style.display === "none") return;
+        const page = frame.closest(".page");
+        const top = frame.getBoundingClientRect().top;
+        const bottom = page
+          ? page.getBoundingClientRect().bottom
+          : window.innerHeight;
+        frame.style.height = Math.max(320, bottom - top) + "px";
+      }
+      window.addEventListener("resize", () => {
+        sizeClaudeFrame();
+        sizeSymphonyFrame();
+      });
 
       function stopClaudeDashboardPoll() {
         if (claudeDashTimer) { clearInterval(claudeDashTimer); claudeDashTimer = null; }
@@ -4208,6 +4254,131 @@
                 '<button id="claudeDashRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
               document.getElementById("claudeDashRetry")
                 ?.addEventListener("click", () => { claudeDashLoaded = false; startClaudeDashboard(); });
+            } else {
+              void tick();
+            }
+          }, 1000);
+        }
+      }
+
+      // --- Symphony Web POC (desktop-local web app runtime) --------------
+      let symphonyWebTimer = null;
+      let symphonyWebLoaded = false;
+
+      function stopSymphonyWebPocPoll() {
+        if (symphonyWebTimer) {
+          clearInterval(symphonyWebTimer);
+          symphonyWebTimer = null;
+        }
+      }
+
+      function renderSymphonyLoading(message) {
+        const status = document.getElementById("symphonyWebStatus");
+        if (!status) return;
+        status.className = "dash-loading";
+        status.style.display = "flex";
+        status.innerHTML =
+          '<div class="dash-loading-spinner"></div>' +
+          '<div class="dash-loading-title">Starting Symphony Web POC…</div>' +
+          '<div class="dash-loading-sub">' +
+          (message || "Preparing the desktop-local SQLite/API runtime.") +
+          "</div>";
+      }
+      renderSymphonyLoading();
+
+      function syncSymphonyWebPocVisibility(enabled) {
+        cachedSymphonyWebPocEnabled = enabled === true;
+        if (!cachedSymphonyWebPocEnabled) {
+          stopSymphonyWebPocPoll();
+          symphonyWebLoaded = false;
+          const frame = document.getElementById("symphonyWebFrame");
+          const status = document.getElementById("symphonyWebStatus");
+          if (frame) {
+            frame.src = "about:blank";
+            frame.style.display = "none";
+          }
+          if (status) {
+            status.style.display = "block";
+            status.textContent = "Symphony Web POC is disabled in Settings.";
+          }
+          const current = NAV_ITEMS.find((n) => n.id === currentNavId);
+          if (current && current.kind === "symphony") {
+            activateTab("settings");
+            activateSettingsTab("feature-flags");
+          }
+        }
+      }
+
+      function startSymphonyWebPoc() {
+        const frame = document.getElementById("symphonyWebFrame");
+        const status = document.getElementById("symphonyWebStatus");
+        if (!cachedSymphonyWebPocEnabled) {
+          frame.style.display = "none";
+          status.style.display = "block";
+          status.textContent = "Symphony Web POC is disabled in Settings.";
+          return;
+        }
+        if (symphonyWebLoaded) {
+          sizeSymphonyFrame();
+          return;
+        }
+        renderSymphonyLoading();
+
+        const tick = async () => {
+          try {
+            const r = await api.getSymphonyWebPocStatus();
+            if (!r || !r.enabled) {
+              syncSymphonyWebPocVisibility(false);
+              return;
+            }
+            if (r.error) {
+              status.style.display = "block";
+              status.textContent = "Symphony Web POC failed: " + r.error;
+            }
+            if (r.ready && r.url) {
+              const frameUrl = new URL(r.url);
+              if (r.apiUrl) {
+                frameUrl.searchParams.set("desktop_api_url", r.apiUrl);
+              }
+              if (r.apiToken) {
+                frameUrl.searchParams.set("desktop_api_token", r.apiToken);
+              }
+              frameUrl.searchParams.set("desktop_local", "1");
+              frameUrl.searchParams.set(
+                "closedloop_host_origin",
+                window.location.origin || "null",
+              );
+              frame.src = frameUrl.toString();
+              frame.style.display = "block";
+              status.style.display = "none";
+              symphonyWebLoaded = true;
+              sizeSymphonyFrame();
+              stopSymphonyWebPocPoll();
+            }
+          } catch (_) {
+            /* keep polling */
+          }
+        };
+
+        void tick();
+        if (!symphonyWebLoaded && !symphonyWebTimer) {
+          const startedAt = Date.now();
+          symphonyWebTimer = setInterval(() => {
+            if (symphonyWebLoaded) {
+              stopSymphonyWebPocPoll();
+              return;
+            }
+            if (Date.now() - startedAt > 120000) {
+              stopSymphonyWebPocPoll();
+              status.innerHTML =
+                'Symphony Web POC did not start. ' +
+                '<button id="symphonyWebRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
+              document.getElementById("symphonyWebRetry")
+                ?.addEventListener("click", async () => {
+                  symphonyWebLoaded = false;
+                  await api.restartSymphonyWebPoc();
+                  startSymphonyWebPoc();
+                });
             } else {
               void tick();
             }
@@ -4556,6 +4727,10 @@
               await api.updateSettings({ [key]: checkbox.checked });
               if (key === "agentMonitorEnabled") {
                 syncAgentMonitorTabVisibility(checkbox.checked);
+              }
+              if (key === "symphonyWebPocEnabled") {
+                syncSymphonyWebPocVisibility(checkbox.checked);
+                buildSidebar();
               }
               if (featureFlagsMessage) featureFlagsMessage.textContent = "Saved.";
               setTimeout(() => {
@@ -5323,8 +5498,10 @@
         webAppOrigin.value = settings.webAppOrigin || "";
         cachedPlanExtractionEnabled = settings.planExtractionEnabled === true;
         cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
+        cachedSymphonyWebPocEnabled = settings.symphonyWebPocEnabled === true;
         buildSidebar();
         syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
+        syncSymphonyWebPocVisibility(cachedSymphonyWebPocEnabled);
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
         if (commandSigningEnforcementEnabled) {

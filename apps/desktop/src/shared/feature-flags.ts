@@ -38,6 +38,15 @@ const FEATURE_FLAGS_INTERNAL = [
     category: "Experimental" as const,
   },
   {
+    key: "symphonyWebPocEnabled" as const,
+    default: false,
+    label: "Symphony Web POC",
+    description:
+      "Runs an experimental Symphony web surface inside Electron against a desktop-local SQLite/API runtime.",
+    category: "Experimental" as const,
+    envOverride: "CL_SYMPHONY_WEB_POC",
+  },
+  {
     key: "commandSigningEnforcementEnabled" as const,
     default: false,
     label: "Trusted Browser Enforcement",

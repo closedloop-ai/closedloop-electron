@@ -39,6 +39,7 @@ test("getFlag returns registry default when key is absent from store", () => {
   const store = makeStore();
   assert.equal(store.getFlag("agentMonitorEnabled"), true, "agentMonitorEnabled defaults to true");
   assert.equal(store.getFlag("planExtractionEnabled"), false, "planExtractionEnabled defaults to false");
+  assert.equal(store.getFlag("symphonyWebPocEnabled"), false, "symphonyWebPocEnabled defaults to false");
 });
 
 test("getFlag returns stored value when present", () => {
@@ -47,12 +48,10 @@ test("getFlag returns stored value when present", () => {
 });
 
 test("getFlag respects env override when envOverride is set", () => {
-  // Add a temporary envOverride to agentMonitorEnabled for testing
-  const store = makeStore({ agentMonitorEnabled: false });
-  // Direct test via a flag that has envOverride — we'll use cloudConnectionEnabled
-  // and temporarily set an env var. Since no flags have envOverride in v1,
-  // we test the env path by monkey-patching.
-  assert.equal(store.getFlag("cloudConnectionEnabled"), true);
+  const store = makeStore({ symphonyWebPocEnabled: false });
+  process.env.CL_SYMPHONY_WEB_POC = "1";
+  assert.equal(store.getFlag("symphonyWebPocEnabled"), true);
+  assert.equal(store.getFlagSource("symphonyWebPocEnabled"), "env");
 });
 
 // --- setFlag ---

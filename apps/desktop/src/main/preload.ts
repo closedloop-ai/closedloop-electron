@@ -125,6 +125,28 @@ const desktopApi = {
       enabled: boolean;
       planExtractionEnabled: boolean;
     }>,
+  getSymphonyWebPocStatus: () =>
+    ipcRenderer.invoke("desktop:get-symphony-web-poc-status") as Promise<{
+      enabled: boolean;
+      ready: boolean;
+      mode: string | null;
+      url: string | null;
+      apiUrl: string | null;
+      apiToken: string | null;
+      dbPath: string | null;
+      error: string | null;
+      source: string | null;
+      counts: {
+        projects: number;
+        workstreams: number;
+        documents: number;
+      };
+    }>,
+  restartSymphonyWebPoc: () =>
+    ipcRenderer.invoke("desktop:restart-symphony-web-poc") as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
   openAgentMonitor: () =>
     ipcRenderer.invoke("desktop:open-agent-monitor") as Promise<unknown>,
   getAgentMonitorHooksEnabled: () =>

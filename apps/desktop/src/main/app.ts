@@ -67,6 +67,7 @@ import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch }
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
+import { SymphonyWebPocRuntime } from "./symphony-web-poc-runtime.js";
 import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
   isAgentMonitorHooksEnabled,
@@ -204,6 +205,7 @@ export class DesktopApplication {
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly agentMonitor: AgentMonitorSidecar;
+  private readonly symphonyWebPoc: SymphonyWebPocRuntime;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
@@ -317,6 +319,10 @@ export class DesktopApplication {
     this.agentMonitor.setSandboxBaseDirectory(
       this.settingsStore.getSandboxBaseDirectory(),
     );
+    this.symphonyWebPoc = new SymphonyWebPocRuntime({
+      dataDir: path.join(app.getPath("userData"), "symphony-web-poc"),
+      appDirCandidates: getSymphonyWebPocAppDirCandidates(),
+    });
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -669,6 +675,9 @@ export class DesktopApplication {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
       this.agentSessionSync.start();
+    }
+    if (this.settingsStore.getSymphonyWebPocEnabled()) {
+      void this.symphonyWebPoc.start();
     }
 
     try {
@@ -1266,6 +1275,10 @@ export class DesktopApplication {
     return this.settingsStore.getPlanExtractionEnabled();
   }
 
+  private isSymphonyWebPocEnabled(): boolean {
+    return this.settingsStore.getSymphonyWebPocEnabled();
+  }
+
   private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {
     this.tray.setAgentMonitorEnabled(enabled);
 
@@ -1297,6 +1310,20 @@ export class DesktopApplication {
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-settings-tab", "relay-gateway");
+  }
+
+  private async applySymphonyWebPocSetting(enabled: boolean): Promise<void> {
+    if (enabled) {
+      void this.symphonyWebPoc.start();
+      return;
+    }
+    await this.symphonyWebPoc.stop();
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:navigate-tab", "settings");
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:navigate-settings-tab", "feature-flags");
   }
 
   openClaudeDashboard(): void {
@@ -1745,7 +1772,12 @@ export class DesktopApplication {
       },
       cloudSocket: this.cloudSocket,
       commandExecutor: this.commandExecutor,
-      agentMonitor: this.agentMonitor,
+      agentMonitor: {
+        stop: async () => {
+          await this.symphonyWebPoc.stop();
+          await this.agentMonitor.stop();
+        },
+      },
       server: this.server,
       desktopWindow: this.desktopWindow,
       tray: this.tray,
@@ -2462,6 +2494,20 @@ export class DesktopApplication {
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
+    ipcMain.handle("desktop:get-symphony-web-poc-status", () =>
+      this.symphonyWebPoc.getStatus(this.isSymphonyWebPocEnabled()),
+    );
+    ipcMain.handle("desktop:restart-symphony-web-poc", async () => {
+      if (!this.isSymphonyWebPocEnabled()) {
+        return {
+          ok: false,
+          error: "Symphony Web POC is disabled in Settings.",
+        };
+      }
+      await this.symphonyWebPoc.stop();
+      void this.symphonyWebPoc.start();
+      return { ok: true };
+    });
     // FEA-1334: proxy the Agent Monitor cold-start ingest progress so the renderer
     // can drive the floating progress card without a cross-origin fetch.
     // Returns null whenever the Agent Monitor runtime is not reachable — the renderer treats
@@ -2554,8 +2600,15 @@ export class DesktopApplication {
       if (activeAlwaysAllowRules.length !== settings.alwaysAllowRules.length) {
         this.settingsStore.setAlwaysAllowRules(activeAlwaysAllowRules);
       }
+      const effectiveFlags = Object.fromEntries(
+        FEATURE_FLAGS.map((flag) => [
+          flag.key,
+          this.settingsStore.getFlag(flag.key as FlagKey),
+        ]),
+      );
       return {
         ...settings,
+        ...effectiveFlags,
         alwaysAllowRules: activeAlwaysAllowRules,
       };
     });
@@ -2664,6 +2717,12 @@ export class DesktopApplication {
           await this.applyAgentMonitorSetting(nextPartial.agentMonitorEnabled);
         }
         if (
+          typeof nextPartial.symphonyWebPocEnabled === "boolean" &&
+          nextPartial.symphonyWebPocEnabled !== currentSettings.symphonyWebPocEnabled
+        ) {
+          await this.applySymphonyWebPocSetting(nextPartial.symphonyWebPocEnabled);
+        }
+        if (
           typeof nextPartial.cloudCommandsPaused === "boolean" &&
           nextPartial.cloudCommandsPaused !== this.cloudCommandsPaused
         ) {
@@ -2714,6 +2773,9 @@ export class DesktopApplication {
       sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
       commandsPaused: this.cloudCommandsPaused,
       connectionEnabled: this.cloudConnectionEnabled,
+      symphonyWebPoc: this.symphonyWebPoc.getStatus(
+        this.isSymphonyWebPocEnabled(),
+      ),
       connectionSecurity: this.getConnectionSecurityStatus(),
       commandSigning: {
         serverSupported: this.serverCommandSigningSupported,
@@ -3614,6 +3676,21 @@ function maybeString(value: unknown): string | null {
     return null;
   }
   return value.trim();
+}
+
+function getSymphonyWebPocAppDirCandidates(): string[] {
+  const roots = [
+    process.cwd(),
+    app.getAppPath(),
+    path.join(os.homedir(), "ClaudeCode"),
+  ];
+  const candidates = roots.flatMap((root) => [
+    path.resolve(root, "symphony-alpha/apps/app"),
+    path.resolve(root, "../symphony-alpha/apps/app"),
+    path.resolve(root, "../../symphony-alpha/apps/app"),
+    path.resolve(root, "../../../symphony-alpha/apps/app"),
+  ]);
+  return Array.from(new Set(candidates));
 }
 
 /**

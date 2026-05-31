@@ -269,6 +269,10 @@ export class SettingsStore {
     return this.getFlag("planExtractionEnabled");
   }
 
+  getSymphonyWebPocEnabled(): boolean {
+    return this.getFlag("symphonyWebPocEnabled");
+  }
+
   getCommandSigningEnforcementEnabled(): boolean {
     return this.getFlag("commandSigningEnforcementEnabled");
   }
@@ -311,6 +315,10 @@ export class SettingsStore {
 
   setPlanExtractionEnabled(planExtractionEnabled: boolean): void {
     this.setFlag("planExtractionEnabled", planExtractionEnabled);
+  }
+
+  setSymphonyWebPocEnabled(symphonyWebPocEnabled: boolean): void {
+    this.setFlag("symphonyWebPocEnabled", symphonyWebPocEnabled);
   }
 
   setCommandSigningEnforcementEnabled(commandSigningEnforcementEnabled: boolean): void {

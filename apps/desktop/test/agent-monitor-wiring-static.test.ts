@@ -47,6 +47,7 @@ const embedAppSource = read("../scripts/agent-monitor-embed/App.tsx");
 const embedLayoutSource = read("../scripts/agent-monitor-embed/Layout.tsx");
 const contractsSource = read("../src/shared/contracts.ts");
 const settingsStoreSource = read("../src/main/settings-store.ts");
+const symphonyWebPocRuntimeSource = read("../src/main/symphony-web-poc-runtime.ts");
 const indexHtml = read("../src/renderer/index.html");
 const electronBuilder = read("../electron-builder.yml");
 const gitignoreSource = read("../../../.gitignore");
@@ -340,15 +341,48 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   assert.match(contractsSource, /agentMonitorEnabled: true/);
   assert.match(contractsSource, /planExtractionEnabled: boolean/);
   assert.match(contractsSource, /planExtractionEnabled: false/);
+  assert.match(contractsSource, /symphonyWebPocEnabled: boolean/);
+  assert.match(contractsSource, /symphonyWebPocEnabled: false/);
   assert.match(settingsStoreSource, /getAgentMonitorEnabled\(\)/);
   assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
   assert.match(settingsStoreSource, /getPlanExtractionEnabled\(\)/);
   assert.match(settingsStoreSource, /setPlanExtractionEnabled\(planExtractionEnabled: boolean\)/);
+  assert.match(settingsStoreSource, /getSymphonyWebPocEnabled\(\)/);
+  assert.match(settingsStoreSource, /setSymphonyWebPocEnabled\(symphonyWebPocEnabled: boolean\)/);
   // update() handles all registered flags generically via FLAG_KEYS loop
   assert.match(
     settingsStoreSource,
     /for \(const key of FLAG_KEYS\)/,
   );
+});
+
+test("Symphony web POC is a feature-gated sibling surface, not merged into the Agent Dashboard", () => {
+  assert.match(appSource, /import \{ SymphonyWebPocRuntime \} from "\.\/symphony-web-poc-runtime\.js";/);
+  assert.match(appSource, /private readonly symphonyWebPoc: SymphonyWebPocRuntime/);
+  assert.match(appSource, /this\.symphonyWebPoc = new SymphonyWebPocRuntime/);
+  assert.match(
+    appSource,
+    /if \(this\.settingsStore\.getSymphonyWebPocEnabled\(\)\) \{[\s\S]*void this\.symphonyWebPoc\.start\(\);/,
+  );
+  assert.match(
+    appSource,
+    /ipcMain\.handle\("desktop:get-symphony-web-poc-status"[\s\S]*this\.symphonyWebPoc\.getStatus/,
+  );
+  assert.match(preloadSource, /getSymphonyWebPocStatus/);
+  assert.match(preloadSource, /restartSymphonyWebPoc/);
+  assert.match(indexHtml, /id="symphony-web" class="panel"/);
+  assert.match(indexHtml, /id: "symphony-web"[\s\S]*kind: "symphony"/);
+  assert.match(indexHtml, /symphonyWebOnly/);
+  assert.match(indexHtml, /startSymphonyWebPoc/);
+  assert.match(indexHtml, /desktop_api_token/);
+  assert.match(
+    appSource,
+    /FEATURE_FLAGS\.map\(\(flag\)[\s\S]*this\.settingsStore\.getFlag\(flag\.key as FlagKey\)/,
+  );
+  assert.match(appSource, /appDirCandidates: getSymphonyWebPocAppDirCandidates\(\)/);
+  assert.match(appSource, /symphony-alpha\/apps\/app/);
+  assert.match(symphonyWebPocRuntimeSource, /"exec", "next", mode, "-p"/);
+  assert.match(symphonyWebPocRuntimeSource, /\/closedloop-ai\/my-tasks/);
 });
 
 test("sidecar is feature-gated and, when enabled, starts before the gateway", () => {
@@ -503,7 +537,7 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /#claude-dashboard\.panel\.active/);
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
-  assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
+  assert.match(indexHtml, /window\.addEventListener\("resize"[\s\S]*sizeClaudeFrame\(\)/);
 });
 
 test("embedded layout accepts navigation only from the configured host origin", () => {
