@@ -12,6 +12,7 @@ import path from "node:path";
 
 import Store from "electron-store";
 
+import { resolveAgentMonitorPort } from "../shared/contracts.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { resolveAgentMonitorPaths } from "./agent-monitor-path.js";
 
@@ -102,10 +103,9 @@ function refreshHandlerCopy(): string {
 
 function makeHookCommand(handler: string, hookType: string): string {
   // Executed by Claude Code via the shell. Use the Electron binary as Node
-  // (ELECTRON_RUN_AS_NODE) so no system `node` is required. Port defaults to
-  // 4820 inside hook-handler.js, which matches our fixed sidecar port — so no
-  // per-hook env is needed (avoids depending on Claude Code honoring it).
-  return `ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${handler}" ${JSON.stringify(hookType)}`;
+  // (ELECTRON_RUN_AS_NODE) so no system `node` is required. The dashboard port
+  // is baked into the command so dev overrides stay aligned with the runtime.
+  return `CLAUDE_DASHBOARD_PORT=${resolveAgentMonitorPort()} ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${handler}" ${JSON.stringify(hookType)}`;
 }
 
 function makeHookEntry(

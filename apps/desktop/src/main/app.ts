@@ -218,11 +218,11 @@ export class DesktopApplication {
   private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
   private cloudCommandsPaused: boolean;
-  // In-memory supervisor verdict: set once the agent-monitor sidecar gives up
-  // permanently (after MAX_RESTART_ATTEMPTS). refreshTrayState() consults this so
+  // In-memory monitor verdict: set when the in-process Agent Monitor cannot
+  // start. refreshTrayState() consults this so
   // the degraded indicator sticks across later refreshes instead of being reset
   // to ready by the next cloud heartbeat or gateway recheck. Not persisted — a
-  // fresh boot re-attempts the sidecar, so the verdict is per-process.
+  // fresh boot re-attempts the monitor, so the verdict is per-process.
   private agentMonitorFailed = false;
   private agentMonitorFailureReason: string | null = null;
   private cloudConnectionEnabled: boolean;
@@ -659,8 +659,8 @@ export class DesktopApplication {
     loopSleepRecovery.init();
 
     // Independent of the gateway, but fully feature-gated. When enabled, start
-    // the sidecar fire-and-forget BEFORE the gateway try-block so a
-    // gateway-start failure never prevents it from running, and a sidecar
+    // the Agent Monitor runtime fire-and-forget BEFORE the gateway try-block so a
+    // gateway-start failure never prevents it from running, and a runtime
     // failure never blocks or fails app boot. The relay sync service follows
     // the same flag, so disabling Agent Monitor leaves only dormant wiring in
     // the desktop shell and no background sync loop. Hook repair remains
@@ -1270,6 +1270,9 @@ export class DesktopApplication {
     this.tray.setAgentMonitorEnabled(enabled);
 
     if (enabled) {
+      this.agentMonitorFailed = false;
+      this.agentMonitorFailureReason = null;
+      this.refreshTrayState();
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
       this.agentSessionSync.start();
@@ -2459,9 +2462,9 @@ export class DesktopApplication {
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
-    // FEA-1334: proxy the sidecar's cold-start ingest progress so the renderer
+    // FEA-1334: proxy the Agent Monitor cold-start ingest progress so the renderer
     // can drive the floating progress card without a cross-origin fetch.
-    // Returns null whenever the sidecar is not reachable — the renderer treats
+    // Returns null whenever the Agent Monitor runtime is not reachable — the renderer treats
     // that as "keep polling, nothing to show yet".
     ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
       const baseUrl = this.agentMonitor.getUrl();
@@ -2480,8 +2483,8 @@ export class DesktopApplication {
         return null;
       }
     });
-    // FEA-1334: clear the dashboard DB and restart the sidecar so it
-    // re-imports every agent session from scratch. The sidecar's empty-DB
+    // FEA-1334: clear the dashboard DB and restart the monitor so it
+    // re-imports every agent session from scratch. The runtime's empty-DB
     // boot path clears the persisted ingest caches and re-runs the
     // orchestrator, which the progress banner tracks.
     ipcMain.handle("desktop:reprocess-agent-logs", async () => {
@@ -2505,6 +2508,9 @@ export class DesktopApplication {
             /* file may not exist — fine */
           }
         }
+        this.agentMonitorFailed = false;
+        this.agentMonitorFailureReason = null;
+        this.refreshTrayState();
         void this.agentMonitor.start();
         return { ok: true };
       } catch (error) {
@@ -2680,6 +2686,9 @@ export class DesktopApplication {
           this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
           if (this.settingsStore.getAgentMonitorEnabled()) {
             await this.agentMonitor.stop();
+            this.agentMonitorFailed = false;
+            this.agentMonitorFailureReason = null;
+            this.refreshTrayState();
             void this.agentMonitor.start();
           }
         }

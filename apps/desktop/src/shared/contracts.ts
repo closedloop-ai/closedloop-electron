@@ -4,7 +4,7 @@ export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS
 export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
 
 /**
- * Fixed loopback port for the generated Agent Monitor sidecar. It MUST be fixed
+ * Fixed loopback port for the generated Agent Monitor runtime. It MUST be fixed
  * (not an ephemeral free port like the gateway) because Claude Code hooks bake
  * a port at install time and the hook handler POSTs to
  * `127.0.0.1:${CLAUDE_DASHBOARD_PORT || 4820}` — 4820 is upstream's own default,
@@ -12,6 +12,20 @@ export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
  * collides with the gateway's port selection.
  */
 export const AGENT_MONITOR_PORT = 4820;
+
+export function resolveAgentMonitorPort(
+  env: Partial<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = env.CL_AGENT_MONITOR_PORT;
+  if (!raw) {
+    return AGENT_MONITOR_PORT;
+  }
+  const port = Number.parseInt(raw, 10);
+  if (Number.isInteger(port) && port > 0 && port <= 65535) {
+    return port;
+  }
+  return AGENT_MONITOR_PORT;
+}
 
 export const COMMAND_SIGNING_REJECTION_REASONS = {
   noKeysAuthorized: "unauthorized: no keys authorized",
@@ -152,7 +166,7 @@ export interface DesktopSettings {
   dashboardWelcomeSeen: boolean;
   cloudCommandsPaused: boolean;
   cloudConnectionEnabled: boolean;
-  /** Enables the Claude Dashboard sidecar/tab. Off by default. */
+  /** Enables the Claude Dashboard runtime/tab. Off by default. */
   agentMonitorEnabled: boolean;
   /** Host-owned opt-in for Plans / plan extraction UI in the embedded Agent Dashboard. */
   planExtractionEnabled: boolean;

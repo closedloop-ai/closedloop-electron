@@ -11,8 +11,10 @@ const TAG = "agent-monitor-path";
 export interface AgentMonitorPaths {
   // Directory containing server/, client/dist/, scripts/, package.json.
   rootDir: string;
-  // The Node CLI entry to spawn (the Express server).
+  // The generated Express server entry.
   entryFile: string;
+  // Electron in-process runtime wrapper generated next to server/index.js.
+  runtimeFile: string;
   // Directory holding install-hooks.js / hook-handler.js / uninstall-hooks.js.
   scriptsDir: string;
 }
@@ -25,6 +27,7 @@ export function resolveAgentMonitorPaths(): AgentMonitorPaths {
   return {
     rootDir,
     entryFile: path.join(rootDir, "server", "index.js"),
+    runtimeFile: path.join(rootDir, "server", "closedloop-runtime.js"),
     scriptsDir: path.join(rootDir, "scripts"),
   };
 }

@@ -2911,7 +2911,7 @@
         justify-content: center;
         padding: 6px;
       }
-      /* Agent nav hidden when the Agent Dashboard sidecar is disabled */
+      /* Agent nav hidden when the Agent Dashboard runtime is disabled */
       .app.agent-disabled .sb-item[data-kind="agent"] {
         display: none;
       }
@@ -3943,7 +3943,7 @@
         const item = NAV_ITEMS.find((n) => n.id === id && n.type !== "group");
         if (!item) return;
         if (item.kind === "agent" && !cachedAgentMonitorEnabled) {
-          // Agent views need the sidecar enabled — fall back to Settings.
+          // Agent views need the Agent Dashboard runtime enabled — fall back to Settings.
           activateNav("settings");
           activateSettingsTab("relay-gateway");
           return;
@@ -4014,16 +4014,16 @@
         }
       }, 1500);
 
-      // --- Claude Dashboard (generated Agent Monitor sidecar) --------------
-      // Embed the already-running localhost sidecar in an iframe once it is
-      // healthy. When the feature is enabled, the sidecar starts at app boot
+      // --- Claude Dashboard (generated Agent Monitor runtime) --------------
+      // Embed the already-running localhost runtime in an iframe once it is
+      // healthy. When the feature is enabled, the runtime starts at app boot
       // (fire-and-forget); here we just poll readiness and lazily set src once.
       let claudeDashTimer = null;
       let claudeDashLoaded = false;
 
       function syncAgentMonitorTabVisibility(enabled) {
         cachedAgentMonitorEnabled = enabled === true;
-        // Agent nav items are hidden in the sidebar when the sidecar is off.
+        // Agent nav items are hidden in the sidebar when the runtime is off.
         appShell.classList.toggle("agent-disabled", !cachedAgentMonitorEnabled);
 
         const frame = document.getElementById("claudeDashFrame");
@@ -4174,7 +4174,7 @@
               }
               const frameUrl = new URL(r.url);
               agentMonitorFrameOrigin = frameUrl.origin;
-              // Embed mode hides the sidecar's own sidebar/chrome; the
+              // Embed mode hides the Agent Dashboard's own sidebar/chrome; the
               // initial route is baked in so the first paint lands right.
               frameUrl.pathname = pendingAgentRoute || "/";
               frameUrl.searchParams.set("embed", "1");
@@ -4216,11 +4216,11 @@
       }
 
       // ── Ingest progress banner (FEA-1334) ──────────────────────────
-      // Polls the agent-monitor sidecar's cold-start ingest progress and
+      // Polls the agent-monitor runtime's cold-start ingest progress and
       // drives the full-width top banner. Runs on every launch, independent
       // of which view is active. The banner stays up until the user
       // dismisses it; a fresh run (e.g. toggling Agent Dashboard in
-      // Settings, which restarts the sidecar) re-shows it.
+      // Settings, which restarts the runtime) re-shows it.
       (function setupIngestProgressBanner() {
         const banner = document.getElementById("ingestBanner");
         if (!banner) return;
@@ -4366,7 +4366,7 @@
             return;
           }
 
-          // A fresh run (new startedAt) — e.g. the sidecar was restarted via
+          // A fresh run (new startedAt) — e.g. the runtime was restarted via
           // the Settings toggle — clears a prior dismissal and re-primes the
           // fill animation so the banner shows (and fills) again.
           if (runId !== currentRunId) {
@@ -4391,7 +4391,7 @@
             show();
             renderDone(snap);
           }
-          // Keep polling slowly so a later sidecar restart re-shows the bar.
+          // Keep polling slowly so a later runtime restart re-shows the bar.
           schedule(POLL_IDLE_MS);
         }
 
@@ -4402,12 +4402,12 @@
           schedule(POLL_IDLE_MS);
         });
 
-        // Kick off polling; the sidecar boots in parallel with the renderer.
+        // Kick off polling; the runtime boots in parallel with the renderer.
         schedule(POLL_WAIT_MS);
       })();
 
       // ── Reprocess all logs button (FEA-1334) ───────────────────────
-      // Clears the dashboard DB and restarts the sidecar, which triggers a
+      // Clears the dashboard DB and restarts the runtime, which triggers a
       // full re-import — the top progress banner tracks it.
       (function setupReprocessLogsButton() {
         const btn = document.getElementById("reprocessLogsBtn");

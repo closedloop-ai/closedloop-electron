@@ -25,7 +25,7 @@ const FEATURE_FLAGS_INTERNAL = [
     default: true,
     label: "Agent Dashboard",
     description:
-      "Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar.",
+      "Runs the in-process Agent Dashboard runtime that powers the Dashboard and agent views in the sidebar.",
     category: "Diagnostics" as const,
     requiresRestart: true,
   },

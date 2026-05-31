@@ -142,7 +142,7 @@ const desktopApi = {
     ipcRenderer.on("desktop:flags-changed", callback);
   },
   // FEA-1334: cold-start ingest progress for the floating progress card.
-  // Resolves null when the sidecar is unreachable or has no progress yet.
+  // Resolves null when the Agent Monitor runtime is unreachable or has no progress yet.
   getAgentMonitorIngestProgress: () =>
     ipcRenderer.invoke(
       "desktop:get-agent-monitor-ingest-progress",
@@ -159,7 +159,7 @@ const desktopApi = {
         { total: number; parsed: number; imported: number; complete: boolean }
       >;
     } | null>,
-  // FEA-1334: clear the dashboard DB and restart the sidecar so it re-imports
+  // FEA-1334: clear the dashboard DB and restart the Agent Monitor runtime so it re-imports
   // every agent session from scratch. The progress banner tracks the re-import.
   reprocessAgentLogs: () =>
     ipcRenderer.invoke("desktop:reprocess-agent-logs") as Promise<{

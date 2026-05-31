@@ -238,18 +238,28 @@ test("electron-builder ships the generated agent-monitor runtime tree unpacked",
   );
 });
 
-test("runtime resolves the generated tree and sidecar wiring still uses the fixed port", () => {
+test("runtime resolves the generated tree and loads the in-process monitor wrapper", () => {
   assert.match(agentMonitorPathSource, /\.generated", "agent-monitor"/);
   assert.doesNotMatch(agentMonitorPathSource, /vendor\/agent-monitor/);
   assert.match(agentMonitorPathSource, /gatewayLog\.warn/);
   assert.match(contractsSource, /export const AGENT_MONITOR_PORT = 4820/);
-  assert.match(sidecarSource, /AGENT_MONITOR_PORT/);
+  assert.match(contractsSource, /resolveAgentMonitorPort/);
+  assert.match(contractsSource, /CL_AGENT_MONITOR_PORT/);
+  assert.match(agentMonitorPathSource, /runtimeFile/);
+  assert.match(agentMonitorPathSource, /"server", "closedloop-runtime\.js"/);
+  assert.match(sidecarSource, /resolveAgentMonitorPort\(\)/);
   // Fixed port: must NOT pick a free port like the gateway sidecar did.
   assert.doesNotMatch(sidecarSource, /pickPort|freePort/);
-  // Spawn the server entry with no CLI port/host flags (server reads env).
-  assert.match(sidecarSource, /spawn\(process\.execPath,\s*\[entryFile\]/);
-  assert.match(sidecarSource, /ELECTRON_RUN_AS_NODE:\s*"1"/);
+  assert.doesNotMatch(sidecarSource, /spawn\(process\.execPath/);
+  assert.doesNotMatch(sidecarSource, /ELECTRON_RUN_AS_NODE/);
+  assert.doesNotMatch(sidecarSource, /ChildProcess|restartAttempts/);
+  assert.match(sidecarSource, /requireFromHere\(runtimeFile\) as AgentMonitorRuntimeModule/);
+  assert.match(sidecarSource, /startClosedLoopAgentMonitorRuntime/);
+  assert.match(sidecarSource, /reclaimLegacySidecarOrphan\(entryFile\)/);
+  assert.match(sidecarSource, /this\.port !== AGENT_MONITOR_PORT/);
+  assert.match(sidecarSource, /command\.includes\(entryFile\)/);
   assert.match(sidecarSource, /DASHBOARD_PORT:\s*String\(this\.port\)/);
+  assert.match(sidecarSource, /CLAUDE_DASHBOARD_PORT:\s*String\(this\.port\)/);
   assert.match(sidecarSource, /DASHBOARD_DB_PATH/);
   assert.match(sidecarSource, /CCAM_VAPID_KEYS_PATH/);
   assert.match(sidecarSource, /CCAM_ENABLE_RUN:\s*"0"/);
@@ -260,16 +270,34 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
   assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
-  assert.match(sidecarSource, /const healthy = await this\.waitForHealth\(child\);/);
+  assert.match(sidecarSource, /if \(await this\.waitForHealth\(signal\)\)/);
+  assert.match(sidecarSource, /this\.startAbort\?\.abort\(\)/);
+  assert.match(sidecarSource, /await starting\.catch\(\(\) => \{\}\)/);
+  assert.doesNotMatch(sidecarSource, /Promise\.race\(\[starting\.catch/);
   assert.match(sidecarSource, /\/api\/health/);
   assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"lsof"/);
   assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"ps"/);
   assert.match(
     sidecarSource,
-    /async stop\(\): Promise<void> \{[\s\S]*this\.started = false;[\s\S]*this\.stopping = true;[\s\S]*this\.restartAttempts = 0;[\s\S]*this\.stopping = false;/,
+    /async stop\(\): Promise<void> \{[\s\S]*this\.started = false;[\s\S]*this\.stopping = true;[\s\S]*await runtime\.stop\(\)[\s\S]*this\.stopping = false;/,
   );
-  assert.match(sidecarSource, /const shouldRestart = this\.started && !this\.stopping;/);
+  assert.match(buildScriptSource, /function renderClosedLoopRuntimeSource/);
+  assert.match(buildScriptSource, /startClosedLoopAgentMonitorRuntime/);
+  assert.match(buildScriptSource, /let activeRuntimeStart = null/);
+  assert.match(buildScriptSource, /throwIfAborted\(signal\)/);
   assert.match(buildScriptSource, /function patchWebSocketFile/);
+  assert.match(buildScriptSource, /router\.stopWatchdog = stopWatchdog/);
+  assert.match(buildScriptSource, /function stopTopLevelRuntimeSideEffects/);
+  assert.match(buildScriptSource, /function installRuntimeContext/);
+  assert.match(buildScriptSource, /function withRuntimeContext/);
+  assert.match(buildScriptSource, /process\.env = envProxy/);
+  assert.match(buildScriptSource, /process\.cwd = function cwd/);
+  assert.match(buildScriptSource, /Module\._resolveFilename = function resolveFilename/);
+  assert.match(buildScriptSource, /if \(!envState\.usesRuntimeContext\(\)\)/);
+  assert.match(buildScriptSource, /syncChildProcessBuiltinExports/);
+  assert.match(buildScriptSource, /Module\.syncBuiltinESMExports/);
+  assert.match(buildScriptSource, /server\.once\("error", onError\)/);
+  assert.match(buildScriptSource, /server\.off\("error", onError\);\\n      initWebSocket\(server\);/);
   assert.match(buildScriptSource, /updateScheduler = startUpdateScheduler\(\{ broadcast \}\);/);
   assert.match(buildScriptSource, /catalogFetchTimer = require\("\.\/lib\/catalog-fetcher"\)\.scheduleCatalogFetch\(dbModule\.db\);/);
   assert.match(buildScriptSource, /require\("\.\/websocket"\)\.closeWebSocket\(\);/);
@@ -277,72 +305,17 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(buildScriptSource, /httpServer\.__closedloopDestroyConnections\(\)/);
 });
 
-// FEA-1403: when port 4820 is held by a foreign process (orphaned dev sidecar,
-// stale standalone build, etc.), /api/health answers 200 OK before OUR
-// just-spawned child has even hit listen(). Readiness must be scoped to the
-// child we spawned — not to "anyone on the port" — otherwise the supervisor's
-// restartAttempts=0 reset fires every cycle and the documented 5-attempt cap
-// is never reached. The supervisor loops forever at "attempt 1/5".
-test("FEA-1403: agent monitor readiness is scoped to the spawned child, not to any process on the port", () => {
-  // The stability window must outlast the observed EADDRINUSE crash latency.
-  // Live testing on a dev build with port 4820 held by a foreign process
-  // showed the child reaching listen() (and crashing) up to ~2.5s after
-  // spawn — slower than the original ~300ms estimate, because SQLite init +
-  // migrations + Express boot run before listen(). Parse the constant
-  // numerically so a future change shortening it below the safety margin
-  // fails this test.
-  const stabilityMatch = sidecarSource.match(
-    /const READY_STABILITY_WINDOW_MS = ([\d_]+)/,
-  );
-  assert.ok(
-    stabilityMatch,
-    "READY_STABILITY_WINDOW_MS constant must be defined in agent-monitor-sidecar.ts",
-  );
-  const stabilityMs = Number(stabilityMatch[1].replaceAll("_", ""));
-  assert.ok(
-    stabilityMs >= 3_000,
-    `READY_STABILITY_WINDOW_MS must be >= 3000ms to outlast the observed ~2500ms EADDRINUSE crash window, got ${stabilityMs}ms`,
-  );
-
-  // waitForHealth takes the spawned child as a parameter so it can verify
-  // identity, not just the port answering.
-  assert.match(
-    sidecarSource,
-    /private async waitForHealth\(child: ChildProcess\): Promise<boolean>/,
-  );
-
-  // Single source of truth for the identity-and-alive predicate. Three
-  // call sites share this guard (waitForHealth poll, post-health gate,
-  // post-stability gate); keeping them in one method means a future change
-  // cannot quietly drop half the check at one site.
-  assert.match(
-    sidecarSource,
-    /private isChildAliveAndCurrent\(child: ChildProcess\): boolean \{\s*return this\.child === child && child\.exitCode === null;\s*\}/,
-  );
-
-  // waitForHealth bails when our child is no longer the active one or has
-  // already exited — a 200 OK from a foreign process must NOT be credited.
-  assert.match(
-    sidecarSource,
-    /this\.stopping[\s\S]{0,100}!this\.isChildAliveAndCurrent\(child\)/,
-  );
-
-  // The "agent monitor ready" log + restartAttempts = 0 reset only fire
-  // after the stability window AND after re-verifying our child is still
-  // the active live one via the shared predicate. The reset is GUARDED —
-  // not unconditional.
-  assert.match(
-    sidecarSource,
-    /await delay\(READY_STABILITY_WINDOW_MS\);[\s\S]{0,400}this\.isChildAliveAndCurrent\(child\)[\s\S]{0,400}this\.restartAttempts = 0;/,
-  );
-
-  // Guard: there must NOT be an ungated `restartAttempts = 0` immediately
-  // following `await this.waitForHealth(...)` — that was the original bug.
-  // The post-waitForHealth success path must check child identity first.
-  assert.doesNotMatch(
-    sidecarSource,
-    /const healthy = await this\.waitForHealth\(child\);\s*if \(healthy\) \{\s*this\.restartAttempts = 0;/,
-  );
+test("PRD-407: in-process runtime surfaces port conflicts without restart loops", () => {
+  assert.match(buildScriptSource, /return new Promise\(\(resolve, reject\)/);
+  assert.match(buildScriptSource, /server\.once\("error", onError\)/);
+  assert.match(buildScriptSource, /server\.off\("error", onError\)/);
+  assert.match(buildScriptSource, /initWebSocket\(server\)/);
+  assert.match(buildScriptSource, /stopTopLevelRuntimeSideEffects\(\)/);
+  assert.match(sidecarSource, /description\.includes\("EADDRINUSE"\)/);
+  assert.match(sidecarSource, /port \$\{this\.port\} is in use by another process/);
+  assert.match(sidecarSource, /this\.onTerminalFailure\?\.\(reason\)/);
+  assert.doesNotMatch(sidecarSource, /MAX_RESTART_ATTEMPTS|READY_STABILITY_WINDOW_MS/);
+  assert.doesNotMatch(sidecarSource, /setTimeout\(\(\) => \{[\s\S]*this\.launch\(\)/);
 });
 
 test("docs and ignores describe generated pnpm-managed inputs, not vendor source", () => {
@@ -443,6 +416,7 @@ test("hooks are opt-in: default off, silent server auto-install never enabled", 
   // The host never sets CCAM_AUTO_INSTALL_HOOKS=1; it manages hooks directly.
   assert.doesNotMatch(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"1"/);
   assert.match(hooksSource, /store\(\)\.get\("enabled", false\)/);
+  assert.match(hooksSource, /CLAUDE_DASHBOARD_PORT=\$\{resolveAgentMonitorPort\(\)\}/);
   assert.match(hooksSource, /ELECTRON_RUN_AS_NODE=1/);
   assert.match(hooksSource, /JSON\.stringify\(hookType\)/);
   assert.match(hooksSource, /renameSync/);
