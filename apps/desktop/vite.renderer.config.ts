@@ -28,6 +28,7 @@ export default defineConfig({
     outDir: path.resolve("dist/renderer"),
     emptyOutDir: true,
     sourcemap: true,
+    chunkSizeWarningLimit: 1000,
     rollupOptions: {
       onLog(level, log) {
         if (
@@ -37,6 +38,22 @@ export default defineConfig({
         ) {
           return;
         }
+      },
+      output: {
+        manualChunks(id) {
+          if (id.includes("recharts") || id.includes("d3-") || id.includes("d3/")) {
+            return "vendor-charts";
+          }
+          if (id.includes("lucide-react")) {
+            return "vendor-icons";
+          }
+          if (id.includes("radix-ui") || id.includes("@radix-ui")) {
+            return "vendor-radix";
+          }
+          if (id.includes("vendor/design-system")) {
+            return "vendor-ds";
+          }
+        },
       },
     },
   },
