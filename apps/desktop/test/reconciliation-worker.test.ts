@@ -364,25 +364,30 @@ test("subscription (non-metered) usage is excluded and no vendor call is made", 
 
 test("an unpriced model contributes nothing (no silent $0)", async () => {
   const u = usage({ model: "totally-made-up-model-xyz", inputTokens: 20_000, outputTokens: 4_000 });
-  let called = false;
+  let anthropicCalled = false;
+  let openaiCalled = false;
   const { store } = makeStore();
 
   const result = await runReconciliation({
     loadUsageRows: () => [u],
     fetchAnthropicBilled: async () => {
-      called = true;
+      anthropicCalled = true;
       return [];
     },
     fetchOpenAiBilled: async () => {
-      called = true;
+      openaiCalled = true;
       return [];
     },
     store,
     now: FIXED_NOW,
   });
 
+  // The unpriced model produces no local cells, but the vendor APIs are still
+  // queried so vendor-billed costs can surface even when genai-prices doesn't
+  // know the model yet. With no vendor-billed costs either, no rows are written.
   assert.equal(result.rowsWritten, 0);
-  assert.equal(called, false);
+  assert.equal(anthropicCalled, true);
+  assert.equal(openaiCalled, true);
 });
 
 test("a vendor with no fetch function (no Admin key) is not reconciled against a $0 bill", async () => {
