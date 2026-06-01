@@ -4,10 +4,8 @@ import { Topbar } from "./components/layout/Topbar";
 
 const DashboardPage = lazy(() => import("./components/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const SettingsPanel = lazy(() => import("./components/settings/SettingsPanel").then((m) => ({ default: m.SettingsPanel })));
-const ActivityFeedView = lazy(() => import("./components/feed/ActivityFeedView").then((m) => ({ default: m.ActivityFeedView })));
-const AnalyticsView = lazy(() => import("./components/analytics/AnalyticsView").then((m) => ({ default: m.AnalyticsView })));
 const KanbanView = lazy(() => import("./components/kanban/KanbanView").then((m) => ({ default: m.KanbanView })));
-const WorkflowsView = lazy(() => import("./components/workflows/WorkflowsView").then((m) => ({ default: m.WorkflowsView })));
+const AgentsPage = lazy(() => import("./components/agents/AgentsPage").then((m) => ({ default: m.AgentsPage })));
 const ApprovalsPanel = lazy(() => import("./components/approvals/ApprovalsPanel").then((m) => ({ default: m.ApprovalsPanel })));
 const ActivityPanel = lazy(() => import("./components/activity/ActivityPanel").then((m) => ({ default: m.ActivityPanel })));
 const LogsPanel = lazy(() => import("./components/logs/LogsPanel").then((m) => ({ default: m.LogsPanel })));
@@ -15,9 +13,7 @@ const LogsPanel = lazy(() => import("./components/logs/LogsPanel").then((m) => (
 export type NavId =
   | "dashboard"
   | "kanban"
-  | "activity-feed"
-  | "analytics"
-  | "workflows"
+  | "agents"
   | "approvals"
   | "requests"
   | "diagnostics"
@@ -60,14 +56,10 @@ export default function App() {
     switch (navId) {
       case "dashboard":
         return <DashboardPage />;
-      case "activity-feed":
-        return <ActivityFeedView />;
-      case "analytics":
-        return <AnalyticsView />;
       case "kanban":
         return <KanbanView />;
-      case "workflows":
-        return <WorkflowsView />;
+      case "agents":
+        return <AgentsPage />;
       case "approvals":
         return <ApprovalsPanel />;
       case "requests":

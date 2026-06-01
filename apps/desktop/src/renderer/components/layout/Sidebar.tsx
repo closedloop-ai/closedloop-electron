@@ -10,9 +10,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { id: "kanban", label: "My Tasks", icon: "kanban", section: "agent" },
   { id: "dashboard", label: "Sessions", icon: "dashboard", section: "agent" },
-  { id: "activity-feed", label: "Activity Feed", icon: "activity", section: "agent" },
-  { id: "analytics", label: "Analytics", icon: "analytics", section: "agent" },
-  { id: "workflows", label: "Agents", icon: "workflows", section: "agent" },
+  { id: "agents", label: "Agents", icon: "workflows", section: "agent" },
   { id: "approvals", label: "Approvals", icon: "shield", section: "gateway" },
   { id: "requests", label: "Requests", icon: "inbox", section: "gateway" },
   { id: "diagnostics", label: "Diagnostics", icon: "stethoscope", section: "gateway" },
