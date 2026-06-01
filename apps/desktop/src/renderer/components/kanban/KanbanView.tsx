@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { KanbanBoardLayout, KanbanColumn, KanbanCardFrame } from "@closedloop-ai/design-system/components/ui/layout/kanban-board";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
+import { useQueryCache } from "../../hooks/useQueryCache";
 import type { SessionWithAgents } from "../../main/database/types";
 
 function PlayIcon() { return <span className="text-blue-400 text-xs">&#9654;</span>; }
@@ -18,24 +19,16 @@ const COLUMNS = [
 ];
 
 export function KanbanView() {
-  const [sessions, setSessions] = useState<SessionWithAgents[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: sessions, loading } = useQueryCache<SessionWithAgents[]>(
+    "db:sessions-details",
+    () => window.desktopApi.db.getSessionsWithDetails() as Promise<SessionWithAgents[]>,
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  useEffect(() => {
-    window.desktopApi.db
-      .getSessionsWithDetails()
-      .then((data) => {
-        setSessions(data as SessionWithAgents[]);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
-  if (loading) {
+  if (loading || !sessions) {
     return (
       <div className="flex items-center justify-center h-full">
-        <p className="text-sm text-[var(--muted-foreground)]">Loading kanban...</p>
+        <p className="text-sm text-[var(--muted-foreground)]">Loading...</p>
       </div>
     );
   }
@@ -52,7 +45,7 @@ export function KanbanView() {
   return (
     <div className="p-6 h-full flex flex-col">
       <div className="mb-4">
-        <h1 className="text-xl font-bold text-[var(--foreground)]">Kanban Board</h1>
+        <h1 className="text-xl font-bold text-[var(--foreground)]">My Tasks</h1>
         <p className="text-sm text-[var(--muted-foreground)]">
           Sessions grouped by status
         </p>
@@ -67,7 +60,7 @@ export function KanbanView() {
                 key={col.key}
                 title={col.label}
                 count={items.length}
-                icon={<col.icon className={`h-4 w-4 ${col.color}`} />}
+                icon={col.icon}
                 emptyState={
                   <div className="py-6 text-center text-xs text-[var(--muted-foreground)]">
                     No {col.label.toLowerCase()} sessions

@@ -1,5 +1,6 @@
 node_modules
 dist
+!apps/desktop/vendor/design-system/dist/
 .DS_Store
 .idea
 .vscode

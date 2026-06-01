@@ -18,7 +18,7 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <DesignSystemProvider>
+    <DesignSystemProvider defaultTheme="light" enableSystem={false}>
       <App />
     </DesignSystemProvider>
   </StrictMode>,

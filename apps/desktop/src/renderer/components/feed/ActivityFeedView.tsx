@@ -1,19 +1,20 @@
-import { useState, useEffect, useCallback } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
+import { Zap, Wrench, AlertCircle, Layers } from "lucide-react";
 import type { EventRow } from "../../main/database/types";
 
 const EVENT_TYPE_TONES: Record<string, string> = {
-  tool_use: "bg-blue-500/10 text-blue-400",
-  tool_result: "bg-green-500/10 text-green-400",
-  error: "bg-red-500/10 text-red-400",
-  thinking: "bg-yellow-500/10 text-yellow-400",
-  text: "bg-zinc-500/10 text-zinc-300",
+  tool_use: "bg-blue-500/10 text-blue-600",
+  tool_result: "bg-green-500/10 text-green-600",
+  error: "bg-red-500/10 text-red-600",
+  thinking: "bg-yellow-500/10 text-yellow-700",
+  text: "bg-zinc-500/10 text-zinc-600",
 };
 
 function eventTypeColor(eventType: string): string {
-  return EVENT_TYPE_TONES[eventType] ?? "bg-zinc-500/10 text-zinc-300";
+  return EVENT_TYPE_TONES[eventType] ?? "bg-zinc-500/10 text-zinc-600";
 }
 
 interface EventWithSession extends EventRow {
@@ -24,6 +25,9 @@ export function ActivityFeedView() {
   const [events, setEvents] = useState<EventWithSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [paused, setPaused] = useState(false);
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (paused) return;
@@ -44,15 +48,30 @@ export function ActivityFeedView() {
     return () => clearInterval(interval);
   }, [load, paused]);
 
+  const eventTypes = useMemo(() => {
+    const types = new Set(events.map((e) => e.eventType));
+    return Array.from(types).sort();
+  }, [events]);
+
+  const filtered = useMemo(() => {
+    let result = events;
+    if (typeFilter !== "all") {
+      result = result.filter((e) => e.eventType === typeFilter);
+    }
+    if (search) {
+      const q = search.toLowerCase();
+      result = result.filter(
+        (e) =>
+          (e.summary ?? "").toLowerCase().includes(q) ||
+          (e.toolName ?? "").toLowerCase().includes(q) ||
+          (e.sessionName ?? "").toLowerCase().includes(q),
+      );
+    }
+    return result;
+  }, [events, typeFilter, search]);
+
   const toolCount = events.filter((e) => e.eventType === "tool_use" || e.eventType === "tool_result").length;
   const errorCount = events.filter((e) => e.eventType === "error").length;
-
-  const metrics = [
-    { label: "Events", value: events.length },
-    { label: "Tool Calls", value: toolCount },
-    { label: "Errors", value: errorCount },
-    { label: "Types", value: new Set(events.map((e) => e.eventType)).size },
-  ];
 
   if (loading) {
     return (
@@ -71,56 +90,80 @@ export function ActivityFeedView() {
             Real-time agent event stream
           </p>
         </div>
-        <button
+        <Button
+          variant={paused ? "default" : "outline"}
+          size="sm"
           onClick={() => setPaused((p) => !p)}
-          className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
-            paused
-              ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/30"
-              : "bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700"
-          }`}
         >
-          {paused ? "Paused — click to resume" : "Pause"}
-        </button>
+          {paused ? "Resume" : "Pause"}
+        </Button>
       </div>
 
       <div className="grid grid-cols-4 gap-4">
-        {metrics.map((m) => (
-          <MetricCard key={m.label} label={m.label} value={m.value} icon={m.icon} />
-        ))}
+        <MetricCard label="Events" value={events.length} icon={Zap} />
+        <MetricCard label="Tool Calls" value={toolCount} icon={Wrench} />
+        <MetricCard label="Errors" value={errorCount} icon={AlertCircle} />
+        <MetricCard label="Types" value={eventTypes.length} icon={Layers} />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search events..."
+          className="flex-1 bg-[var(--input)] border border-[var(--input-border)] rounded-md px-3 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
+        />
+        <select
+          value={typeFilter}
+          onChange={(e) => setTypeFilter(e.target.value)}
+          className="bg-[var(--input)] border border-[var(--input-border)] rounded-md px-3 py-1.5 text-sm text-[var(--foreground)]"
+        >
+          <option value="all">All types</option>
+          {eventTypes.map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
       </div>
 
       <div className="space-y-1">
-        {events.length === 0 && (
+        {filtered.length === 0 && (
           <div className="py-12 text-center text-sm text-[var(--muted-foreground)]">
-            No events recorded yet.
+            {search || typeFilter !== "all" ? "No events match the current filters." : "No events recorded yet."}
           </div>
         )}
-        {events.map((event) => (
-          <div
-            key={event.id}
-            className="flex items-start gap-3 rounded-lg border border-zinc-800 p-3 text-sm"
-          >
-            <span
-              className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${eventTypeColor(event.eventType)}`}
+        {filtered.map((event) => (
+          <div key={event.id}>
+            <div
+              className="flex items-start gap-3 rounded-lg border p-3 text-sm cursor-pointer hover:bg-[var(--accent)]"
+              onClick={() => setExpandedId(expandedId === event.id ? null : event.id)}
             >
-              {event.eventType.slice(0, 8)}
-            </span>
-            <div className="min-w-0 flex-1 space-y-0.5">
-              {event.summary && (
-                <p className="truncate text-[var(--foreground)]">{event.summary}</p>
-              )}
-              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
-                {event.sessionName && (
-                  <span>{event.sessionName}</span>
+              <span
+                className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${eventTypeColor(event.eventType)}`}
+              >
+                {event.eventType.replace(/_/g, " ").slice(0, 12)}
+              </span>
+              <div className="min-w-0 flex-1 space-y-0.5">
+                {event.summary && (
+                  <p className="truncate text-[var(--foreground)]">{event.summary}</p>
                 )}
-                {event.toolName && (
-                  <span className="font-mono">{event.toolName}</span>
-                )}
-                {event.createdAt && (
-                  <span>{new Date(event.createdAt).toLocaleTimeString()}</span>
-                )}
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
+                  {event.sessionName && <span>{event.sessionName}</span>}
+                  {event.toolName && <span className="font-mono">{event.toolName}</span>}
+                  {event.createdAt && <span>{new Date(event.createdAt).toLocaleTimeString()}</span>}
+                </div>
               </div>
+              {event.toolName && (
+                <Badge variant="outline" className="shrink-0 text-[10px]">{event.toolName}</Badge>
+              )}
             </div>
+            {expandedId === event.id && event.data && (
+              <div className="ml-10 mt-1 mb-2 p-3 bg-[var(--muted)] rounded text-xs font-mono overflow-auto max-h-48">
+                <pre className="whitespace-pre-wrap break-all text-[var(--foreground)]">
+                  {(() => { try { return JSON.stringify(JSON.parse(event.data), null, 2); } catch { return event.data; } })()}
+                </pre>
+              </div>
+            )}
           </div>
         ))}
       </div>

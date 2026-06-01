@@ -116,6 +116,77 @@ export interface EventCountByType {
   count: number;
 }
 
+export interface ToolUsageItem {
+  toolName: string;
+  count: number;
+}
+
+export interface DailyEventCount {
+  date: string;
+  count: number;
+}
+
+export interface StatusCount {
+  status: string;
+  count: number;
+}
+
+export interface AgentTypeCount {
+  type: string;
+  count: number;
+}
+
+export interface AnalyticsData {
+  tokens: TokenAnalytics;
+  eventsByType: EventCountByType[];
+  toolUsage: ToolUsageItem[];
+  dailyEvents: DailyEventCount[];
+  sessionsByStatus: StatusCount[];
+  agentsByStatus: StatusCount[];
+  agentsByType: AgentTypeCount[];
+  totalSessions: number;
+  totalAgents: number;
+  totalEvents: number;
+}
+
+export interface WorkflowQueryData {
+  stats: {
+    totalSessions: number;
+    totalAgents: number;
+    totalSubagents: number;
+    avgSubagents: number;
+    successRate: number;
+    avgDepth: number;
+    avgDurationSec: number;
+    totalCompactions: number;
+    avgCompactions: number;
+    topFlow: { source: string; target: string; count: number } | null;
+  };
+  orchestration: {
+    sessionCount: number;
+    mainCount: number;
+    subagentTypes: Array<{ subagentType: string; count: number; completed: number; errors: number }>;
+    edges: Array<{ source: string; target: string; weight: number }>;
+    outcomes: Array<{ status: string; count: number }>;
+    compactions: { total: number; sessions: number };
+  };
+  toolFlow: {
+    transitions: Array<{ source: string; target: string; value: number }>;
+    toolCounts: Array<{ toolName: string; count: number }>;
+  };
+  effectiveness: Array<{
+    subagentType: string;
+    total: number;
+    completed: number;
+    errors: number;
+    sessions: number;
+    successRate: number;
+    avgDuration: number | null;
+    trend: number[];
+  }>;
+  cooccurrence: Array<{ source: string; target: string; weight: number }>;
+}
+
 export interface AgentHierarchyNode {
   agentId: string;
   name: string | null;

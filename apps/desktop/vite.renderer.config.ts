@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 function stripCrossorigin(): Plugin {
@@ -17,7 +18,7 @@ function stripCrossorigin(): Plugin {
 export default defineConfig({
   root: "src/renderer",
   base: "./",
-  plugins: [react(), stripCrossorigin()],
+  plugins: [tailwindcss(), react(), stripCrossorigin()],
   resolve: {
     alias: {
       "@": path.resolve("src/renderer"),
@@ -38,8 +39,5 @@ export default defineConfig({
         }
       },
     },
-  },
-  css: {
-    postcss: path.resolve("postcss.renderer.config.mjs"),
   },
 });

@@ -1,6 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
+import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
 import { SessionTable } from "@closedloop-ai/design-system/components/ui/composites/session-table";
+import { MonitorDot, Activity, Bot, Coins } from "lucide-react";
+import { useQueryCache } from "../../hooks/useQueryCache";
 import type { SessionRow } from "@closedloop-ai/design-system/components/ui/types";
 import type { SessionWithAgents } from "../../main/database/types";
 
@@ -21,33 +24,41 @@ function adaptSession(raw: SessionWithAgents): SessionRow {
   };
 }
 
+const STATUS_OPTIONS = ["all", "running", "completed", "failed", "stopped", "waiting"] as const;
+
 export function SessionsView() {
-  const [sessions, setSessions] = useState<SessionWithAgents[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: sessions, loading } = useQueryCache<SessionWithAgents[]>(
+    "db:sessions-details",
+    () => window.desktopApi.db.getSessionsWithDetails() as Promise<SessionWithAgents[]>,
+  );
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
 
-  useEffect(() => {
-    window.desktopApi.db
-      .getSessionsWithDetails()
-      .then((data) => {
-        setSessions(data as SessionWithAgents[]);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+  const allSessions = sessions ?? [];
 
-  const totalAgents = sessions.reduce((a, s) => a + s.agentCount, 0);
-  const totalEvents = sessions.reduce((a, s) => a + s.eventCount, 0);
-  const totalTokens = sessions.reduce((a, s) => a + s.totalTokens, 0);
-  const activeSessions = sessions.filter(
+  const filtered = useMemo(() => {
+    let result = allSessions;
+    if (statusFilter !== "all") {
+      result = result.filter((s) => s.status === statusFilter);
+    }
+    if (search) {
+      const q = search.toLowerCase();
+      result = result.filter(
+        (s) =>
+          (s.name ?? "").toLowerCase().includes(q) ||
+          s.id.toLowerCase().includes(q) ||
+          (s.cwd ?? "").toLowerCase().includes(q) ||
+          (s.model ?? "").toLowerCase().includes(q),
+      );
+    }
+    return result;
+  }, [allSessions, statusFilter, search]);
+
+  const totalAgents = allSessions.reduce((a, s) => a + s.agentCount, 0);
+  const totalTokens = allSessions.reduce((a, s) => a + s.totalTokens, 0);
+  const activeSessions = allSessions.filter(
     (s) => !["completed", "failed", "stopped"].includes(s.status),
   ).length;
-
-  const metrics = [
-    { label: "Total Sessions", value: sessions.length },
-    { label: "Active", value: activeSessions },
-    { label: "Agents", value: totalAgents },
-    { label: "Tokens", value: totalTokens.toLocaleString() },
-  ];
 
   if (loading) {
     return (
@@ -62,21 +73,46 @@ export function SessionsView() {
       <div>
         <h1 className="text-xl font-bold text-[var(--foreground)]">Sessions</h1>
         <p className="text-sm text-[var(--muted-foreground)]">
-          All agent sessions ({sessions.length} total)
+          All agent sessions ({allSessions.length} total)
         </p>
       </div>
 
       <div className="grid grid-cols-4 gap-4">
-        {metrics.map((m) => (
-          <MetricCard key={m.label} label={m.label} value={m.value} icon={m.icon} />
-        ))}
+        <MetricCard label="Total Sessions" value={allSessions.length} icon={MonitorDot} />
+        <MetricCard label="Active" value={activeSessions} icon={Activity} />
+        <MetricCard label="Agents" value={totalAgents} icon={Bot} />
+        <MetricCard label="Tokens" value={totalTokens.toLocaleString()} icon={Coins} />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search sessions..."
+          className="flex-1 bg-[var(--input)] border border-[var(--input-border)] rounded-md px-3 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
+        />
+        <div className="flex gap-1">
+          {STATUS_OPTIONS.map((s) => (
+            <Button
+              key={s}
+              variant={statusFilter === s ? "default" : "outline"}
+              size="sm"
+              onClick={() => setStatusFilter(s)}
+            >
+              {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+            </Button>
+          ))}
+        </div>
       </div>
 
       <SessionTable
-        rows={sessions.map(adaptSession)}
+        rows={filtered.map(adaptSession)}
         emptyState={
           <div className="py-12 text-center text-sm text-[var(--muted-foreground)]">
-            No sessions recorded yet.
+            {search || statusFilter !== "all"
+              ? "No sessions match the current filters."
+              : "No sessions recorded yet."}
           </div>
         }
       />

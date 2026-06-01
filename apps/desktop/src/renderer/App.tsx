@@ -1,16 +1,17 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, lazy, Suspense } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { Topbar } from "./components/layout/Topbar";
-import { DashboardPage } from "./components/dashboard/DashboardPage";
-import { ApprovalsPanel } from "./components/approvals/ApprovalsPanel";
-import { ActivityPanel } from "./components/activity/ActivityPanel";
-import { LogsPanel } from "./components/logs/LogsPanel";
-import { SettingsPanel } from "./components/settings/SettingsPanel";
-import { SessionsView } from "./components/sessions/SessionsView";
-import { ActivityFeedView } from "./components/feed/ActivityFeedView";
-import { AnalyticsView } from "./components/analytics/AnalyticsView";
-import { KanbanView } from "./components/kanban/KanbanView";
-import { WorkflowsView } from "./components/workflows/WorkflowsView";
+
+const DashboardPage = lazy(() => import("./components/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })));
+const SettingsPanel = lazy(() => import("./components/settings/SettingsPanel").then((m) => ({ default: m.SettingsPanel })));
+const SessionsView = lazy(() => import("./components/sessions/SessionsView").then((m) => ({ default: m.SessionsView })));
+const ActivityFeedView = lazy(() => import("./components/feed/ActivityFeedView").then((m) => ({ default: m.ActivityFeedView })));
+const AnalyticsView = lazy(() => import("./components/analytics/AnalyticsView").then((m) => ({ default: m.AnalyticsView })));
+const KanbanView = lazy(() => import("./components/kanban/KanbanView").then((m) => ({ default: m.KanbanView })));
+const WorkflowsView = lazy(() => import("./components/workflows/WorkflowsView").then((m) => ({ default: m.WorkflowsView })));
+const ApprovalsPanel = lazy(() => import("./components/approvals/ApprovalsPanel").then((m) => ({ default: m.ApprovalsPanel })));
+const ActivityPanel = lazy(() => import("./components/activity/ActivityPanel").then((m) => ({ default: m.ActivityPanel })));
+const LogsPanel = lazy(() => import("./components/logs/LogsPanel").then((m) => ({ default: m.LogsPanel })));
 
 export type NavId =
   | "dashboard"
@@ -19,14 +20,18 @@ export type NavId =
   | "activity-feed"
   | "analytics"
   | "workflows"
-  | "cc-config"
-  | "run"
-  | "plans"
-  | "agent-settings"
   | "approvals"
   | "requests"
   | "diagnostics"
   | "settings";
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center h-full">
+      <p className="text-sm text-[var(--muted-foreground)]">Loading...</p>
+    </div>
+  );
+}
 
 export default function App() {
   const [navId, setNavId] = useState<NavId>("dashboard");
@@ -51,7 +56,7 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const toggleSidebar = useCallback(() => setCollapsed((c) => !c), []);
 
-  const healthy = runtimeStatus?.healthy === true;
+  const healthy = runtimeStatus?.gatewayHealthy === true;
 
   const content = (() => {
     switch (navId) {
@@ -96,7 +101,9 @@ export default function App() {
           runtimeStatus={runtimeStatus}
         />
         <main className="flex-1 overflow-auto">
-          {content}
+          <Suspense fallback={<PageFallback />}>
+            {content}
+          </Suspense>
         </main>
       </div>
     </div>

@@ -12,7 +12,7 @@ export function createAgentStore(db: DatabaseSync) {
   `);
 
   const updateStmt = db.prepare(`
-    UPDATE agents SET name = ?, task = ?, current_tool = ?, updated_at = ? WHERE id = ?
+    UPDATE agents SET name = ?, task = ?, current_tool = ?, metadata = ?, updated_at = ? WHERE id = ?
   `);
 
   const getBySessionStmt = db.prepare(
@@ -64,11 +64,12 @@ export function createAgentStore(db: DatabaseSync) {
           const endedAt = ["completed", "failed", "stopped"].includes(payload.status) ? now : null;
           updateStatusStmt.run(payload.status, now, endedAt, payload.agentId);
         }
-        if (payload.name || payload.task || payload.toolName) {
+        if (payload.name || payload.task || payload.toolName || payload.metadata) {
           updateStmt.run(
             payload.name ?? existing.name,
             payload.task ?? existing.task,
             payload.toolName ?? existing.currentTool,
+            payload.metadata ? JSON.stringify(payload.metadata) : existing.metadata,
             now,
             payload.agentId,
           );

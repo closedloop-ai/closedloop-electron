@@ -97,6 +97,8 @@ export interface DesktopApi {
     getEventCountByType: () => Promise<unknown>;
     getTokenAnalytics: () => Promise<unknown>;
     getAgentHierarchy: (sessionId: string) => Promise<unknown>;
+    getAnalytics: () => Promise<unknown>;
+    getWorkflowData: () => Promise<unknown>;
   };
 }
 

@@ -8,12 +8,12 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: "dashboard", label: "Dashboard", icon: "dashboard", section: "agent" },
+  { id: "dashboard", label: "My Tasks", icon: "dashboard", section: "agent" },
   { id: "kanban", label: "Kanban Board", icon: "kanban", section: "agent" },
   { id: "sessions", label: "Sessions", icon: "sessions", section: "agent" },
   { id: "activity-feed", label: "Activity Feed", icon: "activity", section: "agent" },
   { id: "analytics", label: "Analytics", icon: "analytics", section: "agent" },
-  { id: "workflows", label: "Workflows", icon: "workflows", section: "agent" },
+  { id: "workflows", label: "Agents", icon: "workflows", section: "agent" },
   { id: "approvals", label: "Approvals", icon: "shield", section: "gateway" },
   { id: "requests", label: "Requests", icon: "inbox", section: "gateway" },
   { id: "diagnostics", label: "Diagnostics", icon: "stethoscope", section: "gateway" },
@@ -38,16 +38,7 @@ function NavIcon({ name }: { name: string }) {
   return (
     <span className="shrink-0 size-[18px] text-current opacity-70">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-full">
-        {name === "dashboard" ? (
-          <>
-            <rect width="7" height="9" x="3" y="3" rx="1" />
-            <rect width="7" height="5" x="14" y="3" rx="1" />
-            <rect width="7" height="9" x="14" y="12" rx="1" />
-            <rect width="7" height="5" x="3" y="16" rx="1" />
-          </>
-        ) : (
-          <g dangerouslySetInnerHTML={{ __html: paths }} />
-        )}
+        <g dangerouslySetInnerHTML={{ __html: paths }} />
       </svg>
     </span>
   );

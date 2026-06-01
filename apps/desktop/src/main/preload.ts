@@ -142,6 +142,8 @@ const desktopApi = {
     getEventCountByType: () => ipcRenderer.invoke("desktop:db:get-event-count-by-type") as Promise<unknown>,
     getTokenAnalytics: () => ipcRenderer.invoke("desktop:db:get-token-analytics") as Promise<unknown>,
     getAgentHierarchy: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agent-hierarchy", sessionId) as Promise<unknown>,
+    getAnalytics: () => ipcRenderer.invoke("desktop:db:get-analytics") as Promise<unknown>,
+    getWorkflowData: () => ipcRenderer.invoke("desktop:db:get-workflow-data") as Promise<unknown>,
   }
 };
 

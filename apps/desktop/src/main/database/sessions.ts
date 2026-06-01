@@ -62,7 +62,7 @@ export function createSessionStore(db: DatabaseSync) {
           const endedAt = ["completed", "failed", "stopped"].includes(payload.status) ? now : null;
           updateStatusStmt.run(payload.status, now, endedAt, payload.sessionId);
         }
-        if (payload.name || payload.model || payload.cwd) {
+        if (payload.name || payload.model || payload.cwd || payload.metadata) {
           updateStmt.run(
             payload.name ?? existing.name,
             payload.model ?? existing.model,

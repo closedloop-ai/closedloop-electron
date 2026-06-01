@@ -24,22 +24,34 @@ export function ApprovalsPanel() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    const interval = setInterval(load, 3000);
+    return () => clearInterval(interval);
+  }, [load]);
 
   const handleApprove = async (id: string) => {
-    await window.desktopApi.approveApproval(id);
+    try {
+      await window.desktopApi.approveApproval(id);
+    } catch { /* reload will pick up current state */ }
     await load();
   };
   const handleDeny = async (id: string) => {
-    await window.desktopApi.denyApproval(id);
+    try {
+      await window.desktopApi.denyApproval(id);
+    } catch { /* reload will pick up current state */ }
     await load();
   };
   const handleAlwaysAllow = async (id: string) => {
-    await window.desktopApi.alwaysAllowApproval(id);
+    try {
+      await window.desktopApi.alwaysAllowApproval(id);
+    } catch { /* reload will pick up current state */ }
     await load();
   };
   const handleClear = async () => {
-    await window.desktopApi.clearPendingApprovals();
+    try {
+      await window.desktopApi.clearPendingApprovals();
+    } catch { /* reload will pick up current state */ }
     await load();
   };
 

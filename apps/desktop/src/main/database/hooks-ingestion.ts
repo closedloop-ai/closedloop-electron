@@ -1,6 +1,25 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { z } from "zod";
 import type { AgentDatabase } from "./index.js";
 import type { HookEventPayload } from "./types.js";
+
+const HookEventSchema = z.object({
+  sessionId: z.string().optional(),
+  agentId: z.string().optional(),
+  eventType: z.string().optional(),
+  toolName: z.string().optional(),
+  summary: z.string().optional(),
+  data: z.string().optional(),
+  status: z.string().optional(),
+  name: z.string().optional(),
+  model: z.string().optional(),
+  cwd: z.string().optional(),
+  task: z.string().optional(),
+  type: z.string().optional(),
+  subagentType: z.string().optional(),
+  parentAgentId: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
 
 /**
  * Handles incoming hook events from Claude Code.
@@ -13,7 +32,14 @@ export function handleHookEvent(
   body: string,
 ): void {
   try {
-    const payload: HookEventPayload = JSON.parse(body);
+    const raw = JSON.parse(body);
+    const result = HookEventSchema.safeParse(raw);
+    if (!result.success) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: result.error.message }));
+      return;
+    }
+    const payload: HookEventPayload = result.data;
 
     if (payload.sessionId) {
       db.sessions.upsert(payload);

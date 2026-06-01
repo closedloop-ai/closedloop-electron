@@ -1,4 +1,12 @@
-export const SCHEMA_SQL = `
+export const CURRENT_SCHEMA_VERSION = 1;
+
+/**
+ * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
+ * Index 0 = migration from version 0 → 1 (initial schema), etc.
+ */
+export const MIGRATIONS: string[] = [
+  // Version 0 → 1: initial schema
+  `
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   name TEXT,
@@ -59,4 +67,5 @@ CREATE TABLE IF NOT EXISTS token_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
-`;
+`,
+];

@@ -66,6 +66,7 @@ import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
 import { openAgentDatabase } from "./database/index.js";
+import { HarnessImportService } from "./harness-parsers/harness-import-service.js";
 import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
   isAgentMonitorHooksEnabled,
@@ -198,6 +199,7 @@ export class DesktopApplication {
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly agentMonitor: AgentMonitorSidecar;
   private readonly agentDatabase: ReturnType<typeof openAgentDatabase>;
+  private readonly harnessImport: HarnessImportService;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
@@ -289,6 +291,7 @@ export class DesktopApplication {
     this.agentDatabase = openAgentDatabase(
       path.join(app.getPath("userData"), "agent-dashboard.sqlite"),
     );
+    this.harnessImport = new HarnessImportService(this.agentDatabase);
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -603,6 +606,8 @@ export class DesktopApplication {
       syncAgentMonitorHooksOnBoot();
       this.agentSessionSync.start();
     }
+
+    this.harnessImport.start();
 
     try {
       await this.server.start();
@@ -1664,6 +1669,8 @@ export class DesktopApplication {
     this.queueStatsTelemetryDebounce.cancel();
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
+    this.harnessImport.stop();
+    this.agentDatabase.close();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -3197,20 +3204,24 @@ export class DesktopApplication {
     });
 
     ipcMain.handle("desktop:db:get-sessions", () => {
+      if (!this.isAgentMonitorEnabled()) return [];
       return this.agentDatabase.sessions.getAll();
     });
 
     ipcMain.handle("desktop:db:get-session", (_event, id: string) => {
+      if (!this.isAgentMonitorEnabled()) return undefined;
       return this.agentDatabase.sessions.getById(id);
     });
 
     ipcMain.handle("desktop:db:get-agents", (_event, sessionId: string) => {
+      if (!this.isAgentMonitorEnabled()) return [];
       return this.agentDatabase.agents.getBySession(sessionId);
     });
 
     ipcMain.handle(
       "desktop:db:get-events",
       (_event, sessionId: string, agentId?: string) => {
+        if (!this.isAgentMonitorEnabled()) return [];
         if (agentId) {
           return this.agentDatabase.events.getBySessionAndAgent(
             sessionId,
@@ -3222,31 +3233,56 @@ export class DesktopApplication {
     );
 
     ipcMain.handle("desktop:db:get-dashboard-summary", () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { totalSessions: 0, activeSessions: 0, totalAgents: 0, totalEvents: 0, totalTokens: 0, recentSessions: [] };
+      }
       return this.agentDatabase.getSummary();
     });
 
     ipcMain.handle("desktop:db:get-sessions-with-details", () => {
+      if (!this.isAgentMonitorEnabled()) return [];
       return this.agentDatabase.sessions.getAllWithDetails();
     });
 
     ipcMain.handle("desktop:db:get-event-feed", () => {
+      if (!this.isAgentMonitorEnabled()) return [];
       return this.agentDatabase.events.getAll();
     });
 
     ipcMain.handle("desktop:db:get-events-with-session", (_event, sessionId: string) => {
+      if (!this.isAgentMonitorEnabled()) return [];
       return this.agentDatabase.events.getWithSession(sessionId);
     });
 
     ipcMain.handle("desktop:db:get-event-count-by-type", () => {
+      if (!this.isAgentMonitorEnabled()) return [];
       return this.agentDatabase.events.getCountByType();
     });
 
     ipcMain.handle("desktop:db:get-token-analytics", () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { totalInputTokens: 0, totalOutputTokens: 0, totalCacheReadTokens: 0, totalCacheWriteTokens: 0, byModel: [], byDay: [] };
+      }
       return this.agentDatabase.dashboard.getTokenAnalytics();
     });
 
     ipcMain.handle("desktop:db:get-agent-hierarchy", (_event, sessionId: string) => {
+      if (!this.isAgentMonitorEnabled()) return [];
       return this.agentDatabase.agents.getBySessionWithChildren(sessionId, this.agentDatabase.events);
+    });
+
+    ipcMain.handle("desktop:db:get-analytics", () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { tokens: { totalInputTokens: 0, totalOutputTokens: 0, totalCacheReadTokens: 0, totalCacheWriteTokens: 0, byModel: [], byDay: [] }, eventsByType: [], toolUsage: [], dailyEvents: [], sessionsByStatus: [], agentsByStatus: [], agentsByType: [], totalSessions: 0, totalAgents: 0, totalEvents: 0 };
+      }
+      return this.agentDatabase.dashboard.getAnalytics();
+    });
+
+    ipcMain.handle("desktop:db:get-workflow-data", () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { stats: { totalSessions: 0, totalAgents: 0, totalSubagents: 0, avgSubagents: 0, successRate: 100, avgDepth: 0, avgDurationSec: 0, totalCompactions: 0, avgCompactions: 0, topFlow: null }, orchestration: { sessionCount: 0, mainCount: 0, subagentTypes: [], edges: [], outcomes: [], compactions: { total: 0, sessions: 0 } }, toolFlow: { transitions: [], toolCounts: [] }, effectiveness: [], cooccurrence: [] };
+      }
+      return this.agentDatabase.dashboard.getWorkflowData();
     });
   }
 

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
 
-type SettingsTab = "relay-gateway" | "security" | "policies" | "binary-paths";
+type SettingsTab = "relay-gateway" | "security" | "policies" | "binary-paths" | "labs";
 
 export function SettingsPanel() {
   const [tab, setTab] = useState<SettingsTab>("relay-gateway");
@@ -23,6 +23,7 @@ export function SettingsPanel() {
     { id: "security", label: "Security" },
     { id: "policies", label: "Policies" },
     { id: "binary-paths", label: "CLI Tools" },
+    { id: "labs", label: "Labs" },
   ];
 
   return (
@@ -50,6 +51,7 @@ export function SettingsPanel() {
       {tab === "security" && <SecurityTab settings={settings} />}
       {tab === "policies" && <PoliciesTab settings={settings} />}
       {tab === "binary-paths" && <BinaryPathsTab />}
+      {tab === "labs" && <LabsTab settings={settings} onSettingsChange={setSettings} />}
     </div>
   );
 }
@@ -243,6 +245,8 @@ function PoliciesTab({ settings }: { settings: Record<string, unknown> | null })
 function BinaryPathsTab() {
   const [binaries, setBinaries] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   useEffect(() => {
     window.desktopApi.getBinaryPaths().then((b) => {
@@ -259,13 +263,18 @@ function BinaryPathsTab() {
     setLoading(false);
   };
 
+  const startEdit = (tool: string) => {
+    setEditing(tool);
+    setEditValue(binaries[tool] ?? "");
+  };
+
   const handleSave = async (tool: string) => {
-    const input = prompt(`Enter path for ${tool}:`, binaries[tool] ?? "");
-    if (input) {
-      await window.desktopApi.patchBinaryPaths({ [tool]: input });
+    if (editValue) {
+      await window.desktopApi.patchBinaryPaths({ [tool]: editValue });
       const b = await window.desktopApi.getBinaryPaths();
       setBinaries(b as Record<string, string>);
     }
+    setEditing(null);
   };
 
   const BINARY_TOOLS = ["claude", "node", "git", "bash", "python3"];
@@ -285,18 +294,102 @@ function BinaryPathsTab() {
           ) : (
             BINARY_TOOLS.map((tool) => (
               <div key={tool} className="flex items-center justify-between border rounded p-3">
-                <div>
+                <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">{tool}</p>
-                  <p className="text-xs text-[var(--muted-foreground)] font-mono truncate max-w-[300px]">
-                    {binaries[tool] ?? "Not found"}
-                  </p>
+                  {editing === tool ? (
+                    <input
+                      type="text"
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleSave(tool); if (e.key === "Escape") setEditing(null); }}
+                      autoFocus
+                      className="mt-1 w-full text-xs font-mono bg-[var(--input)] border rounded px-2 py-1 text-[var(--foreground)]"
+                      placeholder={`/usr/bin/${tool}`}
+                    />
+                  ) : (
+                    <p className="text-xs text-[var(--muted-foreground)] font-mono truncate max-w-[300px]">
+                      {binaries[tool] ?? "Not found"}
+                    </p>
+                  )}
                 </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={() => handleSave(tool)}>Save</Button>
+                <div className="flex gap-2 ml-2 shrink-0">
+                  {editing === tool ? (
+                    <>
+                      <Button variant="outline" size="sm" onClick={() => handleSave(tool)}>Save</Button>
+                      <Button variant="ghost" size="sm" onClick={() => setEditing(null)}>Cancel</Button>
+                    </>
+                  ) : (
+                    <Button variant="outline" size="sm" onClick={() => startEdit(tool)}>Edit</Button>
+                  )}
                 </div>
               </div>
             ))
           )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+const LAB_FLAGS: { key: string; label: string; description: string; category: string; requiresRestart?: boolean }[] = [
+  { key: "agentMonitorEnabled", label: "Agent Dashboard", description: "Enable the Claude Dashboard for session and agent observability.", category: "Monitoring" },
+  { key: "planExtractionEnabled", label: "Plan Extraction", description: "Enable Plans / plan extraction UI in the Agent Dashboard.", category: "Monitoring" },
+  { key: "commandSigningEnforcementEnabled", label: "Command Signing Enforcement", description: "Require ED25519 signatures on browser commands.", category: "Security", requiresRestart: true },
+  { key: "verboseLogging", label: "Verbose Logging", description: "Enable verbose gateway logging for debugging.", category: "Debugging" },
+];
+
+function LabsTab({ settings, onSettingsChange }: { settings: Record<string, unknown> | null; onSettingsChange: (s: Record<string, unknown>) => void }) {
+  const [saving, setSaving] = useState<string | null>(null);
+
+  const handleToggle = async (key: string, currentValue: boolean) => {
+    setSaving(key);
+    try {
+      await window.desktopApi.updateSettings({ [key]: !currentValue });
+      const updated = await window.desktopApi.getSettings();
+      onSettingsChange(updated as Record<string, unknown>);
+    } catch { /* ignore */ }
+    setSaving(null);
+  };
+
+  return (
+    <div className="space-y-4 mt-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Labs</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-[var(--muted-foreground)] mb-4">
+            Early access to experimental features and advanced controls.
+          </p>
+          <div className="space-y-3">
+            {LAB_FLAGS.map((flag) => {
+              const value = settings?.[flag.key] === true;
+              return (
+                <div key={flag.key} className="flex items-center justify-between border rounded p-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium">{flag.label}</p>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--muted)] text-[var(--muted-foreground)]">{flag.category}</span>
+                    </div>
+                    <p className="text-xs text-[var(--muted-foreground)] mt-0.5">{flag.description}</p>
+                    {flag.requiresRestart && (
+                      <p className="text-[10px] text-[var(--warning-foreground)] mt-0.5">Requires restart</p>
+                    )}
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer ml-3 shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={value}
+                      onChange={() => handleToggle(flag.key, value)}
+                      disabled={saving === flag.key}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)]" />
+                  </label>
+                </div>
+              );
+            })}
+          </div>
         </CardContent>
       </Card>
     </div>
