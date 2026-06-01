@@ -39,10 +39,10 @@ const FEATURE_FLAGS_INTERNAL = [
   },
   {
     key: "symphonyWebPocEnabled" as const,
-    default: false,
-    label: "Symphony Web POC",
+    default: true,
+    label: "Symphony Desktop",
     description:
-      "Runs an experimental Symphony web surface inside Electron against a desktop-local SQLite/API runtime.",
+      "Runs the Symphony web app inside Electron against a desktop-local SQLite/API runtime.",
     category: "Experimental" as const,
     envOverride: "CL_SYMPHONY_WEB_POC",
   },

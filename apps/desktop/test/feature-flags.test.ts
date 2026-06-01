@@ -39,7 +39,7 @@ test("getFlag returns registry default when key is absent from store", () => {
   const store = makeStore();
   assert.equal(store.getFlag("agentMonitorEnabled"), true, "agentMonitorEnabled defaults to true");
   assert.equal(store.getFlag("planExtractionEnabled"), false, "planExtractionEnabled defaults to false");
-  assert.equal(store.getFlag("symphonyWebPocEnabled"), false, "symphonyWebPocEnabled defaults to false");
+  assert.equal(store.getFlag("symphonyWebPocEnabled"), true, "symphonyWebPocEnabled defaults to true");
 });
 
 test("getFlag returns stored value when present", () => {

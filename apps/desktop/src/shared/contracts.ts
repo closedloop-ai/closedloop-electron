@@ -170,7 +170,7 @@ export interface DesktopSettings {
   agentMonitorEnabled: boolean;
   /** Host-owned opt-in for Plans / plan extraction UI in the embedded Agent Dashboard. */
   planExtractionEnabled: boolean;
-  /** Experimental POC for hosting the Symphony web app in Electron against desktop-local data. */
+  /** Hosts the Symphony web app in Electron against desktop-local data. */
   symphonyWebPocEnabled: boolean;
   /** Desktop-local opt-in that requires trusted browser command signatures. */
   commandSigningEnforcementEnabled: boolean;
@@ -216,7 +216,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   cloudConnectionEnabled: true,
   agentMonitorEnabled: true,
   planExtractionEnabled: false,
-  symphonyWebPocEnabled: false,
+  symphonyWebPocEnabled: true,
   commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",
   relayOrigin: DEFAULT_RELAY_ORIGIN,

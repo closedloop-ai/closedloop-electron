@@ -679,7 +679,6 @@ export class DesktopApplication {
     if (this.settingsStore.getSymphonyWebPocEnabled()) {
       void this.symphonyWebPoc.start();
     }
-
     try {
       await this.server.start();
       const configuredOrigins = {
@@ -2488,20 +2487,52 @@ export class DesktopApplication {
 
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-app-version", () => app.getVersion());
-    ipcMain.handle("desktop:get-agent-monitor-url", () => ({
-      url: this.agentMonitor.getUrl(),
-      ready: this.agentMonitor.isReady(),
-      enabled: this.isAgentMonitorEnabled(),
-      planExtractionEnabled: this.isPlanExtractionEnabled(),
-    }));
-    ipcMain.handle("desktop:get-symphony-web-poc-status", () =>
-      this.symphonyWebPoc.getStatus(this.isSymphonyWebPocEnabled()),
-    );
+    ipcMain.handle("desktop:get-agent-monitor-url", () => {
+      if (
+        this.isAgentMonitorEnabled() &&
+        !this.agentMonitor.isReady() &&
+        !this.agentMonitorFailed
+      ) {
+        void this.agentMonitor.start();
+      }
+      if (this.agentMonitor.isReady()) {
+        this.agentMonitorFailed = false;
+        this.agentMonitorFailureReason = null;
+      }
+      return {
+        url: this.agentMonitor.getUrl(),
+        ready: this.agentMonitor.isReady(),
+        enabled: this.isAgentMonitorEnabled(),
+        planExtractionEnabled: this.isPlanExtractionEnabled(),
+        error: this.agentMonitorFailed
+          ? (this.agentMonitorFailureReason ?? "Agent monitor failed to start.")
+          : null,
+      };
+    });
+    ipcMain.handle("desktop:restart-agent-monitor", async () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return {
+          ok: false,
+          error: "Agent Dashboard is disabled in Settings.",
+        };
+      }
+      this.agentMonitorFailed = false;
+      this.agentMonitorFailureReason = null;
+      await this.agentMonitor.stop();
+      void this.agentMonitor.start();
+      return { ok: true };
+    });
+    ipcMain.handle("desktop:get-symphony-web-poc-status", () => {
+      if (this.isSymphonyWebPocEnabled()) {
+        void this.symphonyWebPoc.start();
+      }
+      return this.symphonyWebPoc.getStatus(this.isSymphonyWebPocEnabled());
+    });
     ipcMain.handle("desktop:restart-symphony-web-poc", async () => {
       if (!this.isSymphonyWebPocEnabled()) {
         return {
           ok: false,
-          error: "Symphony Web POC is disabled in Settings.",
+          error: "Symphony Desktop is disabled in Settings.",
         };
       }
       await this.symphonyWebPoc.stop();

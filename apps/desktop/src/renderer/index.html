@@ -1591,6 +1591,221 @@
         max-width: 380px;
         line-height: 1.5;
       }
+      .ds-button {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        height: 36px;
+        padding: 0 16px;
+        border-radius: 6px;
+        border: 1px solid var(--primary);
+        background: var(--primary);
+        color: var(--primary-foreground);
+        font: 600 13px/1 var(--font-sans);
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+      }
+      .ds-button:hover {
+        filter: brightness(0.96);
+      }
+      .ds-button:disabled {
+        pointer-events: none;
+        opacity: 0.5;
+      }
+      .ds-button-outline {
+        border-color: var(--input-border);
+        background: var(--card);
+        color: var(--foreground);
+      }
+      .ds-button-outline:hover {
+        background: var(--muted);
+        filter: none;
+      }
+      .ds-button-ghost {
+        border-color: transparent;
+        background: transparent;
+        color: var(--foreground);
+      }
+      .ds-button-ghost:hover {
+        background: var(--muted);
+        filter: none;
+      }
+      .ds-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        width: fit-content;
+        padding: 2px 8px;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        background: var(--secondary);
+        color: var(--secondary-foreground);
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 18px;
+        white-space: nowrap;
+      }
+      .ds-badge-outline {
+        border-color: var(--border);
+        background: transparent;
+        color: var(--foreground);
+      }
+      .ds-progress {
+        position: relative;
+        height: 8px;
+        width: 100%;
+        overflow: hidden;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--primary) 18%, transparent);
+      }
+      .ds-progress-indicator {
+        height: 100%;
+        width: 0%;
+        border-radius: inherit;
+        background: var(--primary);
+        transition: width 400ms ease;
+      }
+      .ds-skeleton {
+        height: 10px;
+        border-radius: 6px;
+        background: var(--accent);
+        animation: ds-pulse 1.6s ease-in-out infinite;
+      }
+      .symphony-startup-skeletons {
+        display: grid;
+        gap: 8px;
+      }
+      @keyframes ds-pulse {
+        0%, 100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.48;
+        }
+      }
+      .ds-alert {
+        display: grid;
+        grid-template-columns: 16px 1fr;
+        gap: 8px 12px;
+        align-items: start;
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--card);
+        color: var(--card-foreground);
+        font-size: 13px;
+        text-align: left;
+      }
+      .ds-alert.destructive {
+        color: var(--destructive);
+      }
+      .ds-alert-title {
+        font-weight: 600;
+      }
+      .ds-alert-description {
+        grid-column: 2;
+        color: var(--muted-foreground);
+        line-height: 1.45;
+      }
+      .ds-alert.destructive .ds-alert-description {
+        color: color-mix(in srgb, var(--destructive) 85%, var(--foreground));
+      }
+      .symphony-startup {
+        width: min(680px, calc(100% - 48px));
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        text-align: left;
+      }
+      .symphony-startup-header {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: flex-start;
+      }
+      .symphony-startup-title {
+        margin: 0;
+        color: var(--foreground);
+        font-size: 24px;
+        font-weight: 650;
+        letter-spacing: 0;
+      }
+      .symphony-startup-copy {
+        margin: 0;
+        max-width: 58ch;
+        color: var(--muted-foreground);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .symphony-startup-steps {
+        display: grid;
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--border);
+      }
+      .symphony-startup-step {
+        display: grid;
+        grid-template-columns: 18px 1fr auto;
+        gap: 10px;
+        align-items: center;
+        min-width: 0;
+        padding: 12px 14px;
+        background: var(--card);
+      }
+      .symphony-step-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: var(--muted-foreground);
+      }
+      .symphony-startup-step[data-state="pending"] .symphony-step-dot {
+        background: var(--primary);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 18%, transparent);
+        animation: pulse-dot 1.6s ease-in-out infinite;
+      }
+      .symphony-startup-step[data-state="ready"] .symphony-step-dot {
+        background: var(--success);
+      }
+      .symphony-startup-step[data-state="error"] .symphony-step-dot {
+        background: var(--destructive);
+      }
+      .symphony-step-main {
+        min-width: 0;
+      }
+      .symphony-step-title {
+        margin: 0;
+        color: var(--foreground);
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .symphony-step-detail {
+        margin: 2px 0 0;
+        color: var(--muted-foreground);
+        font-size: 12px;
+        line-height: 1.4;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .symphony-startup-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      .symphony-startup-footnote {
+        margin: 0;
+        color: var(--muted-foreground);
+        font-size: 12px;
+        line-height: 1.45;
+      }
       /* The welcome reuses .onboarding-overlay for the backdrop; it must sit
          above the ingest banner (z-index 1300) as a first-run takeover. */
       #dashboardWelcome {
@@ -3001,6 +3216,43 @@
         padding: 0;
         overflow: hidden;
       }
+      .app.symphony-view {
+        grid-template-columns: 1fr;
+        background: var(--background);
+      }
+      .app.symphony-view .sidebar,
+      .app.symphony-view .topbar,
+      .app.symphony-view #updateBanner {
+        display: none;
+      }
+      .app.symphony-view .main {
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+      }
+      .desktop-classic-fab {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 40;
+        display: none;
+        appearance: none;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: color-mix(in oklch, var(--background) 90%, transparent);
+        color: var(--foreground);
+        box-shadow: 0 10px 30px rgb(0 0 0 / 0.12);
+        font: 600 12px/1 var(--font-sans);
+        padding: 9px 12px;
+        cursor: pointer;
+      }
+      .desktop-classic-fab:hover {
+        background: var(--muted);
+      }
+      .app.symphony-view .desktop-classic-fab {
+        display: inline-flex;
+      }
 
       /* ── Ingest progress banner (FEA-1334) ────────────────────────
          Full-width bar that slides in from the top edge while the app
@@ -3291,7 +3543,7 @@
         </div>
       </div>
     </div>
-    <div class="app state-disconnected agent-view" id="appShell">
+    <div class="app state-disconnected agent-view symphony-view" id="appShell">
       <aside class="sidebar">
         <div class="sb-brand">
           <span class="mark" aria-hidden="true">
@@ -3397,7 +3649,7 @@
         <div id="logsPausedBanner" class="logs-paused-banner">Paused - 0 new entries queued</div>
         <div id="logsList" class="logs-container"></div>
       </section>
-      <section id="claude-dashboard" class="panel active">
+      <section id="claude-dashboard" class="panel">
         <div id="claudeDashConsent" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
           <label class="toggle-switch" title="Installs Claude Code hooks in ~/.claude/settings.json so this dashboard receives live session events. Off by default; fully removable.">
             <input type="checkbox" id="claudeDashHooksToggle" />
@@ -3409,9 +3661,9 @@
         <div id="claudeDashStatus" class="dash-loading" aria-live="polite"></div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
-      <section id="symphony-web" class="panel">
+      <section id="symphony-web" class="panel active">
         <div id="symphonyWebStatus" class="dash-loading" aria-live="polite"></div>
-        <iframe id="symphonyWebFrame" title="Symphony Web POC" style="display:none;width:100%;border:0;background:#fff"></iframe>
+        <iframe id="symphonyWebFrame" title="Symphony Desktop" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
       <section id="settings" class="panel">
         <!-- D5 / AC-010: Revival limitation hint for non-DESKTOP_MANAGED keys.
@@ -3804,6 +4056,9 @@
       </section>
         </div>
       </main>
+      <button class="desktop-classic-fab ds-button ds-button-outline" id="desktopClassicFab" type="button">
+        Desktop Classic
+      </button>
     </div>
     <script>
       const api = window.desktopApi;
@@ -3849,8 +4104,8 @@
         { id: "packs",          label: "Packs",          icon: "package",     kind: "agent",   route: "/packs" },
         { id: "pull-requests",  label: "Pull Requests",  icon: "git-pull-request", kind: "agent", route: "/pull-requests" },
         { id: "agent-settings", label: "Agent Settings", icon: "settings",    kind: "agent",   route: "/settings" },
-        { type: "group", label: "Symphony", symphonyWebOnly: true },
-        { id: "symphony-web",   label: "Web App POC",    icon: "sparkles",    kind: "symphony", panel: "symphony-web", symphonyWebOnly: true },
+        { type: "group", label: "Views" },
+        { id: "symphony-web",   label: "Symphony Desktop", icon: "sparkles", kind: "symphony", panel: "symphony-web" },
         { type: "group", label: "Gateway" },
         { id: "approvals",      label: "Approvals",      icon: "shield",      kind: "gateway", panel: "approvals", count: true },
         { id: "requests",       label: "Requests",       icon: "inbox",       kind: "gateway", panel: "activity" },
@@ -3862,22 +4117,24 @@
       const LEGACY_TAB_ALIAS = {
         dashboard: "dashboard",
         "claude-dashboard": "dashboard",
+        symphony: "symphony-web",
+        "symphony-web": "symphony-web",
         approvals: "approvals",
         activity: "requests",
         logs: "diagnostics",
         settings: "settings",
       };
 
-      let currentNavId = "dashboard";
+      let currentNavId = "symphony-web";
       let pendingAgentRoute = "/";
       let bootNavDone = false;
+      let settingsLoaded = false;
       let cachedPlanExtractionEnabled = false;
       let cachedSymphonyWebPocEnabled = false;
       let agentMonitorFrameOrigin = null;
 
       function shouldShowNavItem(item) {
         if (item.planExtractionOnly && !cachedPlanExtractionEnabled) return false;
-        if (item.symphonyWebOnly && !cachedSymphonyWebPocEnabled) return false;
         return true;
       }
 
@@ -3909,7 +4166,9 @@
             html += '<span class="count" id="approvalsCount" data-count="0"></span>';
           }
           btn.innerHTML = html;
-          btn.addEventListener("click", () => activateNav(item.id));
+          btn.addEventListener("click", () => {
+            void activateNav(item.id);
+          });
           nav.appendChild(btn);
         }
         const activeId = nav.querySelector(`.sb-item[data-nav="${currentNavId}"]`)
@@ -3958,18 +4217,44 @@
         }
       }
 
-      function activateNav(id) {
+      async function enableSymphonyWebPocForToggle() {
+        if (cachedSymphonyWebPocEnabled) {
+          return true;
+        }
+
+        cachedSymphonyWebPocEnabled = true;
+        buildSidebar();
+        try {
+          await api.updateSettings({ symphonyWebPocEnabled: true });
+          syncSymphonyWebPocVisibility(true);
+          return true;
+        } catch (error) {
+          cachedSymphonyWebPocEnabled = false;
+          buildSidebar();
+          const status = document.getElementById("symphonyWebStatus");
+          if (status) {
+            renderSymphonyError(
+              "Could not enable Symphony Desktop: " +
+                (error?.message || String(error)),
+            );
+          }
+          return false;
+        }
+      }
+
+      async function activateNav(id) {
         const item = NAV_ITEMS.find((n) => n.id === id && n.type !== "group");
         if (!item) return;
         if (item.kind === "agent" && !cachedAgentMonitorEnabled) {
           // Agent views need the Agent Dashboard runtime enabled — fall back to Settings.
-          activateNav("settings");
+          void activateNav("settings");
           activateSettingsTab("relay-gateway");
           return;
         }
-        if (item.kind === "symphony" && !cachedSymphonyWebPocEnabled) {
-          activateNav("settings");
-          activateSettingsTab("feature-flags");
+        if (
+          item.kind === "symphony" &&
+          !(await enableSymphonyWebPocForToggle())
+        ) {
           return;
         }
         currentNavId = id;
@@ -3983,6 +4268,7 @@
           "agent-view",
           item.kind === "agent" || item.kind === "symphony",
         );
+        appShell.classList.toggle("symphony-view", item.kind === "symphony");
         setBreadcrumb(item);
         if (panelId === "logs") {
           void pollLogs();
@@ -4012,12 +4298,23 @@
 
       // Backward-compatible shim for the tray menu and IPC navigation events.
       function activateTab(name) {
-        activateNav(LEGACY_TAB_ALIAS[name] || name);
+        void activateNav(LEGACY_TAB_ALIAS[name] || name);
+      }
+
+      function activateDesktopClassic() {
+        void activateNav(cachedAgentMonitorEnabled ? "dashboard" : "settings");
+        if (!cachedAgentMonitorEnabled) {
+          activateSettingsTab("relay-gateway");
+        }
       }
 
       window.addEventListener("desktop:navigate-tab", (event) => {
         activateTab(event.detail);
       });
+      document.getElementById("desktopClassicFab")
+        ?.addEventListener("click", () => {
+          activateDesktopClassic();
+        });
 
       const sidebarToggle = document.getElementById("sidebarToggle");
       sidebarToggle.addEventListener("click", () => {
@@ -4042,6 +4339,10 @@
       // Fallback: render the initial view even if settings never load.
       setTimeout(() => {
         if (!bootNavDone) {
+          if (currentNavId === "symphony-web" && !settingsLoaded) {
+            renderSymphonyLoading("Loading desktop settings before starting the local app server.");
+            return;
+          }
           bootNavDone = true;
           activateNav(currentNavId);
         }
@@ -4096,11 +4397,6 @@
           hint.textContent = "— off (no changes to your global Claude config)";
         }
 
-        // Render the initial view once the enabled-state is known on boot.
-        if (!bootNavDone) {
-          bootNavDone = true;
-          activateNav(currentNavId);
-        }
       }
 
       function sizeClaudeFrame() {
@@ -4197,6 +4493,50 @@
       }
       renderDashLoading();
 
+      function renderDashError(message) {
+        const frame = document.getElementById("claudeDashFrame");
+        const status = document.getElementById("claudeDashStatus");
+        if (frame) frame.style.display = "none";
+        if (!status) return;
+        status.className = "dash-loading";
+        status.style.display = "flex";
+        status.innerHTML = "";
+
+        const title = document.createElement("div");
+        title.className = "dash-loading-title";
+        title.textContent = "Agent Dashboard did not start";
+
+        const detail = document.createElement("div");
+        detail.className = "dash-loading-sub";
+        detail.textContent = message || "The dashboard runtime failed to start.";
+
+        const retry = document.createElement("button");
+        retry.id = "claudeDashRetry";
+        retry.className = "logs-btn";
+        retry.style.width = "auto";
+        retry.style.padding = "4px 10px";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", async () => {
+          claudeDashLoaded = false;
+          renderDashLoading();
+          try {
+            const result = await api.restartAgentMonitor();
+            if (!result || result.ok !== true) {
+              renderDashError((result && result.error) || "Could not restart Agent Dashboard.");
+              return;
+            }
+          } catch (error) {
+            renderDashError(error?.message || String(error));
+            return;
+          }
+          startClaudeDashboard();
+        });
+
+        status.appendChild(title);
+        status.appendChild(detail);
+        status.appendChild(retry);
+      }
+
       function startClaudeDashboard() {
         const frame = document.getElementById("claudeDashFrame");
         const status = document.getElementById("claudeDashStatus");
@@ -4213,6 +4553,11 @@
         const tick = async () => {
           try {
             const r = await api.getAgentMonitorUrl();
+            if (r && r.error) {
+              renderDashError(r.error);
+              stopClaudeDashboardPoll();
+              return;
+            }
             if (r && r.ready && r.url) {
               if (cachedPlanExtractionEnabled !== (r.planExtractionEnabled === true)) {
                 cachedPlanExtractionEnabled = r.planExtractionEnabled === true;
@@ -4249,11 +4594,7 @@
             if (claudeDashLoaded) { stopClaudeDashboardPoll(); return; }
             if (Date.now() - startedAt > 60000) {
               stopClaudeDashboardPoll();
-              status.innerHTML =
-                'Agent Dashboard did not start. ' +
-                '<button id="claudeDashRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
-              document.getElementById("claudeDashRetry")
-                ?.addEventListener("click", () => { claudeDashLoaded = false; startClaudeDashboard(); });
+              renderDashError("Timed out waiting for the dashboard runtime.");
             } else {
               void tick();
             }
@@ -4261,7 +4602,7 @@
         }
       }
 
-      // --- Symphony Web POC (desktop-local web app runtime) --------------
+      // --- Symphony Desktop (desktop-local web app runtime) --------------
       let symphonyWebTimer = null;
       let symphonyWebLoaded = false;
 
@@ -4272,19 +4613,242 @@
         }
       }
 
-      function renderSymphonyLoading(message) {
+      function createEl(tag, className, text) {
+        const el = document.createElement(tag);
+        if (className) el.className = className;
+        if (typeof text === "string") el.textContent = text;
+        return el;
+      }
+
+      function appendButton(parent, label, variant, onClick) {
+        const button = createEl(
+          "button",
+          "ds-button" +
+            (variant === "outline" ? " ds-button-outline" : "") +
+            (variant === "ghost" ? " ds-button-ghost" : ""),
+          label,
+        );
+        button.type = "button";
+        button.addEventListener("click", onClick);
+        parent.appendChild(button);
+        return button;
+      }
+
+      function symphonyProgressValue(runtimeStatus) {
+        if (runtimeStatus?.ready) return 100;
+        if (runtimeStatus?.apiUrl && runtimeStatus?.mode === "spawned-next") return 72;
+        if (runtimeStatus?.apiUrl) return 55;
+        return 22;
+      }
+
+      function createStartupStep(title, detail, state, badgeText) {
+        const row = createEl("div", "symphony-startup-step");
+        row.dataset.state = state;
+        row.appendChild(createEl("span", "symphony-step-dot"));
+        const main = createEl("div", "symphony-step-main");
+        main.appendChild(createEl("p", "symphony-step-title", title));
+        main.appendChild(createEl("p", "symphony-step-detail", detail));
+        row.appendChild(main);
+        if (badgeText) {
+          row.appendChild(createEl("span", "ds-badge ds-badge-outline", badgeText));
+        }
+        return row;
+      }
+
+      function describeIngestProgress(progress) {
+        if (!progress) {
+          return {
+            state: "pending",
+            detail: "Waiting for the local session index.",
+            badge: "background",
+          };
+        }
+        if (progress.running) {
+          const total = progress.total || 0;
+          const parsed = progress.parsed || 0;
+          return {
+            state: "pending",
+            detail: total > 0
+              ? `${Math.min(parsed, total).toLocaleString()} of ${total.toLocaleString()} local session files parsed.`
+              : "Scanning local agent session files.",
+            badge: total > 0 ? `${Math.round((Math.min(parsed, total) / total) * 100)}%` : "scanning",
+          };
+        }
+        if (progress.finishedAt) {
+          const tracked = progress.sessionsInDb;
+          return {
+            state: "ready",
+            detail: typeof tracked === "number"
+              ? `${tracked.toLocaleString()} local sessions available to Symphony.`
+              : "Local session import is complete.",
+            badge: "ready",
+          };
+        }
+        return {
+          state: "pending",
+          detail: "The import worker starts after the local monitor finishes booting.",
+          badge: "background",
+        };
+      }
+
+      async function getIngestProgressSnapshot() {
+        try {
+          return await api.getAgentMonitorIngestProgress();
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function createBackgroundImportAlert(progress) {
+        const info = describeIngestProgress(progress);
+        const alert = createEl("div", "ds-alert");
+        alert.setAttribute("role", "status");
+        alert.appendChild(createEl("span", "", "i"));
+        alert.appendChild(
+          createEl("div", "ds-alert-title", "Session history imports in background"),
+        );
+        alert.appendChild(
+          createEl(
+            "div",
+            "ds-alert-description",
+            `${info.detail} This does not delay opening Symphony.`,
+          ),
+        );
+        return alert;
+      }
+
+      function renderSymphonyLoading(message, runtimeStatus = null, ingestProgress = null) {
         const status = document.getElementById("symphonyWebStatus");
         if (!status) return;
         status.className = "dash-loading";
         status.style.display = "flex";
-        status.innerHTML =
-          '<div class="dash-loading-spinner"></div>' +
-          '<div class="dash-loading-title">Starting Symphony Web POC…</div>' +
-          '<div class="dash-loading-sub">' +
-          (message || "Preparing the desktop-local SQLite/API runtime.") +
-          "</div>";
+        status.innerHTML = "";
+
+        const shell = createEl("div", "symphony-startup");
+        const header = createEl("div", "symphony-startup-header");
+        header.appendChild(createEl("span", "ds-badge", "Symphony Desktop"));
+        header.appendChild(createEl("h1", "symphony-startup-title", "Starting ClosedLoop Desktop"));
+        header.appendChild(
+          createEl(
+            "p",
+            "symphony-startup-copy",
+            message || "Starting the local web app and connecting it to your desktop SQLite workspace.",
+          ),
+        );
+        shell.appendChild(header);
+
+        const progress = createEl("div", "ds-progress");
+        progress.setAttribute("role", "progressbar");
+        progress.setAttribute("aria-valuemin", "0");
+        progress.setAttribute("aria-valuemax", "100");
+        const progressValue = symphonyProgressValue(runtimeStatus);
+        progress.setAttribute("aria-valuenow", String(progressValue));
+        const indicator = createEl("div", "ds-progress-indicator");
+        indicator.style.width = `${progressValue}%`;
+        progress.appendChild(indicator);
+        shell.appendChild(progress);
+
+        const skeletons = createEl("div", "symphony-startup-skeletons");
+        const skeletonOne = createEl("div", "ds-skeleton");
+        skeletonOne.style.width = "68%";
+        const skeletonTwo = createEl("div", "ds-skeleton");
+        skeletonTwo.style.width = "42%";
+        skeletons.appendChild(skeletonOne);
+        skeletons.appendChild(skeletonTwo);
+        shell.appendChild(skeletons);
+
+        const steps = createEl("div", "symphony-startup-steps");
+        steps.appendChild(
+          createStartupStep(
+            "Desktop-local API",
+            runtimeStatus?.apiUrl
+              ? `SQLite API online at ${runtimeStatus.apiUrl}.`
+              : "Starting the local SQLite/API runtime.",
+            runtimeStatus?.apiUrl ? "ready" : "pending",
+            runtimeStatus?.apiUrl ? "ready" : "starting",
+          ),
+        );
+        steps.appendChild(
+          createStartupStep(
+            "Symphony app server",
+            runtimeStatus?.ready && runtimeStatus?.url
+              ? `Local app server ready at ${runtimeStatus.url}.`
+              : runtimeStatus?.mode === "spawned-next"
+                ? "Starting the same Symphony Next app used by web."
+                : "Preparing the local app server.",
+            runtimeStatus?.ready ? "ready" : "pending",
+            runtimeStatus?.mode || "starting",
+          ),
+        );
+        shell.appendChild(steps);
+        shell.appendChild(createBackgroundImportAlert(ingestProgress));
+
+        const actions = createEl("div", "symphony-startup-actions");
+        appendButton(actions, "Retry", "outline", async () => {
+          symphonyWebLoaded = false;
+          renderSymphonyLoading("Restarting the local Symphony app server.", runtimeStatus, ingestProgress);
+          await api.restartSymphonyWebPoc();
+          startSymphonyWebPoc();
+        });
+        appendButton(actions, "Desktop Classic", "ghost", activateDesktopClassic);
+        shell.appendChild(actions);
+        shell.appendChild(
+          createEl(
+            "p",
+            "symphony-startup-footnote",
+            "You can start writing local documents as soon as Symphony opens.",
+          ),
+        );
+        status.appendChild(shell);
       }
       renderSymphonyLoading();
+
+      function renderSymphonyError(message) {
+        const status = document.getElementById("symphonyWebStatus");
+        const frame = document.getElementById("symphonyWebFrame");
+        if (frame) frame.style.display = "none";
+        if (!status) return;
+        status.className = "dash-loading";
+        status.style.display = "flex";
+        status.innerHTML = "";
+
+        const shell = createEl("div", "symphony-startup");
+        const header = createEl("div", "symphony-startup-header");
+        header.appendChild(createEl("span", "ds-badge ds-badge-outline", "Symphony Desktop"));
+        header.appendChild(createEl("h1", "symphony-startup-title", "Symphony did not start"));
+        header.appendChild(
+          createEl(
+            "p",
+            "symphony-startup-copy",
+            "The desktop shell is still available while the local web app recovers.",
+          ),
+        );
+        shell.appendChild(header);
+
+        const alert = createEl("div", "ds-alert destructive");
+        alert.setAttribute("role", "alert");
+        alert.appendChild(createEl("span", "", "!"));
+        alert.appendChild(createEl("div", "ds-alert-title", "Local app server failed"));
+        alert.appendChild(
+          createEl(
+            "div",
+            "ds-alert-description",
+            message || "The local Symphony app server did not become ready.",
+          ),
+        );
+        shell.appendChild(alert);
+
+        const actions = createEl("div", "symphony-startup-actions");
+        appendButton(actions, "Retry", "outline", async () => {
+          symphonyWebLoaded = false;
+          renderSymphonyLoading("Restarting the local Symphony app server.");
+          await api.restartSymphonyWebPoc();
+          startSymphonyWebPoc();
+        });
+        appendButton(actions, "Desktop Classic", "ghost", activateDesktopClassic);
+        shell.appendChild(actions);
+        status.appendChild(shell);
+      }
 
       function syncSymphonyWebPocVisibility(enabled) {
         cachedSymphonyWebPocEnabled = enabled === true;
@@ -4299,12 +4863,11 @@
           }
           if (status) {
             status.style.display = "block";
-            status.textContent = "Symphony Web POC is disabled in Settings.";
+            status.textContent = "Symphony Desktop is disabled in Settings.";
           }
           const current = NAV_ITEMS.find((n) => n.id === currentNavId);
-          if (current && current.kind === "symphony") {
-            activateTab("settings");
-            activateSettingsTab("feature-flags");
+          if (bootNavDone && current && current.kind === "symphony") {
+            activateDesktopClassic();
           }
         }
       }
@@ -4315,7 +4878,7 @@
         if (!cachedSymphonyWebPocEnabled) {
           frame.style.display = "none";
           status.style.display = "block";
-          status.textContent = "Symphony Web POC is disabled in Settings.";
+          renderSymphonyError("Symphony Desktop is disabled in Settings.");
           return;
         }
         if (symphonyWebLoaded) {
@@ -4327,13 +4890,14 @@
         const tick = async () => {
           try {
             const r = await api.getSymphonyWebPocStatus();
+            const ingestProgress = await getIngestProgressSnapshot();
             if (!r || !r.enabled) {
               syncSymphonyWebPocVisibility(false);
               return;
             }
             if (r.error) {
-              status.style.display = "block";
-              status.textContent = "Symphony Web POC failed: " + r.error;
+              renderSymphonyError(r.error);
+              return;
             }
             if (r.ready && r.url) {
               const frameUrl = new URL(r.url);
@@ -4354,6 +4918,14 @@
               symphonyWebLoaded = true;
               sizeSymphonyFrame();
               stopSymphonyWebPocPoll();
+            } else {
+              renderSymphonyLoading(
+                r.apiUrl
+                  ? "Starting the local Symphony app server."
+                  : "Starting the desktop-local SQLite/API runtime.",
+                r,
+                ingestProgress,
+              );
             }
           } catch (_) {
             /* keep polling */
@@ -4370,15 +4942,7 @@
             }
             if (Date.now() - startedAt > 120000) {
               stopSymphonyWebPocPoll();
-              status.innerHTML =
-                'Symphony Web POC did not start. ' +
-                '<button id="symphonyWebRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
-              document.getElementById("symphonyWebRetry")
-                ?.addEventListener("click", async () => {
-                  symphonyWebLoaded = false;
-                  await api.restartSymphonyWebPoc();
-                  startSymphonyWebPoc();
-                });
+              renderSymphonyError("Timed out waiting for the local Symphony app server.");
             } else {
               void tick();
             }
@@ -5499,9 +6063,16 @@
         cachedPlanExtractionEnabled = settings.planExtractionEnabled === true;
         cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
         cachedSymphonyWebPocEnabled = settings.symphonyWebPocEnabled === true;
+        settingsLoaded = true;
         buildSidebar();
         syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
         syncSymphonyWebPocVisibility(cachedSymphonyWebPocEnabled);
+        if (!bootNavDone) {
+          bootNavDone = true;
+          void activateNav(
+            cachedSymphonyWebPocEnabled ? "symphony-web" : "dashboard",
+          );
+        }
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
         if (commandSigningEnforcementEnabled) {
@@ -6568,6 +7139,8 @@
         if (dashboardWelcomeDismissedThisSession) return;
         if (!state || !state.completed) return;
         if (state.settings && state.settings.dashboardWelcomeSeen) return;
+        if (!settingsLoaded) return;
+        if (cachedSymphonyWebPocEnabled && currentNavId === "symphony-web") return;
         const welcome = document.getElementById("dashboardWelcome");
         if (welcome) welcome.classList.remove("hidden");
       }

@@ -124,6 +124,12 @@ const desktopApi = {
       ready: boolean;
       enabled: boolean;
       planExtractionEnabled: boolean;
+      error: string | null;
+    }>,
+  restartAgentMonitor: () =>
+    ipcRenderer.invoke("desktop:restart-agent-monitor") as Promise<{
+      ok: boolean;
+      error?: string;
     }>,
   getSymphonyWebPocStatus: () =>
     ipcRenderer.invoke("desktop:get-symphony-web-poc-status") as Promise<{

@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, BrowserWindow, dialog } from "electron";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -12,6 +12,11 @@ import {
 } from "../shared/contracts.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { resolveAgentMonitorPaths } from "./agent-monitor-path.js";
+import {
+  reconcileAgentMonitorPort,
+  type PortHolder,
+  type ReconcileOutcome,
+} from "./agent-monitor-port-reconcile.js";
 
 const TAG = "agent-monitor";
 const HOST = "127.0.0.1";
@@ -163,6 +168,18 @@ export class AgentMonitorSidecar {
     }
 
     await fs.mkdir(this.dataDir, { recursive: true });
+    const reconcileOutcome = await this.reconcilePort();
+    if (signal.aborted || !this.started || this.stopping) {
+      return;
+    }
+    if (reconcileOutcome === "blocked-live") {
+      throw new Error(
+        `port ${this.port} is in use by another live ClosedLoop instance`,
+      );
+    }
+    if (reconcileOutcome === "foreign" || reconcileOutcome === "kill-failed") {
+      throw new Error(`port ${this.port} is still in use (${reconcileOutcome})`);
+    }
     await this.reclaimLegacySidecarOrphan(entryFile);
     if (signal.aborted || !this.started || this.stopping) {
       return;
@@ -227,6 +244,46 @@ export class AgentMonitorSidecar {
         ? { SANDBOX_BASE_DIRECTORY: this.sandboxBaseDirectory }
         : {}),
     };
+  }
+
+  private get pidFilePath(): string {
+    return path.join(this.dataDir, "sidecar.pid");
+  }
+
+  private async reconcilePort(): Promise<ReconcileOutcome> {
+    if (this.port !== AGENT_MONITOR_PORT) {
+      return "no-holder";
+    }
+    try {
+      return await reconcileAgentMonitorPort({
+        port: this.port,
+        pidFilePath: this.pidFilePath,
+        selfUid: typeof process.getuid === "function" ? process.getuid() : -1,
+        confirmKillLive: (holder) => this.confirmKillLiveInstance(holder),
+      });
+    } catch (error) {
+      gatewayLog.warn(TAG, `port reconcile skipped: ${describe(error)}`);
+      return "no-holder";
+    }
+  }
+
+  private async confirmKillLiveInstance(holder: PortHolder): Promise<boolean> {
+    const options = {
+      type: "warning" as const,
+      buttons: ["Quit it first", "Kill It"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: "Agent dashboard port in use",
+      message: `Another ClosedLoop instance (PID ${holder.pid}) is using the dashboard port ${this.port}.`,
+      detail: `Process: ${holder.command}\n\nQuit that instance first, or force-kill it to free the dashboard port.`,
+    };
+    const parent =
+      BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null;
+    const result = parent
+      ? await dialog.showMessageBox(parent, options)
+      : await dialog.showMessageBox(options);
+    return result.response === 1;
   }
 
   private async deleteLegacyPidFile(): Promise<void> {

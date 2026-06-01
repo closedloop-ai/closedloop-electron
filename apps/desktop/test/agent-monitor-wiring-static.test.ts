@@ -334,7 +334,7 @@ test("docs and ignores describe generated pnpm-managed inputs, not vendor source
   assert.doesNotMatch(claudeDocSource, /vendor\/agent-monitor/);
 });
 
-test("agent monitor defaults on; plan extraction is feature-gated and defaults off in desktop settings", () => {
+test("agent monitor and Symphony Desktop default on; plan extraction is feature-gated and defaults off in desktop settings", () => {
   assert.match(contractsSource, /agentMonitorEnabled: boolean/);
   // The Agent Dashboard now powers the primary Dashboard + agent nav, so the
   // sidecar defaults ON (it can still be turned off in Settings).
@@ -342,7 +342,7 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   assert.match(contractsSource, /planExtractionEnabled: boolean/);
   assert.match(contractsSource, /planExtractionEnabled: false/);
   assert.match(contractsSource, /symphonyWebPocEnabled: boolean/);
-  assert.match(contractsSource, /symphonyWebPocEnabled: false/);
+  assert.match(contractsSource, /symphonyWebPocEnabled: true/);
   assert.match(settingsStoreSource, /getAgentMonitorEnabled\(\)/);
   assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
   assert.match(settingsStoreSource, /getPlanExtractionEnabled\(\)/);
@@ -362,17 +362,30 @@ test("Symphony web POC is a feature-gated sibling surface, not merged into the A
   assert.match(appSource, /this\.symphonyWebPoc = new SymphonyWebPocRuntime/);
   assert.match(
     appSource,
-    /if \(this\.settingsStore\.getSymphonyWebPocEnabled\(\)\) \{[\s\S]*void this\.symphonyWebPoc\.start\(\);/,
+    /if \(this\.settingsStore\.getSymphonyWebPocEnabled\(\)\) \{[\s\S]*void this\.symphonyWebPoc\.start\(\);[\s\S]*try \{[\s\S]*await this\.server\.start\(\);/,
   );
   assert.match(
     appSource,
-    /ipcMain\.handle\("desktop:get-symphony-web-poc-status"[\s\S]*this\.symphonyWebPoc\.getStatus/,
+    /ipcMain\.handle\("desktop:get-symphony-web-poc-status"[\s\S]*if \(this\.isSymphonyWebPocEnabled\(\)\) \{[\s\S]*void this\.symphonyWebPoc\.start\(\);[\s\S]*this\.symphonyWebPoc\.getStatus/,
   );
   assert.match(preloadSource, /getSymphonyWebPocStatus/);
   assert.match(preloadSource, /restartSymphonyWebPoc/);
-  assert.match(indexHtml, /id="symphony-web" class="panel"/);
+  assert.match(indexHtml, /id="symphony-web" class="panel active"/);
+  assert.match(indexHtml, /class="app state-disconnected agent-view symphony-view"/);
+  assert.match(indexHtml, /let currentNavId = "symphony-web"/);
   assert.match(indexHtml, /id: "symphony-web"[\s\S]*kind: "symphony"/);
-  assert.match(indexHtml, /symphonyWebOnly/);
+  assert.match(indexHtml, /\.app\.symphony-view/);
+  assert.match(indexHtml, /id="desktopClassicFab"/);
+  assert.match(indexHtml, /appShell\.classList\.toggle\("symphony-view"/);
+  assert.match(indexHtml, /label: "Symphony Desktop"/);
+  assert.match(indexHtml, /class="desktop-classic-fab ds-button ds-button-outline"/);
+  assert.match(indexHtml, /"ds-progress"/);
+  assert.match(indexHtml, /"ds-skeleton"/);
+  assert.match(indexHtml, /"ds-badge"/);
+  assert.match(indexHtml, /"ds-alert destructive"/);
+  assert.match(indexHtml, /enableSymphonyWebPocForToggle/);
+  assert.match(indexHtml, /api\.updateSettings\(\{ symphonyWebPocEnabled: true \}\)/);
+  assert.doesNotMatch(indexHtml, /symphonyWebOnly/);
   assert.match(indexHtml, /startSymphonyWebPoc/);
   assert.match(indexHtml, /desktop_api_token/);
   assert.match(
@@ -381,7 +394,11 @@ test("Symphony web POC is a feature-gated sibling surface, not merged into the A
   );
   assert.match(appSource, /appDirCandidates: getSymphonyWebPocAppDirCandidates\(\)/);
   assert.match(appSource, /symphony-alpha\/apps\/app/);
-  assert.match(symphonyWebPocRuntimeSource, /"exec", "next", mode, "-p"/);
+  assert.match(symphonyWebPocRuntimeSource, /"exec", "next", mode/);
+  assert.match(symphonyWebPocRuntimeSource, /"--webpack"/);
+  assert.match(symphonyWebPocRuntimeSource, /AUTH_MODE: "local_trusted"/);
+  assert.match(symphonyWebPocRuntimeSource, /NEXT_PUBLIC_AUTH_MODE: "local_trusted"/);
+  assert.match(symphonyWebPocRuntimeSource, /NEXT_PUBLIC_DESKTOP_API_TOKEN: this\.apiToken/);
   assert.match(symphonyWebPocRuntimeSource, /\/closedloop-ai\/my-tasks/);
 });
 
@@ -419,8 +436,9 @@ test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
   );
   assert.match(
     preloadSource,
-    /getAgentMonitorUrl: \(\) =>[\s\S]*planExtractionEnabled: boolean;/,
+    /getAgentMonitorUrl: \(\) =>[\s\S]*planExtractionEnabled: boolean;[\s\S]*error: string \| null;/,
   );
+  assert.match(preloadSource, /restartAgentMonitor/);
   assert.match(
     preloadSource,
     /setAgentMonitorHooksEnabled:[\s\S]*ipcRenderer\.invoke\(\s*"desktop:set-agent-monitor-hooks-enabled"/,
@@ -508,11 +526,12 @@ test("shutdown sequence stops the sidecar before the server", () => {
   assert.ok(amIdx > 0 && srvIdx > 0 && amIdx < srvIdx, "agentMonitor.stop must precede server.stop");
 });
 
-test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it on the setting", () => {
+test("renderer wires Symphony Desktop as the default view and keeps Agent Dashboard gated", () => {
   // Agent nav items live in the left sidebar; hidden when the sidecar is off.
   assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
   assert.match(indexHtml, /agent-disabled/);
-  assert.match(indexHtml, /<section id="claude-dashboard" class="panel active">/);
+  assert.match(indexHtml, /<section id="claude-dashboard" class="panel">/);
+  assert.match(indexHtml, /<section id="symphony-web" class="panel active">/);
   // agentMonitorEnabled toggle moved to the Feature Flags panel (rendered via JS from the registry).
   assert.match(indexHtml, /id="featureFlagsList"/);
   assert.match(indexHtml, /function renderFeatureFlagsPanel/);
@@ -521,6 +540,8 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /id="claudeDashFrame"/);
   assert.match(indexHtml, /id="claudeDashStatus" class="dash-loading" aria-live="polite"/);
   assert.match(indexHtml, /api\.getAgentMonitorUrl\(\)/);
+  assert.match(indexHtml, /api\.restartAgentMonitor\(\)/);
+  assert.match(indexHtml, /renderDashError/);
   assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_plan_extraction",[\s\S]*r\.planExtractionEnabled \? "1" : "0"/);
   // Embed mode + host postMessage navigation.
   assert.match(indexHtml, /searchParams\.set\("embed", "1"\)/);
