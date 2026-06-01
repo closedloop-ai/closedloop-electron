@@ -19,6 +19,7 @@ export function WorkflowsView() {
   const { data, loading } = useQueryCache<WorkflowQueryData>(
     "db:workflows",
     () => window.desktopApi.db.getWorkflowData() as Promise<WorkflowQueryData>,
+    10_000, 15_000,
   );
 
   if (loading || !data) {

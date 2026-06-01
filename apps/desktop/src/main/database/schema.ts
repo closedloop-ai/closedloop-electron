@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 /**
  * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
@@ -67,5 +67,11 @@ CREATE TABLE IF NOT EXISTS token_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
+`,
+
+  // Version 1 → 2: add indexes for analytics query performance
+  `
+CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name) WHERE tool_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_session_tool ON events(session_id, rowid) WHERE tool_name IS NOT NULL;
 `,
 ];

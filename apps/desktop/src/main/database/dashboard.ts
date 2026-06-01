@@ -51,10 +51,10 @@ export function createDashboardQueries(db: DatabaseSync) {
     "SELECT event_type as eventType, COUNT(*) as count FROM events GROUP BY event_type ORDER BY count DESC",
   );
   const analyticsToolUsageStmt = db.prepare(
-    "SELECT tool_name as toolName, COUNT(*) as count FROM events WHERE tool_name IS NOT NULL GROUP BY tool_name ORDER BY count DESC LIMIT 20",
+    "SELECT tool_name as toolName, COUNT(*) as count FROM events WHERE tool_name IS NOT NULL AND created_at > datetime('now', '-30 days') GROUP BY tool_name ORDER BY count DESC LIMIT 20",
   );
   const analyticsDailyEventsStmt = db.prepare(
-    "SELECT DATE(created_at) as date, COUNT(*) as count FROM events WHERE created_at IS NOT NULL GROUP BY DATE(created_at) ORDER BY date ASC",
+    "SELECT DATE(created_at) as date, COUNT(*) as count FROM events WHERE created_at > datetime('now', '-365 days') GROUP BY DATE(created_at) ORDER BY date ASC",
   );
   const analyticsSessionsByStatusStmt = db.prepare(
     "SELECT status, COUNT(*) as count FROM sessions GROUP BY status",
@@ -108,11 +108,20 @@ export function createDashboardQueries(db: DatabaseSync) {
     GROUP BY source, target ORDER BY weight DESC LIMIT 50
   `);
   const wfToolTransitionsStmt = db.prepare(`
-    SELECT e1.tool_name as source, e2.tool_name as target, COUNT(*) as value
-    FROM events e1
-    JOIN events e2 ON e1.session_id = e2.session_id
-      AND e2.rowid = (SELECT MIN(e3.rowid) FROM events e3 WHERE e3.session_id = e1.session_id AND e3.rowid > e1.rowid AND e3.tool_name IS NOT NULL)
-    WHERE e1.tool_name IS NOT NULL AND e2.tool_name IS NOT NULL
+    WITH recent_tools AS (
+      SELECT tool_name, session_id, rowid
+      FROM events
+      WHERE tool_name IS NOT NULL
+        AND created_at > datetime('now', '-7 days')
+    ),
+    tool_seq AS (
+      SELECT tool_name,
+        LEAD(tool_name) OVER (PARTITION BY session_id ORDER BY rowid) as next_tool
+      FROM recent_tools
+    )
+    SELECT tool_name as source, next_tool as target, COUNT(*) as value
+    FROM tool_seq
+    WHERE next_tool IS NOT NULL
     GROUP BY source, target ORDER BY value DESC LIMIT 30
   `);
   const wfCooccurrenceStmt = db.prepare(`

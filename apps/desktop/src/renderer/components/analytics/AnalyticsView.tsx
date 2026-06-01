@@ -45,6 +45,7 @@ export function AnalyticsView() {
   const { data, loading } = useQueryCache<AnalyticsData>(
     "db:analytics",
     () => window.desktopApi.db.getAnalytics() as Promise<AnalyticsData>,
+    10_000, 15_000,
   );
 
   if (loading || !data) {
