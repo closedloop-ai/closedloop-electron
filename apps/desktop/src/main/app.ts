@@ -316,9 +316,7 @@ export class DesktopApplication {
         this.refreshTrayState();
       },
     });
-    this.agentMonitor.setSandboxBaseDirectory(
-      this.settingsStore.getSandboxBaseDirectory(),
-    );
+    this.agentMonitor.setSandboxBaseDirectory(this.getAgentMonitorSandboxBaseDirectory());
     this.symphonyWebPoc = new SymphonyWebPocRuntime({
       dataDir: path.join(app.getPath("userData"), "symphony-web-poc"),
       appDirCandidates: getSymphonyWebPocAppDirCandidates(),
@@ -1281,6 +1279,14 @@ export class DesktopApplication {
   private isSymphonyWebPocLaunchMode(): boolean {
     const value = process.env.CL_SYMPHONY_WEB_POC?.trim().toLowerCase();
     return value === "1" || value === "true";
+  }
+
+  private getAgentMonitorSandboxBaseDirectory(): string {
+    const configuredSandbox = this.settingsStore.getSandboxBaseDirectory();
+    if (configuredSandbox) {
+      return configuredSandbox;
+    }
+    return this.isSymphonyWebPocLaunchMode() ? os.homedir() : "";
   }
 
   private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {

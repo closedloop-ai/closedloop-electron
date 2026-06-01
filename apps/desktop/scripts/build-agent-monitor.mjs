@@ -924,14 +924,6 @@ function runStartupBackfills(dbModule, handles) {
 
 function startColdStartIngest(dbModule, signal) {
   try {
-    const { ingestAllHarnesses } = require("./agent-monitor-shared/ingest-orchestrator");
-    const { importAllSessions, backfillCompactions } = require("../scripts/import-history");
-    const harnesses = [
-      { key: "codex", importAll: require("./lib/codex-import").importAllCodexSessions },
-      { key: "cursor", importAll: require("./lib/cursor-import").importAllCursorSessions },
-      { key: "copilot", importAll: require("./lib/copilot-import").importAllCopilotSessions },
-      { key: "opencode", importAll: require("./lib/opencode-import").importAllOpenCodeSessions },
-    ];
     let existingCount = 0;
     try {
       existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;
@@ -944,6 +936,16 @@ function startColdStartIngest(dbModule, signal) {
       } catch {
         /* ignore */
       }
+    }
+    const { ingestAllHarnesses } = require("./agent-monitor-shared/ingest-orchestrator");
+    const { importAllSessions, backfillCompactions } = require("../scripts/import-history");
+    const harnesses = [
+      { key: "codex", importAll: require("./lib/codex-import").importAllCodexSessions },
+      { key: "cursor", importAll: require("./lib/cursor-import").importAllCursorSessions },
+      { key: "copilot", importAll: require("./lib/copilot-import").importAllCopilotSessions },
+      { key: "opencode", importAll: require("./lib/opencode-import").importAllOpenCodeSessions },
+    ];
+    if (existingCount === 0) {
       harnesses.unshift({
         key: "claude",
         importAll: async (db, opts) => {
