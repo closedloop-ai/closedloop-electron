@@ -8,9 +8,8 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: "dashboard", label: "My Tasks", icon: "dashboard", section: "agent" },
-  { id: "kanban", label: "Kanban Board", icon: "kanban", section: "agent" },
-  { id: "sessions", label: "Sessions", icon: "sessions", section: "agent" },
+  { id: "kanban", label: "My Tasks", icon: "kanban", section: "agent" },
+  { id: "dashboard", label: "Sessions", icon: "dashboard", section: "agent" },
   { id: "activity-feed", label: "Activity Feed", icon: "activity", section: "agent" },
   { id: "analytics", label: "Analytics", icon: "analytics", section: "agent" },
   { id: "workflows", label: "Agents", icon: "workflows", section: "agent" },

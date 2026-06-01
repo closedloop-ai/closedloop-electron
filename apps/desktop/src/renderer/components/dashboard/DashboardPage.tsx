@@ -56,7 +56,7 @@ export function DashboardPage() {
   return (
     <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-[var(--foreground)]">My Tasks</h1>
+        <h1 className="text-xl font-bold text-[var(--foreground)]">Sessions</h1>
         <p className="text-sm text-[var(--muted-foreground)]">
           Agent sessions and activity overview
         </p>

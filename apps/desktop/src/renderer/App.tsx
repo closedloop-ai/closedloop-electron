@@ -4,7 +4,6 @@ import { Topbar } from "./components/layout/Topbar";
 
 const DashboardPage = lazy(() => import("./components/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const SettingsPanel = lazy(() => import("./components/settings/SettingsPanel").then((m) => ({ default: m.SettingsPanel })));
-const SessionsView = lazy(() => import("./components/sessions/SessionsView").then((m) => ({ default: m.SessionsView })));
 const ActivityFeedView = lazy(() => import("./components/feed/ActivityFeedView").then((m) => ({ default: m.ActivityFeedView })));
 const AnalyticsView = lazy(() => import("./components/analytics/AnalyticsView").then((m) => ({ default: m.AnalyticsView })));
 const KanbanView = lazy(() => import("./components/kanban/KanbanView").then((m) => ({ default: m.KanbanView })));
@@ -16,7 +15,6 @@ const LogsPanel = lazy(() => import("./components/logs/LogsPanel").then((m) => (
 export type NavId =
   | "dashboard"
   | "kanban"
-  | "sessions"
   | "activity-feed"
   | "analytics"
   | "workflows"
@@ -62,8 +60,6 @@ export default function App() {
     switch (navId) {
       case "dashboard":
         return <DashboardPage />;
-      case "sessions":
-        return <SessionsView />;
       case "activity-feed":
         return <ActivityFeedView />;
       case "analytics":

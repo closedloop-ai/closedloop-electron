@@ -46,6 +46,7 @@ export function KanbanView() {
     <div className="p-6 h-full flex flex-col">
       <div className="mb-4">
         <h1 className="text-xl font-bold text-[var(--foreground)]">My Tasks</h1>
+
         <p className="text-sm text-[var(--muted-foreground)]">
           Sessions grouped by status
         </p>
