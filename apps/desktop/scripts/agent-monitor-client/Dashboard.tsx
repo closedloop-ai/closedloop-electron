@@ -57,6 +57,7 @@ import { AgentCard } from "../components/AgentCard";
 import { EmptyState } from "../components/EmptyState";
 import { Tip } from "../components/Tip";
 import { fmt, fmtCost, fmtCostFull, formatModelName } from "../lib/format";
+import { loadLedgerPrefs, type CostByLedger } from "../lib/closedloop-ledger";
 import type {
   Stats,
   Agent,
@@ -1447,6 +1448,12 @@ export function Dashboard() {
   // Analytics data (merged in from the upstream Analytics page).
   const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
   const [costData, setCostData] = useState<CostResult | null>(null);
+  // CLOSEDLOOP FEA-1434: opt-in display of the subscription "would have cost".
+  // Read once on mount from the localStorage pref written in Settings; the
+  // Settings/Dashboard routes unmount on navigation, so returning here re-reads
+  // the latest value. Default off — subscription cost is hypothetical and is
+  // never part of the billed headline regardless of this flag.
+  const [showHypotheticalCost] = useState(() => loadLedgerPrefs().showHypotheticalCost);
 
   const agentsContainerRef = useRef<HTMLDivElement>(null);
   const [visibleAgentCount, setVisibleAgentCount] = useState(5);
@@ -1669,6 +1676,24 @@ export function Dashboard() {
     .filter((b) => b.cost > 0)
     .sort((a, b) => b.cost - a.cost);
 
+  // CLOSEDLOOP FEA-1434 two-ledger headline. `costData.total_cost` is already
+  // the billed figure (metered + unknown) — the server excludes
+  // subscription-covered spend — so the Total Cost pill value stays the honest
+  // billed number. `cost_by_ledger.subscription` is the hypothetical "would
+  // have cost" of subscription sessions; it is surfaced in the pill subtitle
+  // ONLY when the user opts in via Settings, and is never added to the headline.
+  // The upstream CostResult type predates cost_by_ledger, so read it via cast.
+  const costByLedger = (costData as (CostResult & { cost_by_ledger?: CostByLedger }) | null)
+    ?.cost_by_ledger;
+  const subscriptionCost = costByLedger?.subscription ?? 0;
+  const modelCountSub = costData
+    ? `${costData.breakdown.length} model${costData.breakdown.length === 1 ? "" : "s"}`
+    : "No cost data yet";
+  const costPillSub =
+    showHypotheticalCost && subscriptionCost > 0
+      ? `${modelCountSub} · +${fmtCost(subscriptionCost)} subscription-covered`
+      : modelCountSub;
+
   const weekdayCosts = useMemo(() => {
     const weekdayOrder = [1, 2, 3, 4, 5, 6, 0];
     return weekdayOrder.map((dow) => {
@@ -1840,11 +1865,7 @@ export function Dashboard() {
               label="Total Cost"
               value={costData ? fmtCost(costData.total_cost) : "$0.00"}
               raw={costData ? fmtCostFull(costData.total_cost) : undefined}
-              sub={
-                costData
-                  ? `${costData.breakdown.length} model${costData.breakdown.length === 1 ? "" : "s"}`
-                  : "No cost data yet"
-              }
+              sub={costPillSub}
               icon={DollarSign}
               color="text-emerald-400"
               testid="audit-dashboard-monitor-total-cost"

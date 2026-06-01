@@ -21,6 +21,27 @@ const generatedImportHistoryUrl = new URL(
 const generatedImportHistorySource = existsSync(generatedImportHistoryUrl)
   ? readFileSync(generatedImportHistoryUrl, "utf8")
   : null;
+const generatedHooksRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/hooks.js",
+  import.meta.url,
+);
+const generatedHooksRouteSource = existsSync(generatedHooksRouteUrl)
+  ? readFileSync(generatedHooksRouteUrl, "utf8")
+  : null;
+const generatedPricingRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/pricing.js",
+  import.meta.url,
+);
+const generatedPricingRouteSource = existsSync(generatedPricingRouteUrl)
+  ? readFileSync(generatedPricingRouteUrl, "utf8")
+  : null;
+const generatedAnalyticsRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/analytics.js",
+  import.meta.url,
+);
+const generatedAnalyticsRouteSource = existsSync(generatedAnalyticsRouteUrl)
+  ? readFileSync(generatedAnalyticsRouteUrl, "utf8")
+  : null;
 // Resolve the pinned upstream agent-dashboard source the same way the build
 // script does (createRequire from apps/desktop/package.json) so we can assert
 // the build-script patch anchors still match the source they patch.
@@ -60,6 +81,14 @@ const hostFlagsSource = read(
   "../scripts/agent-monitor-plans/client/closedloop-host-flags.ts",
 );
 const sessionsOverlaySource = read("../scripts/agent-monitor-client/Sessions.tsx");
+const dashboardOverlaySource = read("../scripts/agent-monitor-client/Dashboard.tsx");
+const settingsOverlaySource = read("../scripts/agent-monitor-client/Settings.tsx");
+const statusBadgeOverlaySource = read(
+  "../scripts/agent-monitor-client/StatusBadge.tsx",
+);
+const ledgerHelperSource = read(
+  "../scripts/agent-monitor-client/lib/closedloop-ledger.ts",
+);
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
   scripts: Record<string, string>;
@@ -576,6 +605,213 @@ test("plans route filters in SQL and avoids shell-parsed Windows open commands",
   assert.doesNotMatch(plansRouteSource, /spawn\(cmd, \["\/c", "start"/);
 });
 
+test("billing-mode two-ledger support (FEA-1434) is wired into the generated build", () => {
+  // Build script declares the billing-mode engine module + its materialization,
+  // the billing_mode column migration, and the hard-gate messages so a future
+  // upstream bump that breaks an anchor fails the build rather than silently
+  // dropping the per-session billing dimension.
+  for (const needle of [
+    "agent-monitor-billing",
+    'BILLING_MODULES = ["billing-mode"]',
+    "ADD COLUMN billing_mode",
+    "setSessionBillingMode",
+    "idx_sessions_billing_mode",
+    "column migration (FEA-1434)",
+    "billing-mode engine, FEA-1434",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing billing-mode wiring: ${needle}`,
+    );
+  }
+
+  // The canonical engine + its CJS package scope live in-repo and are copied
+  // into the generated tree at materialize time.
+  assert.ok(
+    existsSync(
+      new URL(
+        "../scripts/agent-monitor-billing/billing-mode.js",
+        import.meta.url,
+      ),
+    ),
+    "scripts/agent-monitor-billing/billing-mode.js missing",
+  );
+  assert.ok(
+    existsSync(
+      new URL(
+        "../scripts/agent-monitor-billing/package.json",
+        import.meta.url,
+      ),
+    ),
+    "scripts/agent-monitor-billing/package.json missing",
+  );
+
+  // If a generated tree is present, the migration + statement + materialized
+  // engine must have survived patching.
+  if (generatedDbSource) {
+    assert.ok(
+      generatedDbSource.includes("ADD COLUMN billing_mode"),
+      "generated db.js missing billing_mode column migration",
+    );
+    assert.ok(
+      generatedDbSource.includes("setSessionBillingMode:"),
+      "generated db.js missing setSessionBillingMode statement",
+    );
+    assert.ok(
+      existsSync(
+        new URL(
+          "../.generated/agent-monitor/server/lib/billing-mode.js",
+          import.meta.url,
+        ),
+      ),
+      "generated server/lib/billing-mode.js missing",
+    );
+  }
+});
+
+test("billing_mode write paths (FEA-1434) stamp every harness", () => {
+  // The shared stamp helper delegates detection to the canonical engine and
+  // exposes the single write entry point used by both hooks and importers.
+  const billingStamp = read("../scripts/agent-monitor-shared/billing-stamp.js");
+  assert.match(billingStamp, /require\("\.\.\/lib\/billing-mode"\)/);
+  assert.match(billingStamp, /function stampSessionBillingMode/);
+
+  // Every non-Claude importer stamps its harness via the shared helper right
+  // after setSessionHarness, so the billing mode is set the moment a session is
+  // imported (before any token-usage rollups read it).
+  const importers: Array<[string, string]> = [
+    ["../scripts/agent-monitor-codex/codex-import.js", "codex"],
+    ["../scripts/agent-monitor-cursor/cursor-import.js", "cursor"],
+    ["../scripts/agent-monitor-copilot/copilot-import.js", "copilot"],
+    ["../scripts/agent-monitor-opencode/opencode-import.js", "opencode"],
+  ];
+  for (const [rel, harness] of importers) {
+    const src = read(rel);
+    assert.ok(
+      src.includes('require("../agent-monitor-shared/billing-stamp")'),
+      `${rel} missing billing-stamp require`,
+    );
+    assert.ok(
+      src.includes(
+        `stampSessionBillingMode(dbModule.stmts, "${harness}", session.sessionId)`,
+      ),
+      `${rel} missing ${harness} billing-mode stamp`,
+    );
+  }
+
+  // Build script wires the Claude hook-route stamp, lists the helper among the
+  // materialized shared modules, and hard-gates the generated output.
+  for (const needle of [
+    "function patchHooksBillingMode",
+    "patchHooksBillingMode(generatedHooksRoute)",
+    '"billing-stamp"',
+    "billing-mode stamp (FEA-1434)",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing billing write-path wiring: ${needle}`,
+    );
+  }
+
+  // If a generated tree is present, the Claude stamp + materialized helper
+  // must have survived patching/materialization.
+  if (generatedHooksRouteSource) {
+    assert.ok(
+      generatedHooksRouteSource.includes(
+        'stampSessionBillingMode(stmts, "claude", sessionId)',
+      ),
+      "generated server/routes/hooks.js missing Claude billing-mode stamp",
+    );
+    assert.ok(
+      existsSync(
+        new URL(
+          "../.generated/agent-monitor/server/agent-monitor-shared/billing-stamp.js",
+          import.meta.url,
+        ),
+      ),
+      "generated server/agent-monitor-shared/billing-stamp.js missing",
+    );
+  }
+});
+
+test("two-ledger cost aggregation (FEA-1434) is wired into both cost endpoints", () => {
+  // Build script defines + invokes the analytics patch and extends the pricing
+  // patch with the /cost ledger split. These needles guard the patch anchors so
+  // a future upstream refactor that breaks them fails the build, not silently
+  // ships an un-split headline.
+  for (const needle of [
+    "function patchAnalyticsRoute",
+    "patchAnalyticsRoute(generatedAnalyticsRoute)",
+    "CLOSEDLOOP FEA-1434 two-ledger headline",
+    "CLOSEDLOOP FEA-1434 cost-endpoint ledger split",
+    // The headline must be keyed off headlineCost (metered + unknown), never a
+    // raw sum that would leak subscription spend into real cost.
+    "headlineCost(ledgerTotals)",
+    "cost_by_ledger: ledgerTotals",
+    // Both generated-tree hard-gates must exist.
+    "two-ledger cost split on GET /api/pricing/cost (FEA-1434)",
+    "missing the two-ledger headline split (FEA-1434)",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing two-ledger cost wiring: ${needle}`,
+    );
+  }
+
+  // If a generated tree is present, both routes must carry the split: each
+  // requires the ledger engine, buckets by billing_mode via a LEFT JOIN, sets
+  // the headline from headlineCost, and exposes cost_by_ledger.
+  if (generatedAnalyticsRouteSource) {
+    assert.ok(
+      generatedAnalyticsRouteSource.includes('require("../lib/billing-mode")'),
+      "generated analytics.js missing billing-mode require",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("cost_by_ledger: ledgerTotals"),
+      "generated analytics.js missing cost_by_ledger",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("headlineCost(ledgerTotals)"),
+      "generated analytics.js missing headlineCost headline",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("LEFT JOIN sessions"),
+      "generated analytics.js missing billing_mode LEFT JOIN",
+    );
+    // The un-joined upstream scan must be gone — that's the bug we're fixing.
+    assert.ok(
+      !generatedAnalyticsRouteSource.includes(
+        'db.prepare("SELECT * FROM token_usage")',
+      ),
+      "generated analytics.js still uses the un-joined token_usage scan",
+    );
+  }
+  if (generatedPricingRouteSource) {
+    assert.ok(
+      generatedPricingRouteSource.includes('require("../lib/billing-mode")'),
+      "generated pricing.js missing billing-mode require",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes(
+        "CLOSEDLOOP FEA-1434 cost-endpoint ledger split",
+      ),
+      "generated pricing.js missing /cost ledger split",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("cost_by_ledger: ledgerTotals"),
+      "generated pricing.js missing cost_by_ledger",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("total_cost: headlineCost(ledgerTotals)"),
+      "generated pricing.js missing headlineCost headline on /cost",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("GROUP BY s.billing_mode, tu.model"),
+      "generated pricing.js missing billing_mode-grouped ledger query",
+    );
+  }
+});
+
 test("Codex support (Addition #4/#5/#6) is wired into the generated build", () => {
   // The new model patches the GENERATED tree (like Patches #1/#2/#3): the
   // build script injects the harness column, the Codex watcher/import wiring,
@@ -792,4 +1028,94 @@ test("Codex harness filter now uses server-backed pagination and rebuilds on sni
   assert.doesNotMatch(loadTopSnippet, /filter === "waiting" \|\| harness/);
   assert.match(loadRowsSnippet, /rows = rows\.filter\(isSessionAwaitingInput\);/);
   assert.doesNotMatch(loadRowsSnippet, /\(s\.harness \|\| "claude"\)/);
+});
+
+test("two-ledger client UI (FEA-1434 Slice 4b) is wired into the build and overlays", () => {
+  // 1. The shared ledger helper is delivered as a full-file overlay so the
+  //    StatusBadge/Sessions/Dashboard/Settings overlays can import it.
+  assert.match(
+    buildScriptSource,
+    /const clientOverlayLedgerSource = path\.join\(\s*clientOverlayDir,\s*"lib",\s*"closedloop-ledger\.ts"\s*\)/,
+  );
+  assert.match(
+    buildScriptSource,
+    /from: clientOverlayLedgerSource,[\s\S]*?to: path\.join\("src", "lib", "closedloop-ledger\.ts"\)/,
+  );
+
+  // 2. Latent cache-bust bug fix: currentStamp() must hash EVERY full-file
+  //    client overlay. Before the fix it omitted Dashboard/Settings (and the
+  //    new ledger helper), so editing only those left the cached generated tree
+  //    stale. Assert all three appear inside the currentStamp() hash list.
+  const stampMatch = buildScriptSource.match(
+    /function currentStamp\(\)\s*\{[\s\S]*?\n\}/,
+  );
+  assert.ok(stampMatch, "currentStamp() function not found in build script");
+  const stampBody = stampMatch[0];
+  for (const overlayConst of [
+    "clientOverlayStatusBadgeSource",
+    "clientOverlaySessionsSource",
+    "clientOverlayDashboardSource",
+    "clientOverlaySettingsSource",
+    "clientOverlayLedgerSource",
+  ]) {
+    assert.ok(
+      stampBody.includes(overlayConst),
+      `currentStamp() must hash ${overlayConst} so editing that overlay busts the build cache`,
+    );
+  }
+
+  // 3. The Session type gains billing_mode via a declarative edit anchored on
+  //    the harness line the prior edit adds (additive optional field).
+  assert.match(
+    buildScriptSource,
+    /guard: "billing_mode\?: string \| null",\s*find: "  harness\?: string \| null;",\s*replace: "  harness\?: string \| null;\\n  billing_mode\?: string \| null;",/,
+  );
+
+  // 4. Shared helper: presentation-only classification + prefs, NO cost math.
+  assert.match(ledgerHelperSource, /export function isSubscriptionMode/);
+  assert.match(ledgerHelperSource, /export function subscriptionBadgeLabel/);
+  assert.match(ledgerHelperSource, /export interface CostByLedger/);
+  assert.match(ledgerHelperSource, /LEDGER_PREFS_KEY = "agent-monitor-ledger"/);
+  assert.match(ledgerHelperSource, /showHypotheticalCost: boolean/);
+  // The helper must never recompute dollars — cost math is server-side only.
+  assert.doesNotMatch(ledgerHelperSource, /calcPrice|computeTokenCost|total_price/);
+
+  // 5. StatusBadge overlay exports a BillingBadge that renders ONLY for
+  //    subscription sessions (no fabricated quota %).
+  assert.match(statusBadgeOverlaySource, /export function BillingBadge/);
+  assert.match(
+    statusBadgeOverlaySource,
+    /if \(!isSubscriptionMode\(billing_mode\)\) return null;/,
+  );
+
+  // 6. Sessions overlay renders the badge from the session's billing_mode.
+  assert.match(
+    sessionsOverlaySource,
+    /<BillingBadge billing_mode=\{session\.billing_mode\} \/>/,
+  );
+
+  // 7. Dashboard reads cost_by_ledger + the opt-in pref, but the headline value
+  //    stays the billed total_cost — the subscription hypothetical only ever
+  //    appears in the pill subtitle, never summed into the headline.
+  assert.match(dashboardOverlaySource, /loadLedgerPrefs\(\)\.showHypotheticalCost/);
+  assert.match(dashboardOverlaySource, /cost_by_ledger\?: CostByLedger/);
+  assert.match(
+    dashboardOverlaySource,
+    /const subscriptionCost = costByLedger\?\.subscription \?\? 0;/,
+  );
+  assert.match(dashboardOverlaySource, /sub=\{costPillSub\}/);
+  // The pill VALUE must remain total_cost (billed), never the subscription sum.
+  assert.match(
+    dashboardOverlaySource,
+    /value=\{costData \? fmtCost\(costData\.total_cost\) : "\$0\.00"\}/,
+  );
+
+  // 8. Settings persists the opt-in toggle through the shared helper.
+  assert.match(settingsOverlaySource, /loadLedgerPrefs,/);
+  assert.match(settingsOverlaySource, /saveLedgerPrefs,/);
+  assert.match(settingsOverlaySource, /"ledger\.showHypothetical"/);
+  assert.match(
+    settingsOverlaySource,
+    /onChange=\{\(v\) => updateLedgerPrefs\(\{ showHypotheticalCost: v \}\)\}/,
+  );
 });

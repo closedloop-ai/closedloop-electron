@@ -11,6 +11,7 @@ const { getOpenCodeHome, getOpenCodeDbWatchFiles } = require("./opencode-home");
 const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 const { ingestStateDir } = require("../agent-monitor-shared/ingest-paths");
+const { stampSessionBillingMode } = require("../agent-monitor-shared/billing-stamp");
 
 // See FEA-1316: skip the full DB load when neither opencode.db nor its
 // WAL/SHM siblings have changed since the last catchup tick. FEA-1334
@@ -58,6 +59,8 @@ function importOpenCodeSession(dbModule, session) {
   try {
     dbModule.stmts.setSessionHarness.run("opencode", session.sessionId, "opencode");
   } catch { /* non-fatal */ }
+  // FEA-1434: stamp the billing mode (idempotent + best-effort internally).
+  stampSessionBillingMode(dbModule.stmts, "opencode", session.sessionId);
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

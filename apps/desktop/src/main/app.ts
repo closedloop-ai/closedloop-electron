@@ -67,7 +67,25 @@ import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch }
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
-import { AgentSessionSyncService } from "./agent-session-sync-service.js";
+import {
+  AgentSessionSyncService,
+  resolveAgentMonitorDatabasePath,
+} from "./agent-session-sync-service.js";
+import {
+  createAnthropicAdminKeyStore,
+  createOpenAiAdminKeyStore,
+  type AdminKeyVendor,
+} from "./admin-key-store.js";
+import {
+  ReconciliationStore,
+  type ReconciliationQuery,
+} from "./reconciliation-store.js";
+import {
+  loadMeteredUsageRowsFromDisk,
+  reconciliationCutoffIso,
+} from "./reconciliation-worker.js";
+import { CostReconciliationService } from "./cost-reconciliation-service.js";
+import { ClaudeCodeAnalyticsService } from "./claude-code-analytics-service.js";
 import {
   isAgentMonitorHooksEnabled,
   setAgentMonitorHooksEnabled,
@@ -189,6 +207,73 @@ type ManagedOnboardingState = {
   recoveryActions?: Array<"retry_automated_onboarding" | "use_manual_setup" | "choose_sandbox">;
 };
 
+const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Runtime-validate an IPC vendor argument to a known AdminKeyVendor. */
+function parseAdminKeyVendor(value: unknown): AdminKeyVendor {
+  if (value === "anthropic" || value === "openai") {
+    return value;
+  }
+  throw new Error("Admin key vendor must be 'anthropic' or 'openai'");
+}
+
+/** Runtime-validate the {vendor, key} payload for desktop:set-admin-key. */
+function parseSetAdminKeyPayload(value: unknown): {
+  vendor: AdminKeyVendor;
+  key: string;
+} {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("set-admin-key payload must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const vendor = parseAdminKeyVendor(record.vendor);
+  if (typeof record.key !== "string") {
+    throw new Error("Admin key must be a string");
+  }
+  return { vendor, key: record.key };
+}
+
+/**
+ * Runtime-validate an optional reconciliation list query from IPC. Unknown
+ * fields are dropped; malformed values are ignored rather than throwing so the
+ * diagnostics view degrades to "all rows" instead of erroring.
+ */
+function parseReconciliationQuery(value: unknown): ReconciliationQuery | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const query: ReconciliationQuery = {};
+  if (typeof record.from === "string" && ISO_DAY_RE.test(record.from)) {
+    query.from = record.from;
+  }
+  if (typeof record.to === "string" && ISO_DAY_RE.test(record.to)) {
+    query.to = record.to;
+  }
+  if (record.vendor === "anthropic" || record.vendor === "openai") {
+    query.vendor = record.vendor;
+  }
+  return Object.keys(query).length > 0 ? query : undefined;
+}
+
+/**
+ * Extract the Claude Code analytics query from an untrusted IPC payload. Only a
+ * numeric `windowDays` is read; the service clamps it to a sane range, so any
+ * other shape becomes `undefined` (the service then uses its default window).
+ */
+function parseClaudeCodeAnalyticsQuery(
+  value: unknown,
+): { windowDays?: number } | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.windowDays === "number" && Number.isFinite(record.windowDays)) {
+    return { windowDays: record.windowDays };
+  }
+  return undefined;
+}
+
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
   private readonly apiKeyStore: ApiKeyStore;
@@ -205,6 +290,8 @@ export class DesktopApplication {
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly agentMonitor: AgentMonitorSidecar;
   private readonly agentSessionSync: AgentSessionSyncService;
+  private readonly costReconciliation: CostReconciliationService;
+  private readonly claudeCodeAnalytics: ClaudeCodeAnalyticsService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
@@ -576,6 +663,35 @@ export class DesktopApplication {
         Observability.agentSessionSyncBatchFailed(event);
       },
     });
+    // FEA-1435/1436: nightly cost reconciliation lives entirely in main. It owns
+    // the org-level vendor Admin key stores (safeStorage, never exposed to the
+    // sidecar or renderer) and the reconciliation store, and reconciles the local
+    // genai-prices estimate (read from dashboard.db READ-ONLY) against what each
+    // vendor actually billed. loadUsageRows re-opens the live DB each run, scoped
+    // to the recent window, and returns [] when the sidecar has not created it.
+    // One Anthropic Admin key store, shared by reconciliation (compares the local
+    // estimate against the billed cost_report) and Claude Code analytics (reads
+    // Anthropic's own per-user usage estimate). Sharing the store means a key
+    // saved once powers both, and there is a single owner of the key material.
+    const anthropicKeyStore = createAnthropicAdminKeyStore();
+    this.costReconciliation = new CostReconciliationService({
+      anthropicKeyStore,
+      openaiKeyStore: createOpenAiAdminKeyStore(),
+      store: new ReconciliationStore(),
+      loadUsageRows: () =>
+        loadMeteredUsageRowsFromDisk(
+          resolveAgentMonitorDatabasePath(app.getPath("userData")),
+          reconciliationCutoffIso(new Date()),
+        ),
+      log: (message) => gatewayLog.info("cost-reconciliation", message),
+    });
+    // FEA-1436: Claude Code per-user usage view. Read-only, main-only, and uses
+    // the SAME Anthropic Admin key as reconciliation. The estimate it returns is
+    // Anthropic's own — it never overrides the local genai-prices ledger.
+    this.claudeCodeAnalytics = new ClaudeCodeAnalyticsService({
+      anthropicKeyStore,
+      log: (message) => gatewayLog.info("claude-code-analytics", message),
+    });
     this.recovery = new GatewayRecoveryManager({
       probe: () => this.probeGatewayAlive(),
       restart: () => this.server.restart(),
@@ -670,6 +786,11 @@ export class DesktopApplication {
       syncAgentMonitorHooksOnBoot();
       this.agentSessionSync.start();
     }
+
+    // FEA-1435/1436: schedule nightly cost reconciliation. Independent of the
+    // Agent Monitor toggle — the scheduled tick no-ops unless a vendor Admin key
+    // is configured, and loadUsageRows returns [] when there is no dashboard.db.
+    this.costReconciliation.start();
 
     try {
       await this.server.start();
@@ -1731,6 +1852,7 @@ export class DesktopApplication {
     this.queueStatsTelemetryDebounce.cancel();
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
+    this.costReconciliation.stop();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -2941,6 +3063,33 @@ export class DesktopApplication {
       this.restartCloudSocket();
       return this.apiKeyStore.getStatus();
     });
+    // FEA-1435/1436: vendor Admin key intake + cost reconciliation. These handlers
+    // delegate to the main-only CostReconciliationService. Only existence-only
+    // statuses, persisted drift rows, and key-free run summaries cross IPC — the
+    // Admin key material itself never does. The vendor and query inputs are
+    // runtime-validated here before use (IPC payloads are untrusted).
+    ipcMain.handle("desktop:get-admin-key-statuses", () =>
+      this.costReconciliation.getAdminKeyStatuses(),
+    );
+    ipcMain.handle("desktop:set-admin-key", (_event, payload: unknown) => {
+      const { vendor, key } = parseSetAdminKeyPayload(payload);
+      return this.costReconciliation.setAdminKey(vendor, key);
+    });
+    ipcMain.handle("desktop:clear-admin-key", (_event, vendor: unknown) =>
+      this.costReconciliation.clearAdminKey(parseAdminKeyVendor(vendor)),
+    );
+    ipcMain.handle("desktop:run-cost-reconciliation", () =>
+      this.costReconciliation.runReconciliationNow(),
+    );
+    ipcMain.handle("desktop:list-cost-reconciliation", (_event, query: unknown) =>
+      this.costReconciliation.listRows(parseReconciliationQuery(query)),
+    );
+    // FEA-1436: Claude Code per-user usage (Anthropic's own estimate). Read-only;
+    // uses the same Anthropic Admin key. The query is runtime-validated (untrusted
+    // IPC) and the result carries no key material — only per-actor usage rows.
+    ipcMain.handle("desktop:get-claude-code-analytics", (_event, query: unknown) =>
+      this.claudeCodeAnalytics.fetchAnalytics(parseClaudeCodeAnalyticsQuery(query)),
+    );
     ipcMain.handle(
       "desktop:get-cloud-commands-paused",
       () => this.cloudCommandsPaused,

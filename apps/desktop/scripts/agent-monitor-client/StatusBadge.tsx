@@ -6,6 +6,10 @@
 import { useTranslation } from "react-i18next";
 import { STATUS_CONFIG, SESSION_STATUS_CONFIG } from "../lib/types";
 import type { EffectiveAgentStatus, EffectiveSessionStatus } from "../lib/types";
+import {
+  isSubscriptionMode,
+  subscriptionBadgeLabel,
+} from "../lib/closedloop-ledger";
 
 interface AgentStatusBadgeProps {
   status: EffectiveAgentStatus;
@@ -76,4 +80,24 @@ export function HarnessBadge({ harness }: { harness?: string | null }) {
     cls: "bg-violet-500/10 text-violet-300 border border-violet-500/20",
   };
   return <span className={`badge ${cls}`}>{label}</span>;
+}
+
+// CLOSEDLOOP FEA-1434: per-session billing signal. Renders ONLY for
+// subscription-covered sessions (Claude Pro/Max, Codex, Cursor Pro, Copilot
+// seat) — the honest quota signal asked for by PRD-414. There is no fabricated
+// quota percentage: existence-only detection cannot resolve a $100-vs-$200 tier
+// or remaining quota, so we surface the billing mode itself plus a tooltip
+// explaining the spend is subscription-covered (not billed per token). Metered
+// and unknown sessions get no badge — their real cost already shows in the cost
+// cell. Classification is presentation-only (see lib/closedloop-ledger.ts).
+export function BillingBadge({ billing_mode }: { billing_mode?: string | null }) {
+  if (!isSubscriptionMode(billing_mode)) return null;
+  return (
+    <span
+      className="badge bg-teal-500/10 text-teal-300 border border-teal-500/20"
+      title="Subscription-covered usage — priced as a hypothetical “would have cost” and excluded from the billed total."
+    >
+      {subscriptionBadgeLabel(billing_mode)}
+    </span>
+  );
 }

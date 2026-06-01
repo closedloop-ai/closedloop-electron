@@ -22,6 +22,9 @@ import {
   type LaunchMetadata,
 } from "../server/operations/symphony-utils.js";
 import { expandHomePath } from "../shared/path-utils.js";
+import { computeTokenCost } from "../shared/token-cost.js";
+import type { BillingMode } from "../shared/billing-mode.js";
+import { resolveBillingMode } from "./billing-mode-detector.js";
 
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
@@ -58,6 +61,7 @@ type SessionRow = {
   awaiting_input_since: string | null;
   metadata: string | null;
   harness: string | null;
+  billing_mode: string | null;
 };
 
 type AgentRow = {
@@ -95,14 +99,6 @@ type TokenUsageRow = {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
-};
-
-type PricingRow = {
-  model_pattern: string;
-  input_per_mtok: number;
-  output_per_mtok: number;
-  cache_read_per_mtok: number;
-  cache_write_per_mtok: number;
 };
 
 export type SessionAttributionResolverCache = {
@@ -732,7 +728,8 @@ export function loadSyncedSessions(
         ended_at,
         awaiting_input_since,
         metadata,
-        harness
+        harness,
+        billing_mode
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -796,20 +793,6 @@ export function loadSyncedSessions(
     `,
     ids,
   );
-  const pricingRows = db
-    .prepare(
-      `
-        SELECT
-          model_pattern,
-          input_per_mtok,
-          output_per_mtok,
-          cache_read_per_mtok,
-          cache_write_per_mtok
-        FROM model_pricing
-        ORDER BY LENGTH(model_pattern) DESC, model_pattern ASC
-      `,
-    )
-    .all() as PricingRow[];
 
   const sessionsById = new Map(sessionRows.map((row) => [row.id, row]));
   const agentsBySessionId = groupRowsBySessionId(agentRows);
@@ -825,14 +808,19 @@ export function loadSyncedSessions(
     const attribution = resolveSessionAttribution(row.cwd, cache);
     const tokenUsageByModel: SyncedAgentSessionTokenUsage[] = (
       tokenUsageBySessionId.get(id) ?? []
-    ).map((tokenRow) => ({
-      model: tokenRow.model,
-      inputTokens: tokenRow.input_tokens,
-      outputTokens: tokenRow.output_tokens,
-      cacheReadTokens: tokenRow.cache_read_tokens,
-      cacheWriteTokens: tokenRow.cache_write_tokens,
-      estimatedCostUsd: estimateTokenUsageCostUsd(tokenRow, pricingRows),
-    }));
+    ).map((tokenRow) => {
+      const estimatedCostUsd = estimateTokenUsageCostUsd(tokenRow);
+      return {
+        model: tokenRow.model,
+        inputTokens: tokenRow.input_tokens,
+        outputTokens: tokenRow.output_tokens,
+        cacheReadTokens: tokenRow.cache_read_tokens,
+        cacheWriteTokens: tokenRow.cache_write_tokens,
+        // Omit entirely when the model is not priced — the contract field is
+        // optional, so an absent value renders as "—" rather than a silent $0.
+        ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
+      };
+    });
 
     return [
       {
@@ -840,6 +828,7 @@ export function loadSyncedSessions(
         name: row.name,
         status: row.status,
         harness: row.harness,
+        billingMode: resolveBillingModeForRow(row),
         cwd: row.cwd,
         model: row.model,
         startedAt: row.started_at,
@@ -878,24 +867,39 @@ export function loadSyncedSessions(
   });
 }
 
+/**
+ * Estimate the USD cost for one token-usage row using the canonical
+ * genai-prices engine (`src/shared/token-cost.ts`). Returns `undefined` when
+ * the model is not priced so the caller can omit the optional contract field
+ * (no silent $0). Library prices are returned UNCHANGED — no local rounding,
+ * clamping, or override (the override pipeline was the source of the v1
+ * overcharge bugs; see token-cost.ts).
+ */
 export function estimateTokenUsageCostUsd(
   tokenUsage: TokenUsageRow,
-  pricingRows: PricingRow[],
-): number {
-  const pricing = pricingRows.find((row) =>
-    sqliteLikeMatch(tokenUsage.model, row.model_pattern),
-  );
-  if (!pricing) {
-    return 0;
-  }
+): number | undefined {
+  const result = computeTokenCost({
+    model: tokenUsage.model,
+    inputTokens: tokenUsage.input_tokens,
+    outputTokens: tokenUsage.output_tokens,
+    cacheReadTokens: tokenUsage.cache_read_tokens,
+    cacheWriteTokens: tokenUsage.cache_write_tokens,
+  });
+  return result.priced && result.costUsd != null ? result.costUsd : undefined;
+}
 
-  return roundUsd(
-    (tokenUsage.input_tokens * pricing.input_per_mtok +
-      tokenUsage.output_tokens * pricing.output_per_mtok +
-      tokenUsage.cache_read_tokens * pricing.cache_read_per_mtok +
-      tokenUsage.cache_write_tokens * pricing.cache_write_per_mtok) /
-      1_000_000,
-  );
+/**
+ * Resolve a session's billing mode for the sync payload (CLOSEDLOOP FEA-1434).
+ * The sidecar importers and the Claude session route stamp the real mode at
+ * ingest; this fills the gap for legacy rows (migrated to the default
+ * 'unknown') by best-effort detecting from the live desktop environment. A
+ * stored, definite mode always wins over re-detection.
+ */
+export function resolveBillingModeForRow(row: SessionRow): BillingMode {
+  return resolveBillingMode({
+    billingMode: row.billing_mode,
+    harness: row.harness,
+  });
 }
 
 function selectRowsByIds<T>(
@@ -1052,19 +1056,6 @@ function toSyncJsonValue(value: unknown): SyncJsonValue | null {
 
 function isSyncJsonObject(value: SyncJsonValue | null): value is SyncJsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function sqliteLikeMatch(value: string, pattern: string): boolean {
-  const escaped = pattern.replaceAll(/([.+^${}()|[\]\\])/g, "\\$1");
-  const regex = new RegExp(
-    `^${escaped.replaceAll("%", ".*").replaceAll("_", ".")}$`,
-    "i",
-  );
-  return regex.test(value);
-}
-
-function roundUsd(value: number): number {
-  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 function formatBytes(bytes: number): string {

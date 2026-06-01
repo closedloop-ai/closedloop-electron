@@ -45,6 +45,23 @@ const desktopApi = {
   setApiKey: (apiKey: string) =>
     ipcRenderer.invoke("desktop:set-api-key", apiKey) as Promise<unknown>,
   clearApiKey: () => ipcRenderer.invoke("desktop:clear-api-key") as Promise<unknown>,
+  // FEA-1435/1436: vendor Admin key intake + cost reconciliation. The bridge only
+  // ever moves existence-only statuses, persisted drift rows, and key-free run
+  // summaries — never the Admin key material itself (main-process only).
+  getAdminKeyStatuses: () =>
+    ipcRenderer.invoke("desktop:get-admin-key-statuses") as Promise<unknown>,
+  setAdminKey: (vendor: string, key: string) =>
+    ipcRenderer.invoke("desktop:set-admin-key", { vendor, key }) as Promise<unknown>,
+  clearAdminKey: (vendor: string) =>
+    ipcRenderer.invoke("desktop:clear-admin-key", vendor) as Promise<unknown>,
+  runCostReconciliation: () =>
+    ipcRenderer.invoke("desktop:run-cost-reconciliation") as Promise<unknown>,
+  listCostReconciliation: (query?: unknown) =>
+    ipcRenderer.invoke("desktop:list-cost-reconciliation", query) as Promise<unknown>,
+  // FEA-1436: Claude Code per-user usage (Anthropic's own estimate). Returns
+  // per-actor usage rows only — never any Admin key material.
+  getClaudeCodeAnalytics: (query?: unknown) =>
+    ipcRenderer.invoke("desktop:get-claude-code-analytics", query) as Promise<unknown>,
   getCloudCommandsPaused: () =>
     ipcRenderer.invoke("desktop:get-cloud-commands-paused") as Promise<unknown>,
   setCloudCommandsPaused: (paused: boolean) =>

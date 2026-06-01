@@ -10,6 +10,7 @@ const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
 const { ingestCachePath } = require("../agent-monitor-shared/ingest-paths");
+const { stampSessionBillingMode } = require("../agent-monitor-shared/billing-stamp");
 
 // Skip chat/CLI files unchanged since the last tick (FEA-1316); the persisted
 // backing files additionally let a fresh process skip unchanged files on the
@@ -22,6 +23,8 @@ function importCopilotSession(dbModule, session) {
   try {
     dbModule.stmts.setSessionHarness.run("copilot", session.sessionId, "copilot");
   } catch { /* non-fatal */ }
+  // FEA-1434: stamp the billing mode (idempotent + best-effort internally).
+  stampSessionBillingMode(dbModule.stmts, "copilot", session.sessionId);
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

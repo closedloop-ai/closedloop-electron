@@ -13,6 +13,9 @@ importers:
       '@closedloop-ai/loops-api':
         specifier: 0.2.11
         version: 0.2.11(zod@4.3.6)
+      '@pydantic/genai-prices':
+        specifier: 0.0.62
+        version: 0.0.62
       agent-dashboard:
         specifier: github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40
         version: https://codeload.github.com/hoangsonww/Claude-Code-Agent-Monitor/tar.gz/840c518d7fa69231de049e41b893938228b67e40
@@ -650,6 +653,11 @@ packages:
   '@playwright/test@1.60.0':
     resolution: {integrity: sha512-O71yZIbAh/PxDMNGns37GHBIfrVkEVyn+AXyIa5dOTfb4/xNvRWV+Vv/NMbNCtODB/pO7vLlF2OTmMVLhmr7Ag==}
     engines: {node: '>=18'}
+    hasBin: true
+
+  '@pydantic/genai-prices@0.0.62':
+    resolution: {integrity: sha512-n7pX9Xkrt8Hx+ztUU1qXdFTv2DYyiK3PwuWyIZiYpPWvCkKkb2c+oENmF+/iLitbNWQNANAhBs9aSKOg36obzQ==}
+    engines: {node: '>=20'}
     hasBin: true
 
   '@remix-run/router@1.23.2':
@@ -3830,6 +3838,10 @@ snapshots:
   '@playwright/test@1.60.0':
     dependencies:
       playwright: 1.60.0
+
+  '@pydantic/genai-prices@0.0.62':
+    dependencies:
+      yargs: 17.7.2
 
   '@remix-run/router@1.23.2': {}
 
