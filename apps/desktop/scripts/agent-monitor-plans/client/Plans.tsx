@@ -166,6 +166,7 @@ export function Plans() {
               return (
                 <button
                   key={p.id}
+                  data-testid="audit-plan-row"
                   onClick={() => setSelectedId(p.id)}
                   className={`block w-full text-left rounded-lg border px-3 py-2 transition-colors ${
                     active

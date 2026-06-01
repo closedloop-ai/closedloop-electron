@@ -191,7 +191,7 @@ export function Sessions() {
                 </span>
               )}
             </div>
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-gray-500" data-testid="audit-sessions-list-total">
               {t("sessionCount", { count: total })}
               {filter ? ` ${filter}` : ""}
             </p>

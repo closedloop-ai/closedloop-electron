@@ -125,6 +125,7 @@ export function Tools() {
               return (
                 <button
                   key={t.tool_name}
+                  data-testid="audit-tool-row"
                   onClick={() => setSelected(t.tool_name)}
                   className={`block w-full text-left rounded-lg border px-3 py-2 transition-colors ${
                     active

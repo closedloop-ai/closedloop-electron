@@ -145,6 +145,7 @@ export function Skills() {
                     return (
                       <button
                         key={s.skill_id}
+                        data-testid="audit-skill-row"
                         onClick={() => setSelected(s)}
                         className={`block w-full text-left rounded-lg border px-3 py-2 transition-colors ${
                           active
