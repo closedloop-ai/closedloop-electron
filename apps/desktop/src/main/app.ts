@@ -1278,6 +1278,11 @@ export class DesktopApplication {
     return this.settingsStore.getSymphonyWebPocEnabled();
   }
 
+  private isSymphonyWebPocLaunchMode(): boolean {
+    const value = process.env.CL_SYMPHONY_WEB_POC?.trim().toLowerCase();
+    return value === "1" || value === "true";
+  }
+
   private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {
     this.tray.setAgentMonitorEnabled(enabled);
 
@@ -2119,12 +2124,15 @@ export class DesktopApplication {
     managedProvisioning: ManagedOnboardingState;
   } {
     const settings = this.settingsStore.getAll();
-    return {
-      completed: isDesktopSetupCompleteFromState({
+    const completed =
+      this.isSymphonyWebPocLaunchMode() ||
+      isDesktopSetupCompleteFromState({
         onboardingCompleted: settings.onboardingCompleted,
         sandboxBaseDirectory: settings.sandboxBaseDirectory,
         hasApiKey: this.apiKeyStore.getStatus().hasApiKey,
-      }),
+      });
+    return {
+      completed,
       settings: {
         ...settings,
         sandboxBaseDirectory:

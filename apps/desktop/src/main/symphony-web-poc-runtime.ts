@@ -2664,7 +2664,10 @@ export class SymphonyWebPocRuntime {
   private setCorsHeaders(request: IncomingMessage, response: ServerResponse): boolean {
     const origin = request.headers.origin;
     response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
-    response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    response.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, X-Organization-Id",
+    );
     response.setHeader("Vary", "Origin");
     if (typeof origin !== "string" || origin.length === 0) {
       return true;
