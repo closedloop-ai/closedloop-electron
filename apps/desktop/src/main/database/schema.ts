@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 /**
  * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
@@ -73,5 +73,14 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
   `
 CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name) WHERE tool_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_session_tool ON events(session_id, created_at) WHERE tool_name IS NOT NULL;
+`,
+
+  // Version 2 → 3: covering indexes for aggregate queries on large tables
+  `
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_tool_created ON events(created_at, tool_name) WHERE tool_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+CREATE INDEX IF NOT EXISTS idx_agents_type ON agents(type);
+CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id) WHERE parent_agent_id IS NOT NULL;
 `,
 ];

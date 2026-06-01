@@ -1,36 +1,24 @@
-import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
 import { RankedBar } from "@closedloop-ai/design-system/components/ui/primitives/ranked-bar";
 import { MonitorDot, Bot, Zap, Layers } from "lucide-react";
+import { useQueryCache } from "../../hooks/useQueryCache";
 import type { DashboardSummary, AnalyticsData } from "../../main/database/types";
 
 export function DashboardPage() {
-  const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-    const load = () => {
-      Promise.all([
-        window.desktopApi.db.getDashboardSummary(),
-        window.desktopApi.db.getAnalytics(),
-      ])
-        .then(([summaryData, analyticsData]) => {
-          if (mounted) {
-            setSummary(summaryData as DashboardSummary);
-            setAnalytics(analyticsData as AnalyticsData);
-            setError(false);
-          }
-        })
-        .catch(() => { if (mounted) setError(true); });
-    };
-    load();
-    const interval = setInterval(load, 3000);
-    return () => { mounted = false; clearInterval(interval); };
-  }, []);
+  // Summary is cheap (49ms) — fetch eagerly with short TTL
+  const { data: summary, error } = useQueryCache<DashboardSummary>(
+    "db:summary",
+    () => window.desktopApi.db.getDashboardSummary() as Promise<DashboardSummary>,
+    3_000, 5_000,
+  );
+  // Analytics is expensive (4s+) — fetch lazily with long TTL
+  const { data: analytics } = useQueryCache<AnalyticsData>(
+    "db:analytics",
+    () => window.desktopApi.db.getAnalytics() as Promise<AnalyticsData>,
+    30_000, 60_000,
+  );
 
   if (error) {
     return (

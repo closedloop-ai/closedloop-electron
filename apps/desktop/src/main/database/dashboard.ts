@@ -51,7 +51,7 @@ export function createDashboardQueries(db: DatabaseSync) {
     "SELECT event_type as eventType, COUNT(*) as count FROM events GROUP BY event_type ORDER BY count DESC",
   );
   const analyticsToolUsageStmt = db.prepare(
-    "SELECT tool_name as toolName, COUNT(*) as count FROM events WHERE tool_name IS NOT NULL AND created_at > datetime('now', '-30 days') GROUP BY tool_name ORDER BY count DESC LIMIT 20",
+    "SELECT tool_name as toolName, COUNT(*) as count FROM events WHERE created_at > datetime('now', '-30 days') AND tool_name IS NOT NULL GROUP BY tool_name ORDER BY count DESC LIMIT 20",
   );
   const analyticsDailyEventsStmt = db.prepare(
     "SELECT DATE(created_at) as date, COUNT(*) as count FROM events WHERE created_at > datetime('now', '-365 days') GROUP BY DATE(created_at) ORDER BY date ASC",
