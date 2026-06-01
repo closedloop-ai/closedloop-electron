@@ -129,7 +129,20 @@ const desktopApi = {
     ipcRenderer.invoke(
       "desktop:set-agent-monitor-hooks-enabled",
       enabled,
-    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>
+    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>,
+  db: {
+    getSessions: () => ipcRenderer.invoke("desktop:db:get-sessions") as Promise<unknown>,
+    getSession: (id: string) => ipcRenderer.invoke("desktop:db:get-session", id) as Promise<unknown>,
+    getAgents: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agents", sessionId) as Promise<unknown>,
+    getEvents: (sessionId: string, agentId?: string) => ipcRenderer.invoke("desktop:db:get-events", sessionId, agentId) as Promise<unknown>,
+    getDashboardSummary: () => ipcRenderer.invoke("desktop:db:get-dashboard-summary") as Promise<unknown>,
+    getSessionsWithDetails: () => ipcRenderer.invoke("desktop:db:get-sessions-with-details") as Promise<unknown>,
+    getEventFeed: () => ipcRenderer.invoke("desktop:db:get-event-feed") as Promise<unknown>,
+    getEventsWithSession: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-events-with-session", sessionId) as Promise<unknown>,
+    getEventCountByType: () => ipcRenderer.invoke("desktop:db:get-event-count-by-type") as Promise<unknown>,
+    getTokenAnalytics: () => ipcRenderer.invoke("desktop:db:get-token-analytics") as Promise<unknown>,
+    getAgentHierarchy: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agent-hierarchy", sessionId) as Promise<unknown>,
+  }
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

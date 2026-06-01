@@ -1,4 +1,4 @@
-import { app, nativeTheme } from "electron";
+import { app, nativeTheme, protocol } from "electron";
 import { DesktopApplication } from "./app.js";
 import { handleActivateEvent } from "./app-lifecycle.js";
 import { handleUncaughtException, handleUnhandledRejection } from "./error-handlers.js";
@@ -26,6 +26,13 @@ process.on("unhandledRejection", (reason) =>
     exit: (code) => app.exit(code),
   })
 );
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "app",
+    privileges: { standard: true, secure: true, supportFetchAPI: true },
+  },
+]);
 
 const desktopApplication = new DesktopApplication();
 
