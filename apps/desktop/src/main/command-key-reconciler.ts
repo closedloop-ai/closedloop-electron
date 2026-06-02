@@ -1,16 +1,24 @@
 import type {
   CommandKeyReconciliationResult,
+  ReconcileOrganizationKeysOptions,
   RegisteredOrganizationCommandKey,
 } from "./authorized-command-key-store.js";
 import type { OrganizationCommandPublicKey } from "./authorized-public-keys-client.js";
+import type {
+  CommandKeyReconciliationReason,
+  OrganizationCommandKeyClassification,
+} from "./command-key-target-context.js";
 
 export const COMMAND_KEY_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 
 type CommandKeyReconcilerOptions = {
   hasApiKey: () => boolean;
-  fetchOrganizationKeys: () => Promise<OrganizationCommandPublicKey[]>;
+  fetchOrganizationKeyClassification: (
+    reason: CommandKeyReconciliationReason,
+  ) => Promise<OrganizationCommandKeyClassification>;
   reconcileOrganizationKeys: (
     registeredKeys: Iterable<RegisteredOrganizationCommandKey>,
+    options?: ReconcileOrganizationKeysOptions,
   ) => CommandKeyReconciliationResult;
   notifyPendingKeys?: (
     organizationKeys: OrganizationCommandPublicKey[],
@@ -59,7 +67,7 @@ export class CommandKeyReconciler {
     this.timer = null;
   }
 
-  async reconcileNow(reason: "hello_ack" | "periodic" | "manual"): Promise<void> {
+  async reconcileNow(reason: CommandKeyReconciliationReason): Promise<void> {
     if (this.inFlight) {
       this.options.log(
         "debug",
@@ -77,12 +85,25 @@ export class CommandKeyReconciler {
 
     this.inFlight = true;
     try {
-      const organizationKeys = await this.options.fetchOrganizationKeys();
+      const classification =
+        await this.options.fetchOrganizationKeyClassification(reason);
+      this.options.log(
+        "info",
+        `Classified browser command keys (${reason}): kind=${classification.kind}, mode=${classification.reconciliationMode}, fetched=${classification.diagnostics.fetchedCount}, relevant=${classification.diagnostics.relevantCount}, ignored=${classification.diagnostics.ignoredCount}, legacy=${classification.diagnostics.legacyCount}, invalid=${classification.diagnostics.invalidContextCount}, mismatched=${classification.diagnostics.mismatchedContextCount}, activeTarget=${classification.diagnostics.activeComputeTargetId ?? "none"}, activeGateway=${classification.diagnostics.activeGatewayPresent}`,
+      );
+
+      if (classification.reconciliationMode === "skip") {
+        return;
+      }
+
       const reconciliation = this.options.reconcileOrganizationKeys(
-        organizationKeys.map((key) => ({
+        classification.relevantKeys.map((key) => ({
           fingerprint: key.fingerprint,
           ...(key.id ? { sourceUserPublicKeyId: key.id } : {}),
         })),
+        {
+          removeStale: classification.reconciliationMode === "full",
+        },
       );
       const changed =
         reconciliation.removed.length > 0 || reconciliation.promoted.length > 0;
@@ -93,7 +114,7 @@ export class CommandKeyReconciler {
         );
         this.options.onChanged();
       }
-      await this.notifyPendingKeys(organizationKeys, reason);
+      await this.notifyPendingKeys(classification.notificationKeys, reason);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "failed to fetch public keys";
@@ -108,7 +129,7 @@ export class CommandKeyReconciler {
 
   private async notifyPendingKeys(
     organizationKeys: OrganizationCommandPublicKey[],
-    reason: "hello_ack" | "periodic" | "manual",
+    reason: CommandKeyReconciliationReason,
   ): Promise<void> {
     if (!this.options.notifyPendingKeys) {
       return;

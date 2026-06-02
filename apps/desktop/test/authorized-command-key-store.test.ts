@@ -260,6 +260,44 @@ test("AuthorizedCommandKeyStore promotes legacy unknown org keys during reconcil
   ]);
 });
 
+test("AuthorizedCommandKeyStore can promote without removing stale org keys", () => {
+  const cwd = makeTempDir();
+  const keys = {
+    legacyUnknown: makeStoredKey({ ownerName: "Legacy Unknown" }),
+    staleOrg: makeStoredKey({ ownerName: "Stale Org", source: "org" }),
+  };
+  writeFileSync(
+    path.join(cwd, "authorized_keys.json"),
+    JSON.stringify({
+      version: 1,
+      keys: [keys.legacyUnknown, keys.staleOrg],
+      rejectedFingerprints: [],
+    }),
+  );
+  const store = new AuthorizedCommandKeyStore({ cwd });
+
+  const result = store.reconcileOrganizationKeys(
+    [
+      {
+        fingerprint: keys.legacyUnknown.fingerprint,
+        sourceUserPublicKeyId: "api-public-key-1",
+      },
+    ],
+    { removeStale: false },
+  );
+
+  assert.deepEqual(result.removed, []);
+  assert.deepEqual(
+    result.promoted.map((key) => [key.fingerprint, key.source]),
+    [[keys.legacyUnknown.fingerprint, "org"]],
+  );
+  const byFingerprint = new Map(
+    store.list().map((key) => [key.fingerprint, key]),
+  );
+  assert.equal(byFingerprint.get(keys.legacyUnknown.fingerprint)?.source, "org");
+  assert.equal(byFingerprint.get(keys.staleOrg.fingerprint)?.source, "org");
+});
+
 function makeTempDir(): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "authorized-keys-"));
   tempDirs.push(dir);
