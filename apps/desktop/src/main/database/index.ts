@@ -36,8 +36,22 @@ function runMigrations(db: DatabaseSync): void {
     if (!migration) {
       throw new Error(`Missing migration for version ${v} → ${v + 1}`);
     }
-    db.exec(migration);
-    db.exec(`PRAGMA user_version = ${v + 1}`);
+    // Apply the migration DDL and the user_version bump atomically so a crash
+    // mid-migration rolls back both — the next boot then re-runs the step
+    // cleanly instead of finding a half-applied schema at the old version.
+    db.exec("BEGIN");
+    try {
+      db.exec(migration);
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* ignore rollback failure */
+      }
+      throw error;
+    }
   }
 }
 

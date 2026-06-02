@@ -137,9 +137,19 @@ function copyAgents(vendor: DatabaseSync, conn: DatabaseSync): number {
         started_at, updated_at, ended_at, awaiting_input_since, parent_agent_id, metadata)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  // The new schema enforces a FK to sessions(id) with foreign_keys=ON, and the
+  // vendor `agents` table has no such FK — so it can hold rows whose session was
+  // pruned. INSERT OR IGNORE does NOT swallow a FK-constraint failure (it
+  // throws), which would abort the whole migration, so explicitly skip orphans
+  // by checking against the sessions just imported.
+  const validSessionIds = new Set(
+    (conn.prepare("SELECT id FROM sessions").all() as { id: string }[]).map((row) => row.id),
+  );
   let copied = 0;
   for (const r of rows) {
-    // The new schema enforces a FK to sessions(id); skip orphaned agent rows.
+    if (!validSessionIds.has(r.session_id as string)) {
+      continue;
+    }
     insert.run(
       r.id as string,
       r.session_id as string,

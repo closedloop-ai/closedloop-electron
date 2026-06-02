@@ -453,8 +453,11 @@ export function createLifecycle(db: DatabaseSync, deps: LifecycleDeps) {
         }
       }
       const now = nowFn();
-      db.exec("BEGIN IMMEDIATE");
       try {
+        // BEGIN is inside the try so that a stale open transaction (e.g. a prior
+        // ROLLBACK that itself failed) surfaces here and is rolled back below,
+        // letting the next event recover, rather than escaping processEvent.
+        db.exec("BEGIN IMMEDIATE");
         handle(hookType, data, sessionId, harness, now);
         if (transcript) {
           applyTranscript(sessionId, transcript, now);

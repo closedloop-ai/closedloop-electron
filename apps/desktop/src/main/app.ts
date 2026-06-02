@@ -834,7 +834,8 @@ export class DesktopApplication {
 
     // FEA-1435/1436: schedule nightly cost reconciliation. Independent of the
     // Agent Monitor toggle — the scheduled tick no-ops unless a vendor Admin key
-    // is configured, and loadUsageRows returns [] when there is no dashboard.db.
+    // is configured, and loadUsageRows returns [] when the shared in-process DB
+    // has no metered rows in the window.
     this.costReconciliation.start();
 
     try {
@@ -1933,13 +1934,14 @@ export class DesktopApplication {
     this.clearActiveCommandKeyTargetContext("shutdown");
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
-    // Stop the in-process listener before closing the shared DB connection so a
-    // late hook POST cannot hit a closed database. stop() is idempotent, so the
-    // shutdown sequence below (which also stops it before server.stop) is a
-    // no-op second call.
+    // Stop every reader of the shared connection BEFORE closing it: the relay
+    // (above), the in-process listener (so a late hook POST cannot hit a closed
+    // DB), and the cost-reconciliation timers. stop() on the listener is
+    // idempotent, so the shutdown sequence below (which also stops it before
+    // server.stop) is a no-op second call. Close the connection last.
     await this.agentHookListener.stop();
-    this.agentDatabase.close();
     this.costReconciliation.stop();
+    this.agentDatabase.close();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,

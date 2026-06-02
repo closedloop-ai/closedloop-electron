@@ -86,6 +86,33 @@ test("boot migration imports vendor dashboard.db (baseline->effective) and renam
   }
 });
 
+test("boot migration skips orphaned vendor agents without aborting the import", () => {
+  const ws = makeWorkspace();
+  try {
+    seedVendorDb(ws.vendorPath);
+    // The vendor agents table has no FK, so it can hold a row whose session was
+    // pruned. The new schema's FK (foreign_keys=ON) must not abort the migration.
+    const v = new DatabaseSync(ws.vendorPath);
+    v.prepare(
+      `INSERT INTO agents (id, session_id, name, type, status, started_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run("ghost", "missing-session", "ghost", "subagent", "completed", "2026-05-20T10:00:00Z", "2026-05-20T10:05:00Z");
+    v.close();
+
+    const db = openAgentDatabase(path.join(ws.userData, "agent-dashboard.sqlite"));
+    const result = migrateVendorDashboardDb(ws.userData, db);
+    assert.equal(result.migrated, true, "migration completes despite the orphan");
+    assert.equal(result.sessions, 1);
+    assert.equal(result.agents, 1, "only the valid agent imported; orphan skipped");
+    assert.equal(db.agents.getBySession("vend-1").length, 1);
+    assert.ok(db.sessions.getById("vend-1"), "valid session still imported");
+    assert.equal(existsSync(ws.vendorPath + ".migrated"), true, "renamed even with an orphan present");
+    db.close();
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test("boot migration is idempotent: a second run no-ops once renamed", () => {
   const ws = makeWorkspace();
   try {

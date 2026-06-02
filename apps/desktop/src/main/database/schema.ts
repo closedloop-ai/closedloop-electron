@@ -96,7 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id) WHERE pa
   `
 DROP TABLE IF EXISTS token_usage;
 
-CREATE TABLE token_usage (
+CREATE TABLE IF NOT EXISTS token_usage (
   session_id TEXT NOT NULL,
   model TEXT NOT NULL,
   input_tokens INTEGER NOT NULL DEFAULT 0,
