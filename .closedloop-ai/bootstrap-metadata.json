@@ -1,0 +1,258 @@
+{
+  "bootstrap_version": "0.1.0",
+  "last_run": "2026-06-02T14:36:19Z",
+  "agents": {
+    "test-strategist": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "testing",
+      "specialization": {
+        "technologies": [
+          "node:test",
+          "tsx",
+          "Playwright",
+          "Electron",
+          "Zod"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "typescript-expert": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "language",
+      "specialization": {
+        "technologies": [
+          "TypeScript",
+          "JavaScript",
+          "Zod",
+          "Electron",
+          "NodeNext ESM",
+          "electron-store"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "gateway-auth-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "security",
+      "specialization": {
+        "technologies": [
+          "Electron",
+          "TypeScript",
+          "Zod",
+          "electron-store",
+          "electron-log"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "command-signing-expert": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "security",
+      "specialization": {
+        "technologies": [
+          "electron-store",
+          "Zod",
+          "HMAC-SHA256",
+          "command-signing-policy",
+          "authorized-command-key-store",
+          "command-signature-verifier"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "electron-build-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "devops",
+      "specialization": {
+        "technologies": [
+          "tsc",
+          "Vite 6.x",
+          "electron-builder",
+          "build-agent-monitor.mjs",
+          "stage-packaging-app.mjs",
+          "node:sqlite",
+          "pnpm",
+          "asar-external"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "database-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "data-persistence",
+      "specialization": {
+        "technologies": [
+          "node:sqlite",
+          "electron-store",
+          "electron-builder",
+          "asar-external",
+          "zod"
+        ],
+        "complexity": "medium"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "observability-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "analytics",
+      "specialization": {
+        "technologies": [
+          "electron-log",
+          "gatewayLog",
+          "agent-monitor sidecar",
+          "agent-dashboard",
+          "desktop-analytics-relay",
+          "telemetry-service",
+          "@pydantic/genai-prices",
+          "Datadog MCP",
+          "Zod",
+          "socket.io-client"
+        ],
+        "complexity": "medium"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "realtime-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "realtime",
+      "specialization": {
+        "technologies": [
+          "socket.io-client",
+          "fs.watch",
+          "fs.watchFile",
+          "postMessage",
+          "SSE",
+          "NDJSON",
+          "Electron",
+          "zod"
+        ],
+        "complexity": "medium"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "caching-strategist": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "caching",
+      "specialization": {
+        "technologies": [
+          "plugin-cache.ts",
+          "agent-monitor-catchup-cache",
+          "build-info.ts",
+          "electron-store",
+          "gatewayLog"
+        ],
+        "complexity": "low"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "analytics-integration-expert": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "analytics",
+      "specialization": {
+        "technologies": [
+          "telemetry-service",
+          "loop-perf-telemetry",
+          "desktop-analytics-relay",
+          "@pydantic/genai-prices",
+          "socket.io-client",
+          "node:sqlite",
+          "agent-dashboard",
+          "Zod",
+          "electron-log"
+        ],
+        "complexity": "medium"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "security-privacy": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "security",
+      "specialization": {
+        "technologies": [
+          "Electron",
+          "TypeScript",
+          "Zod",
+          "electron-store",
+          "safeStorage",
+          "electron-log"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "gateway-operations-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "api-backend",
+      "specialization": {
+        "technologies": [
+          "Express-style router",
+          "Zod 4.x",
+          "NDJSON",
+          "electron-store"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "cloud-relay-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "api-backend",
+      "specialization": {
+        "technologies": [
+          "socket.io-client v4",
+          "@closedloop-ai/loops-api",
+          "NDJSON streaming"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "ci-release-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "devops",
+      "specialization": {
+        "technologies": [
+          "GitHub Actions",
+          "electron-updater",
+          "pnpm supply-chain hardening"
+        ],
+        "complexity": "high"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "authorization-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "security",
+      "specialization": {
+        "technologies": [
+          "isPathAllowed sandbox",
+          "origin validation",
+          "SSRF outbound policy"
+        ],
+        "complexity": "medium"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    },
+    "frontend-architect": {
+      "generated": "2026-06-02T14:36:19Z",
+      "domain": "frontend",
+      "specialization": {
+        "technologies": [
+          "Electron renderer",
+          "React",
+          "Vite 6.x",
+          "Tailwind 3.4",
+          "iframe postMessage"
+        ],
+        "complexity": "medium"
+      },
+      "generation_hash": "97a9e7e7afc1183d"
+    }
+  },
+  "pre_existing_agents": []
+}
