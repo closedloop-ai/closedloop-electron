@@ -17,6 +17,7 @@ const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
 const { ingestCachePath } = require("../agent-monitor-shared/ingest-paths");
+const { stampSessionBillingMode } = require("../agent-monitor-shared/billing-stamp");
 
 // Cache of (path, mtime, size) for rollout files already parsed and imported.
 // The catchup poll runs every 5 s and would otherwise re-parse every file on
@@ -38,6 +39,8 @@ function importCodexSession(dbModule, session) {
   } catch {
     /* non-fatal — column/stmt guaranteed by db.js Patch #4 */
   }
+  // FEA-1434: stamp the billing mode (idempotent + best-effort internally).
+  stampSessionBillingMode(dbModule.stmts, "codex", session.sessionId);
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

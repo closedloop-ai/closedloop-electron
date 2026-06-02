@@ -25,6 +25,7 @@ import {
   flushAgentSessionSync,
   insertTestSessionRow as insertSessionRow,
 } from "./helpers/agent-session-sync-test-utils.js";
+import { computeTokenCost } from "../src/shared/token-cost.js";
 
 test("agent-session sync loads normalized session payloads with attribution and cost", () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-"));
@@ -68,7 +69,8 @@ test("agent-session sync loads normalized session payloads with attribution and 
       ended_at TEXT,
       awaiting_input_since TEXT,
       metadata TEXT,
-      harness TEXT NOT NULL
+      harness TEXT NOT NULL,
+      billing_mode TEXT NOT NULL DEFAULT 'unknown'
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -120,8 +122,8 @@ test("agent-session sync loads normalized session payloads with attribution and 
   db.prepare(`
     INSERT INTO sessions (
       id, name, status, cwd, model, started_at, updated_at, ended_at,
-      awaiting_input_since, metadata, harness
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      awaiting_input_since, metadata, harness, billing_mode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     "sess-1",
     "Sync monitor test",
@@ -134,6 +136,7 @@ test("agent-session sync loads normalized session payloads with attribution and 
     "2026-05-20T12:04:00.000Z",
     JSON.stringify({ imported: true, source: "codex" }),
     "codex",
+    "codex_subscription",
   );
 
   db.prepare(`
@@ -181,19 +184,17 @@ test("agent-session sync loads normalized session payloads with attribution and 
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run("sess-1", "gpt-4.1", 1000, 500, 250, 100, 25, 10, 5, 0);
 
-  db.prepare(`
-    INSERT INTO model_pricing (
-      model_pattern, input_per_mtok, output_per_mtok, cache_read_per_mtok,
-      cache_write_per_mtok
-    ) VALUES (?, ?, ?, ?, ?)
-  `).run("gpt-4.1%", 2, 8, 0.5, 1);
-
+  // No model_pricing INSERT: cost is now derived from @pydantic/genai-prices,
+  // not the (legacy, no-longer-read) model_pricing table.
   const sessions = loadSyncedSessions(db, ["sess-1"]);
   assert.equal(sessions.length, 1);
 
   const session = sessions[0];
   assert.equal(session.externalSessionId, "sess-1");
   assert.equal(session.harness, "codex");
+  // FEA-1434: a stored, definite billing mode propagates unchanged (no
+  // re-detection from the live environment).
+  assert.equal(session.billingMode, "codex_subscription");
   assert.equal(session.awaitingInputSince, "2026-05-20T12:04:00.000Z");
   assert.deepEqual(session.metadata, { imported: true, source: "codex" });
   assert.deepEqual(session.attribution, {
@@ -212,7 +213,52 @@ test("agent-session sync loads normalized session payloads with attribution and 
   assert.equal(session.tokenUsageByModel[0].outputTokens, 510);
   assert.equal(session.tokenUsageByModel[0].cacheReadTokens, 255);
   assert.equal(session.tokenUsageByModel[0].cacheWriteTokens, 100);
-  assert.equal(session.tokenUsageByModel[0].estimatedCostUsd, 0.006358);
+  // Cost is computed by genai-prices via the canonical engine. Assert the load
+  // path fed it the correctly baseline-summed, provider-normalized counts
+  // (gpt-4.1 is OpenAI → input passes through as the total, cache is a subset)
+  // rather than hard-coding a library-version-dependent dollar figure.
+  const expectedCost = computeTokenCost({
+    model: "gpt-4.1",
+    inputTokens: 1025,
+    outputTokens: 510,
+    cacheReadTokens: 255,
+    cacheWriteTokens: 100,
+  });
+  assert.equal(expectedCost.priced, true);
+  assert.equal(
+    session.tokenUsageByModel[0].estimatedCostUsd,
+    expectedCost.costUsd,
+  );
+
+  db.close();
+});
+
+test("agent-session sync falls back to live detection for legacy unknown billing_mode", () => {
+  // A row migrated to the default 'unknown' billing_mode (legacy / unstamped)
+  // should be resolved from the live desktop environment at sync time. Control
+  // the env deterministically so the assertion does not depend on the test
+  // machine's real credentials.
+  const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-bm-"));
+  const db = createServiceTestDatabase(rootDir);
+  insertSessionRow(db, {
+    id: "legacy-1",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "claude",
+  });
+
+  const prev = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-ant-test-detection-only";
+  try {
+    const [session] = loadSyncedSessions(db, ["legacy-1"]);
+    assert.equal(session.billingMode, "api");
+  } finally {
+    if (prev === undefined) {
+      delete process.env.ANTHROPIC_API_KEY;
+    } else {
+      process.env.ANTHROPIC_API_KEY = prev;
+    }
+  }
 
   db.close();
 });
@@ -419,20 +465,19 @@ test("agent-session sync throttles repeated incremental full-session syncs", asy
   }
 });
 
-test("agent-session sync cost estimator falls back to zero without pricing", () => {
+test("agent-session sync cost estimator returns undefined for an unpriced model", () => {
+  // An unknown model is not priced by genai-prices → undefined, so the caller
+  // omits the optional estimatedCostUsd field (renders as "—", not a silent $0).
   assert.equal(
-    estimateTokenUsageCostUsd(
-      {
-        session_id: "sess-1",
-        model: "unknown-model",
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_read_tokens: 25,
-        cache_write_tokens: 10,
-      },
-      [],
-    ),
-    0,
+    estimateTokenUsageCostUsd({
+      session_id: "sess-1",
+      model: "unknown-model",
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_tokens: 25,
+      cache_write_tokens: 10,
+    }),
+    undefined,
   );
 });
 

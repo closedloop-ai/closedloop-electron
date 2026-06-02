@@ -129,15 +129,15 @@ export function PullRequests() {
       {/* Summary — the at-a-glance counts (mirrors the Dashboard tile). */}
       <div className="mb-4 grid grid-cols-3 gap-3">
         {[
-          { label: "Pull Requests", value: stats?.pull_requests },
-          { label: "Sessions w/ PRs", value: stats?.sessions_with_pull_requests },
-          { label: "Repositories", value: stats?.repos },
+          { label: "Pull Requests", value: stats?.pull_requests, testid: "audit-pr-stats-pull-requests" },
+          { label: "Sessions w/ PRs", value: stats?.sessions_with_pull_requests, testid: "audit-pr-stats-sessions-with-pr" },
+          { label: "Repositories", value: stats?.repos, testid: "audit-pr-stats-repos" },
         ].map((s) => (
           <div
             key={s.label}
             className="rounded-lg border border-border bg-surface-2 px-4 py-3"
           >
-            <div className="text-2xl font-semibold text-gray-100">
+            <div className="text-2xl font-semibold text-gray-100" data-testid={s.testid}>
               {s.value ?? "—"}
             </div>
             <div className="text-[11px] uppercase tracking-wide text-gray-500">

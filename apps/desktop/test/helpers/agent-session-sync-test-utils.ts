@@ -42,7 +42,8 @@ export function createAgentMonitorTestDatabase(rootDir: string): DatabaseSync {
       ended_at TEXT,
       awaiting_input_since TEXT,
       metadata TEXT,
-      harness TEXT NOT NULL
+      harness TEXT NOT NULL,
+      billing_mode TEXT NOT NULL DEFAULT 'unknown'
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -107,13 +108,14 @@ export function insertTestSessionRow(
     status?: string;
     harness?: string;
     cwd?: string | null;
+    billingMode?: string;
   },
 ): void {
   db.prepare(`
     INSERT INTO sessions (
       id, name, status, cwd, model, started_at, updated_at, ended_at,
-      awaiting_input_since, metadata, harness
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      awaiting_input_since, metadata, harness, billing_mode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     session.id,
     session.id,
@@ -126,6 +128,7 @@ export function insertTestSessionRow(
     null,
     null,
     session.harness ?? "claude",
+    session.billingMode ?? "unknown",
   );
 }
 

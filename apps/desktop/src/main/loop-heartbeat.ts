@@ -1,4 +1,4 @@
-import { postLoopHeartbeat } from "../server/operations/loop-http.js";
+import { persistRevivalToken, postLoopHeartbeat } from "../server/operations/loop-http.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type { LoopTokenMeta } from "./loop-token-store.js";
 import { parseEnvMs, type LoopSchedulerDeps } from "./loop-lifecycle.js";
@@ -132,21 +132,11 @@ export async function runHeartbeatTick(
   );
 
   if (result.success) {
-    const { loopTokenStore } = deps;
-    if (
-      result.revived === true &&
-      result.token !== undefined &&
-      loopTokenStore !== undefined
-    ) {
+    if (persistRevivalToken(deps.loopTokenStore, loopId, result)) {
       gatewayLog.info(
         "loop-heartbeat",
         `Loop revived for loopId=${loopId}; adopting new runner token`,
       );
-      loopTokenStore.setLoopToken(loopId, {
-        token: result.token,
-        jti: result.jti,
-        expiresAt: result.expiresAt !== undefined ? result.expiresAt.getTime() : undefined,
-      });
     } else {
       gatewayLog.info(
         "loop-heartbeat",

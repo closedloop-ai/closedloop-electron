@@ -27,6 +27,7 @@
     "pretest:audit": "pnpm build:agent-monitor && pnpm audit:scan && pnpm audit:classify",
     "audit:scan": "node test-e2e/agent-monitor/inventory/scan-tiles.mjs",
     "audit:classify": "node test-e2e/agent-monitor/inventory/coverage-classifier.mjs",
+    "audit:coverage": "bash scripts/check-audit-coverage.sh",
     "test:audit": "node --test \"test-e2e/agent-monitor/specs/audit/*.test.mjs\"",
     "pretest:audit:ui": "pnpm build:agent-monitor",
     "test:audit:ui": "playwright test --config test-e2e/agent-monitor/playwright.audit.config.ts",
@@ -37,6 +38,7 @@
   },
   "dependencies": {
     "@closedloop-ai/loops-api": "0.2.11",
+    "@pydantic/genai-prices": "0.0.62",
     "agent-dashboard": "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
     "busboy": "^1.6.0",
     "electron-log": "^5.4.3",
