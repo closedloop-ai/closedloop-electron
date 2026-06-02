@@ -19,6 +19,7 @@ import { registerGitActionRoutes } from "./operations/git-action.js";
 import { registerGitBranchesRoutes } from "./operations/git-branches.js";
 import { registerGitBranchWorktreeRoutes } from "./operations/git-branch-worktree.js";
 import { registerGitDiffRoutes } from "./operations/git-diff.js";
+import { registerGitLocalChangesRoutes } from "./operations/git-local-changes.js";
 import { registerGitPrRoutes } from "./operations/git-pr.js";
 import { registerGitRepoPathRoutes } from "./operations/git-repo-path.js";
 import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
@@ -52,6 +53,7 @@ import { registerChatSessionRoutes } from "./operations/chat-session.js";
 import { ClaudeProvider, CodexProvider, ProviderRegistry } from "./operations/chat-providers.js";
 import { ProcessManager } from "./process-manager.js";
 import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
+import { registerUpdateAndRestartRoutes } from "./operations/update-and-restart.js";
 
 export interface GatewayRouterOptions {
   webAppOrigin: string;
@@ -89,6 +91,9 @@ export interface GatewayRouterOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>;
+  applyUpdate?: () => Promise<void>;
+  isUpdateAndRestartEnabled?: () => boolean;
 }
 
 export interface GatewayActivityEvent {
@@ -202,6 +207,11 @@ export class GatewayRouter {
       this.options.getAllowedDirectories
     );
     registerGitBranchWorktreeRoutes(this.operationDispatcher, getSymphonyDir);
+    registerGitLocalChangesRoutes(
+      this.operationDispatcher,
+      this.processManager,
+      this.options.getAllowedDirectories
+    );
     registerGitDiffRoutes(
       this.operationDispatcher,
       this.processManager,
@@ -260,7 +270,15 @@ export class GatewayRouter {
       this.options.worktreeProvider,
       this.options.loopTokenStore,
       getSymphonyDir,
-      this.options.getBinaryPaths
+      this.options.getBinaryPaths,
+      // Pass PoP deps unconditionally — buildManagedDesktopPopHeaders degrades
+      // gracefully when provenance is not DESKTOP_MANAGED or signer is absent.
+      {
+        getApiKey: this.options.getApiKey,
+        getApiKeyProvenance: this.options.getApiKeyProvenance,
+        signDesktopRequest: this.options.signDesktopRequest,
+        onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
+      }
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
@@ -314,6 +332,13 @@ export class GatewayRouter {
       providerRegistry,
       this.options.getGatewayId
     );
+    if (this.options.checkForUpdate && this.options.applyUpdate && this.options.isUpdateAndRestartEnabled) {
+      registerUpdateAndRestartRoutes(this.operationDispatcher, {
+        isUpdateAndRestartEnabled: this.options.isUpdateAndRestartEnabled,
+        checkForUpdate: this.options.checkForUpdate,
+        applyUpdate: this.options.applyUpdate,
+      });
+    }
     registerSecurityUpgradeRoutes(this.operationDispatcher, {
       getGatewayId: this.options.getGatewayId,
       getComputeTargetId: this.options.getComputeTargetId,

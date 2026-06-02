@@ -15,3 +15,15 @@ dist-dmg/
 
 # Generated agent-monitor runtime tree
 apps/desktop/.generated/
+.gstack/
+
+# Playwright test artifacts (apps/desktop/test-e2e)
+apps/desktop/test-results/
+apps/desktop/playwright-report/
+
+# UI Numbers Audit generated reports (FEA-1415 / PLN-738)
+# These embed a timestamp; regenerate locally via `pnpm --filter desktop audit:report`
+# or `node apps/desktop/test-e2e/agent-monitor/inventory/scan-tiles.mjs`.
+apps/desktop/test-e2e/agent-monitor/inventory/REPORT-*.md
+apps/desktop/test-e2e/agent-monitor/inventory/INVENTORY-DRAFT.md
+apps/desktop/test-e2e/agent-monitor/inventory/manifest.scanned.json

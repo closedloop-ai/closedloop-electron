@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { shouldAutoApprove, OPERATION_RISK_TIERS, riskTierOrder } from "../src/main/approval-policy.js";
+import { shouldAutoApprove, OPERATION_RISK_TIERS, riskTierOrder, FORCE_INTERACTIVE_OPERATIONS } from "../src/main/approval-policy.js";
 import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "../src/main/approval-operations.js";
 import {
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
@@ -46,6 +47,36 @@ test("policy none: blocks all operations including low-risk", () => {
 
 test("forceApproval overrides threshold", () => {
   assert.equal(shouldAutoApprove("health_check", "low", true), false);
+});
+
+test("git_local_commit_push is force-interactive even at high auto-approval", () => {
+  assert.equal(shouldAutoApprove("git_local_commit_push", "high", false), true);
+  assert.ok(FORCE_INTERACTIVE_OPERATIONS.has("git_local_commit_push"));
+});
+
+test("Branch View local operations are registered in approval catalogs and renderer labels", () => {
+  assert.ok(SUPPORTED_OPERATION_IDS.includes("git_local_changes"));
+  assert.ok(SUPPORTED_OPERATION_IDS.includes("git_local_commit_push"));
+  assert.equal(OPERATION_RISK_TIERS.git_local_changes, "low");
+  assert.equal(OPERATION_RISK_TIERS.git_local_commit_push, "high");
+
+  const rendererSource = readFileSync(
+    new URL("../src/renderer/index.html", import.meta.url),
+    "utf-8"
+  );
+  assert.match(
+    rendererSource,
+    /\["\/api\/gateway\/git\/local-changes", "git_local_changes"\]/
+  );
+  assert.match(
+    rendererSource,
+    /\["\/api\/gateway\/git\/local-changes\/commit-push", "git_local_commit_push"\]/
+  );
+  assert.match(rendererSource, /git_local_changes: "Branch View Local Changes"/);
+  assert.match(
+    rendererSource,
+    /git_local_commit_push: "Commit and Push Local Changes"/
+  );
 });
 
 // --- Unknown operation defaults to high ---
@@ -95,6 +126,10 @@ test("resolveOperationId maps known paths correctly", () => {
     resolveOperationId(BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH),
     BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
   );
+  assert.equal(resolveOperationId("/api/gateway/git/local-changes"), "git_local_changes");
+  assert.equal(resolveOperationId("/api/gateway/git/local-changes/diff"), "git_local_changes");
+  assert.equal(resolveOperationId("/api/gateway/git/local-changes/commit-push"), "git_local_commit_push");
+  assert.equal(resolveOperationId("/api/gateway/git"), "git_action");
 });
 
 test("resolveOperationId maps previously unmapped routes", () => {
@@ -111,4 +146,22 @@ test("resolveOperationId returns null for truly unknown gateway paths", () => {
 
 test("resolveOperationId returns null for paths outside /api/gateway/", () => {
   assert.equal(resolveOperationId("/health"), null);
+});
+
+// --- update_and_restart operation ---
+
+test("resolveOperationId maps /api/gateway/update-and-restart to update_and_restart", () => {
+  assert.equal(resolveOperationId("/api/gateway/update-and-restart"), "update_and_restart");
+});
+
+test("update_and_restart has high risk tier", () => {
+  assert.equal(OPERATION_RISK_TIERS["update_and_restart"], "high");
+});
+
+test("update_and_restart is in FORCE_INTERACTIVE_OPERATIONS", () => {
+  assert.ok(FORCE_INTERACTIVE_OPERATIONS.has("update_and_restart"));
+});
+
+test("update_and_restart is included in SUPPORTED_OPERATION_IDS", () => {
+  assert.ok(SUPPORTED_OPERATION_IDS.includes("update_and_restart"));
 });

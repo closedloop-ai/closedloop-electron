@@ -24,7 +24,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromRolloutPath } = require("./codex-home");
-const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
+const { pushTurnDuration, toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
 const RESPONSE_ITEM_TYPES = new Set([
   "message",
@@ -112,6 +112,7 @@ async function parseRolloutFile(filePath) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const plans = []; // CLOSEDLOOP plan-extraction (FEA-1189)
   const apiErrors = [];
   let thinkingBlockCount = 0;
@@ -119,6 +120,7 @@ async function parseRolloutFile(filePath) {
   let latestTotals = null; // cumulative token_count totals (last wins)
   let sawResponseItems = false;
   let lastTs = null;
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -129,7 +131,7 @@ async function parseRolloutFile(filePath) {
     return iso;
   };
 
-  const handleResponseItem = (p, iso) => {
+  const handleResponseItem = (p, iso, explicitIso) => {
     sawResponseItems = true;
     const itype = p.type;
     if (itype === "message") {
@@ -137,9 +139,12 @@ async function parseRolloutFile(filePath) {
       const text = extractText(p.content);
       if (role === "user") {
         userMessageCount++;
+        if (explicitIso) pendingTurnStartedAt = explicitIso;
       } else {
         assistantMessageCount++;
         if (iso) messageTimestamps.push(iso);
+        pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+        pendingTurnStartedAt = null;
         // Fallback plan signal: <proposed_plan> block in an assistant message
         // (medium confidence — flagged for user confirmation downstream).
         const pm = PROPOSED_PLAN_RE.exec(text);
@@ -187,7 +192,7 @@ async function parseRolloutFile(filePath) {
     }
   };
 
-  const handleEvent = (p, iso) => {
+  const handleEvent = (p, iso, explicitIso) => {
     const et = p.type;
     if (!et) return;
     // CLOSEDLOOP plan-extraction (FEA-1189): the strongest Codex plan signal —
@@ -208,10 +213,13 @@ async function parseRolloutFile(filePath) {
     }
     if (et === "user_message") {
       userMessageCount++;
+      if (explicitIso) pendingTurnStartedAt = explicitIso;
     } else if (et === "agent_message" || et === "agent_message_delta") {
       if (et === "agent_message") {
         assistantMessageCount++;
         if (iso) messageTimestamps.push(iso);
+        pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+        pendingTurnStartedAt = null;
       }
     } else if (et === "agent_reasoning" || et === "agent_reasoning_section_break") {
       if (et === "agent_reasoning") thinkingBlockCount++;
@@ -263,7 +271,8 @@ async function parseRolloutFile(filePath) {
     }
     const c = classify(rec);
     if (!c) continue;
-    const iso = noteTs(c.ts) || lastTs;
+    const explicitIso = noteTs(c.ts);
+    const iso = explicitIso || lastTs;
 
     if (c.kind === "session_meta") {
       const p = c.p || {};
@@ -279,13 +288,13 @@ async function parseRolloutFile(filePath) {
       if (p.model) model = p.model; // authoritative
       if (!cwd && p.cwd) cwd = p.cwd;
     } else if (c.kind === "response_item") {
-      handleResponseItem(c.p || {}, iso);
+      handleResponseItem(c.p || {}, iso, explicitIso);
     } else if (c.kind === "event") {
-      handleEvent(c.p || {}, iso);
+      handleEvent(c.p || {}, iso, explicitIso);
     } else if (c.kind === "auto") {
       const p = c.p || {};
-      if (RESPONSE_ITEM_TYPES.has(p.type)) handleResponseItem(p, iso);
-      else handleEvent(p, iso);
+      if (RESPONSE_ITEM_TYPES.has(p.type)) handleResponseItem(p, iso, explicitIso);
+      else handleEvent(p, iso, explicitIso);
     }
   }
 
@@ -302,12 +311,18 @@ async function parseRolloutFile(filePath) {
       latestTotals.reasoning_output_tokens ||
       latestTotals.reasoningOutputTokens ||
       0;
-    if (input || output || cached || reasoning) {
+    const cacheWrite =
+      latestTotals.cache_write_tokens ||
+      latestTotals.cacheWriteTokens ||
+      latestTotals.cache_creation_input_tokens ||
+      latestTotals.cacheCreationInputTokens ||
+      0;
+    if (input || output || cached || reasoning || cacheWrite) {
       tokensByModel[key] = {
         input,
         output: output + reasoning,
         cacheRead: cached,
-        cacheWrite: 0,
+        cacheWrite,
       };
     }
   }
@@ -323,7 +338,7 @@ async function parseRolloutFile(filePath) {
 
   return {
     sessionId,
-    name: `${projectName} (codex)`,
+    name: projectName,
     cwd,
     model,
     version,
@@ -341,7 +356,7 @@ async function parseRolloutFile(filePath) {
     compactions: [],
     apiErrors,
     fileModifiedAt,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "codex",
     permissionMode: null,
     thinkingBlockCount,

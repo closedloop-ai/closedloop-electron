@@ -117,6 +117,7 @@ export type DesktopAnalyticsAck =
   | { accepted: false; reason: DesktopAnalyticsAckReason };
 
 export const DesktopAgentSessionsAckReason = {
+  AckTimeout: "ack_timeout",
   FeatureDisabled: "feature_disabled",
   RateLimited: "rate_limited",
   ValidationFailed: "validation_failed",
@@ -152,6 +153,7 @@ export const DesktopAnalyticsEventName = {
   HealthcheckFailureDetected: "healthcheck.failure_detected",
   HealthcheckFailurePersistent: "healthcheck.failure_persistent",
   HealthcheckRecovered: "healthcheck.recovered",
+  AgentSessionSyncBatchFailed: "agent_session_sync_batch_failed",
 } as const;
 
 export type DesktopAnalyticsEventName =

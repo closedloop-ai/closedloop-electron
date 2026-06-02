@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 import { test } from "node:test";
 
 const read = (relative: string): string =>
@@ -8,6 +10,51 @@ const read = (relative: string): string =>
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
 const buildScriptSource = read("../scripts/build-agent-monitor.mjs");
+const generatedDbUrl = new URL("../.generated/agent-monitor/server/db.js", import.meta.url);
+const generatedDbSource = existsSync(generatedDbUrl)
+  ? readFileSync(generatedDbUrl, "utf8")
+  : null;
+const generatedImportHistoryUrl = new URL(
+  "../.generated/agent-monitor/scripts/import-history.js",
+  import.meta.url,
+);
+const generatedImportHistorySource = existsSync(generatedImportHistoryUrl)
+  ? readFileSync(generatedImportHistoryUrl, "utf8")
+  : null;
+const generatedHooksRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/hooks.js",
+  import.meta.url,
+);
+const generatedHooksRouteSource = existsSync(generatedHooksRouteUrl)
+  ? readFileSync(generatedHooksRouteUrl, "utf8")
+  : null;
+const generatedPricingRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/pricing.js",
+  import.meta.url,
+);
+const generatedPricingRouteSource = existsSync(generatedPricingRouteUrl)
+  ? readFileSync(generatedPricingRouteUrl, "utf8")
+  : null;
+const generatedAnalyticsRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/analytics.js",
+  import.meta.url,
+);
+const generatedAnalyticsRouteSource = existsSync(generatedAnalyticsRouteUrl)
+  ? readFileSync(generatedAnalyticsRouteUrl, "utf8")
+  : null;
+// Resolve the pinned upstream agent-dashboard source the same way the build
+// script does (createRequire from apps/desktop/package.json) so we can assert
+// the build-script patch anchors still match the source they patch.
+const requireFromApp = createRequire(new URL("../package.json", import.meta.url));
+const upstreamImportHistorySource = ((): string => {
+  const pkgRoot = path.dirname(
+    requireFromApp.resolve("agent-dashboard/package.json"),
+  );
+  return readFileSync(
+    path.join(pkgRoot, "scripts", "import-history.js"),
+    "utf8",
+  );
+})();
 const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
@@ -32,6 +79,15 @@ const loadRowsSnippet = read(
 );
 const hostFlagsSource = read(
   "../scripts/agent-monitor-plans/client/closedloop-host-flags.ts",
+);
+const sessionsOverlaySource = read("../scripts/agent-monitor-client/Sessions.tsx");
+const dashboardOverlaySource = read("../scripts/agent-monitor-client/Dashboard.tsx");
+const settingsOverlaySource = read("../scripts/agent-monitor-client/Settings.tsx");
+const statusBadgeOverlaySource = read(
+  "../scripts/agent-monitor-client/StatusBadge.tsx",
+);
+const ledgerHelperSource = read(
+  "../scripts/agent-monitor-client/lib/closedloop-ledger.ts",
 );
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
@@ -64,6 +120,10 @@ test("pnpm-managed agent-monitor source packages are declared and wired into bui
     "node scripts/build-agent-monitor.mjs",
   );
   assert.match(desktopPkg.scripts.build ?? "", /pnpm build:agent-monitor/);
+  assert.match(
+    desktopPkg.scripts.start ?? "",
+    /pnpm build:agent-monitor/,
+  );
   assert.equal(
     desktopPkg.dependencies["agent-dashboard"],
     "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
@@ -98,6 +158,9 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /CCAM_AUTO_INSTALL_HOOKS === "1"/);
   assert.match(buildScriptSource, /Database = require\("\.\/compat-sqlite"\);/);
   assert.match(buildScriptSource, /function patchHooksRoute/);
+  assert.match(buildScriptSource, /function patchHooksSandboxFilter/);
+  assert.match(buildScriptSource, /function patchImportHistorySandboxFilter/);
+  assert.match(buildScriptSource, /FEA-1407 sandbox scoping/);
   assert.match(buildScriptSource, /extractPlanFromHookEvent/);
   assert.match(buildScriptSource, /upsertPlanCapture\(db, capture\)/);
   assert.match(buildScriptSource, /req\.query\.harness/);
@@ -111,6 +174,77 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /stopCopilotWatcher/);
   assert.match(buildScriptSource, /stopOpenCodeWatcher/);
   assert.match(buildScriptSource, /stopCcWatcher/);
+  assert.match(buildScriptSource, /agent-monitor-client/);
+  assert.match(buildScriptSource, /StatusBadge\.tsx/);
+  assert.match(buildScriptSource, /Sessions\.tsx/);
+});
+
+// Regression for the FEA-1407 clean-build failure: the sandbox-filter patch
+// anchored on the old inline `path.join(os.homedir(), ".claude", "projects")`
+// form of PROJECTS_DIR, but the pinned upstream derives it via getProjectsDir().
+// The mismatch threw "expected PROJECTS_DIR anchor" on every clean build
+// (cleared .generated, fresh clone, CI). Assert the patch anchor still matches
+// the source it patches — not merely that the build script mentions the patch.
+test("patchImportHistorySandboxFilter anchor matches the pinned upstream import-history", () => {
+  const fnMatch = buildScriptSource.match(
+    /function patchImportHistorySandboxFilter[\s\S]*?const requireAnchor = (["'])((?:\\.|(?!\1).)*)\1;/,
+  );
+  assert.ok(
+    fnMatch,
+    "expected a requireAnchor string literal in patchImportHistorySandboxFilter",
+  );
+  const anchor = fnMatch[2];
+  assert.ok(
+    upstreamImportHistorySource.includes(anchor),
+    `patchImportHistorySandboxFilter anchor ${JSON.stringify(anchor)} is not present in the pinned upstream import-history.js — a clean build would throw. Update the anchor to match upstream.`,
+  );
+});
+
+// The build script hard-throws if a patch anchor is missing, but that only
+// fires on a clean materialize. Assert the generated tree actually carries the
+// applied FEA-1407 sandbox guard (helper + importSession guard), not just that
+// the build script defines the patch function.
+test("generated import-history applies the FEA-1407 sandbox guard", () => {
+  if (generatedImportHistorySource === null) return;
+  assert.match(generatedImportHistorySource, /FEA-1407 sandbox scoping/);
+  assert.match(
+    generatedImportHistorySource,
+    /function isSessionInSandbox\(cwd, sandboxBase\)/,
+  );
+  assert.match(
+    generatedImportHistorySource,
+    /if \(!isSessionInSandbox\(session\.cwd, process\.env\.SANDBOX_BASE_DIRECTORY\)\)/,
+  );
+});
+
+test("session overview token totals include compaction baselines", () => {
+  assert.match(
+    buildScriptSource,
+    /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
+  );
+  if (generatedDbSource !== null) {
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
+    );
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(cache_write_tokens \+ baseline_cache_write\), 0\) as cache_write_tokens/,
+    );
+  }
+});
+
+test("re-import metadata refresh is not gated only on message-count changes", () => {
+  assert.match(buildScriptSource, /function patchImportHistoryMetadataRefresh/);
+  assert.match(buildScriptSource, /CLOSEDLOOP metadata refresh parity/);
+  assert.match(buildScriptSource, /const nextEntryPoint = session\.entrypoint \|\| meta\.entrypoint \|\| null;/);
+  assert.match(buildScriptSource, /const nextPermissionMode = session\.permissionMode \|\| meta\.permission_mode \|\| null;/);
+  assert.match(buildScriptSource, /JSON\.stringify\(meta\.usage_extras \|\| null\) !== JSON\.stringify\(nextUsageExtras\)/);
+  if (generatedImportHistorySource !== null) {
+    assert.match(generatedImportHistorySource, /CLOSEDLOOP metadata refresh parity/);
+    assert.match(generatedImportHistorySource, /meta\.entrypoint !== nextEntryPoint/);
+    assert.match(generatedImportHistorySource, /\(meta\.turn_count \|\| 0\) !== nextTurnCount/);
+  }
 });
 
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
@@ -125,6 +259,11 @@ test("electron-builder ships the generated agent-monitor runtime tree unpacked",
   assert.match(
     stagePackagingSource,
     /dependency\.resolved[\s\S]*packageJson\.dependencies\?\.\[dependencyName\][\s\S]*dependency\.version/,
+  );
+  assert.match(stagePackagingSource, /\.generated", "agent-monitor"/);
+  assert.match(
+    stagePackagingSource,
+    /await cp\(generatedAgentMonitorDir, stageGeneratedAgentMonitorDir, \{\s*recursive: true,\s*\}\);/,
   );
 });
 
@@ -144,16 +283,95 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /CCAM_VAPID_KEYS_PATH/);
   assert.match(sidecarSource, /CCAM_ENABLE_RUN:\s*"0"/);
   assert.match(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"0"/);
+  assert.match(sidecarSource, /SANDBOX_BASE_DIRECTORY/);
+  assert.match(sidecarSource, /setSandboxBaseDirectory/);
   assert.match(sidecarSource, /NODE_PATH/);
   assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
   assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
+  assert.match(sidecarSource, /const healthy = await this\.waitForHealth\(child\);/);
   assert.match(sidecarSource, /\/api\/health/);
+  assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"lsof"/);
+  assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"ps"/);
   assert.match(
     sidecarSource,
     /async stop\(\): Promise<void> \{[\s\S]*this\.started = false;[\s\S]*this\.stopping = true;[\s\S]*this\.restartAttempts = 0;[\s\S]*this\.stopping = false;/,
   );
   assert.match(sidecarSource, /const shouldRestart = this\.started && !this\.stopping;/);
+  assert.match(buildScriptSource, /function patchWebSocketFile/);
+  assert.match(buildScriptSource, /updateScheduler = startUpdateScheduler\(\{ broadcast \}\);/);
+  assert.match(buildScriptSource, /catalogFetchTimer = require\("\.\/lib\/catalog-fetcher"\)\.scheduleCatalogFetch\(dbModule\.db\);/);
+  assert.match(buildScriptSource, /require\("\.\/websocket"\)\.closeWebSocket\(\);/);
+  assert.match(buildScriptSource, /httpServer\.closeAllConnections\(\)/);
+  assert.match(buildScriptSource, /httpServer\.__closedloopDestroyConnections\(\)/);
+});
+
+// FEA-1403: when port 4820 is held by a foreign process (orphaned dev sidecar,
+// stale standalone build, etc.), /api/health answers 200 OK before OUR
+// just-spawned child has even hit listen(). Readiness must be scoped to the
+// child we spawned — not to "anyone on the port" — otherwise the supervisor's
+// restartAttempts=0 reset fires every cycle and the documented 5-attempt cap
+// is never reached. The supervisor loops forever at "attempt 1/5".
+test("FEA-1403: agent monitor readiness is scoped to the spawned child, not to any process on the port", () => {
+  // The stability window must outlast the observed EADDRINUSE crash latency.
+  // Live testing on a dev build with port 4820 held by a foreign process
+  // showed the child reaching listen() (and crashing) up to ~2.5s after
+  // spawn — slower than the original ~300ms estimate, because SQLite init +
+  // migrations + Express boot run before listen(). Parse the constant
+  // numerically so a future change shortening it below the safety margin
+  // fails this test.
+  const stabilityMatch = sidecarSource.match(
+    /const READY_STABILITY_WINDOW_MS = ([\d_]+)/,
+  );
+  assert.ok(
+    stabilityMatch,
+    "READY_STABILITY_WINDOW_MS constant must be defined in agent-monitor-sidecar.ts",
+  );
+  const stabilityMs = Number(stabilityMatch[1].replaceAll("_", ""));
+  assert.ok(
+    stabilityMs >= 3_000,
+    `READY_STABILITY_WINDOW_MS must be >= 3000ms to outlast the observed ~2500ms EADDRINUSE crash window, got ${stabilityMs}ms`,
+  );
+
+  // waitForHealth takes the spawned child as a parameter so it can verify
+  // identity, not just the port answering.
+  assert.match(
+    sidecarSource,
+    /private async waitForHealth\(child: ChildProcess\): Promise<boolean>/,
+  );
+
+  // Single source of truth for the identity-and-alive predicate. Three
+  // call sites share this guard (waitForHealth poll, post-health gate,
+  // post-stability gate); keeping them in one method means a future change
+  // cannot quietly drop half the check at one site.
+  assert.match(
+    sidecarSource,
+    /private isChildAliveAndCurrent\(child: ChildProcess\): boolean \{\s*return this\.child === child && child\.exitCode === null;\s*\}/,
+  );
+
+  // waitForHealth bails when our child is no longer the active one or has
+  // already exited — a 200 OK from a foreign process must NOT be credited.
+  assert.match(
+    sidecarSource,
+    /this\.stopping[\s\S]{0,100}!this\.isChildAliveAndCurrent\(child\)/,
+  );
+
+  // The "agent monitor ready" log + restartAttempts = 0 reset only fire
+  // after the stability window AND after re-verifying our child is still
+  // the active live one via the shared predicate. The reset is GUARDED —
+  // not unconditional.
+  assert.match(
+    sidecarSource,
+    /await delay\(READY_STABILITY_WINDOW_MS\);[\s\S]{0,400}this\.isChildAliveAndCurrent\(child\)[\s\S]{0,400}this\.restartAttempts = 0;/,
+  );
+
+  // Guard: there must NOT be an ungated `restartAttempts = 0` immediately
+  // following `await this.waitForHealth(...)` — that was the original bug.
+  // The post-waitForHealth success path must check child identity first.
+  assert.doesNotMatch(
+    sidecarSource,
+    /const healthy = await this\.waitForHealth\(child\);\s*if \(healthy\) \{\s*this\.restartAttempts = 0;/,
+  );
 });
 
 test("docs and ignores describe generated pnpm-managed inputs, not vendor source", () => {
@@ -182,18 +400,15 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
   assert.match(settingsStoreSource, /getPlanExtractionEnabled\(\)/);
   assert.match(settingsStoreSource, /setPlanExtractionEnabled\(planExtractionEnabled: boolean\)/);
+  // update() handles all registered flags generically via FLAG_KEYS loop
   assert.match(
     settingsStoreSource,
-    /if \(typeof partial\.agentMonitorEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("agentMonitorEnabled"/,
-  );
-  assert.match(
-    settingsStoreSource,
-    /if \(typeof partial\.planExtractionEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("planExtractionEnabled"/,
+    /for \(const key of FLAG_KEYS\)/,
   );
 });
 
 test("sidecar is feature-gated and, when enabled, starts before the gateway", () => {
-  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\(\)/);
+  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\([\s\S]*?\)/);
   assert.match(
     appSource,
     /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
@@ -264,6 +479,45 @@ test("hooks are opt-in: default off, silent server auto-install never enabled", 
   assert.match(appSource, /syncAgentMonitorHooksOnBoot\(\)/);
 });
 
+test("agent monitor terminal failure sets a tracked degraded state that refreshTrayState consults", () => {
+  // The one-shot tray.setState in onTerminalFailure was being stomped by the
+  // next refreshTrayState() call (cloud heartbeat / gateway recheck), which
+  // only branched on gatewayHealthy / cloudCommandsPaused / cloudStatus. The
+  // degraded indicator must instead be backed by a tracked field so it sticks.
+  // (PR #247 review — thadeusb.)
+
+  // 1. A tracked field exists.
+  assert.match(appSource, /private agentMonitorFailed = false;/);
+
+  // 2. onTerminalFailure latches the field and routes through refreshTrayState()
+  //    rather than calling tray.setState directly (which would be transient).
+  assert.match(
+    appSource,
+    /onTerminalFailure: \(reason: string\) => \{[\s\S]*this\.agentMonitorFailed = true;[\s\S]*this\.refreshTrayState\(\);[\s\S]*\},/,
+  );
+
+  // 3. refreshTrayState() actually consults the field (degraded state is owned
+  //    by the single state owner, not set out-of-band).
+  assert.match(
+    appSource,
+    /private refreshTrayState\([\s\S]*if \(this\.agentMonitorFailed\) \{[\s\S]*this\.tray\.setState\(\s*"degraded"/,
+  );
+
+  // 4. The degraded-monitor branch outranks cloud state: it must appear before
+  //    the cloudStatus "online" branch so an online cloud cannot reset the tray
+  //    to ready while the monitor is dead.
+  const failedBranchIdx = appSource.indexOf("if (this.agentMonitorFailed)");
+  const cloudOnlineBranchIdx = appSource.indexOf(
+    'if (this.cloudStatus.state === "online")',
+  );
+  assert.ok(failedBranchIdx > 0, "agentMonitorFailed branch not found in refreshTrayState");
+  assert.ok(cloudOnlineBranchIdx > 0, "cloud online branch not found in refreshTrayState");
+  assert.ok(
+    failedBranchIdx < cloudOnlineBranchIdx,
+    "agentMonitorFailed branch must precede the cloud-online branch so the degraded indicator is not overwritten",
+  );
+});
+
 test("shutdown sequence stops the sidecar before the server", () => {
   assert.match(shutdownSource, /agentMonitor: \{ stop:/);
   assert.match(
@@ -280,10 +534,13 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
   assert.match(indexHtml, /agent-disabled/);
   assert.match(indexHtml, /<section id="claude-dashboard" class="panel active">/);
-  assert.match(indexHtml, /id="agentMonitorEnabled"/);
+  // agentMonitorEnabled toggle moved to the Feature Flags panel (rendered via JS from the registry).
+  assert.match(indexHtml, /id="featureFlagsList"/);
+  assert.match(indexHtml, /function renderFeatureFlagsPanel/);
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
   assert.match(indexHtml, /kind === "agent" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);
+  assert.match(indexHtml, /id="claudeDashStatus" class="dash-loading" aria-live="polite"/);
   assert.match(indexHtml, /api\.getAgentMonitorUrl\(\)/);
   assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_plan_extraction",[\s\S]*r\.planExtractionEnabled \? "1" : "0"/);
   // Embed mode + host postMessage navigation.
@@ -295,6 +552,10 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /planExtractionOnly: true/);
   assert.match(indexHtml, /id="claudeDashHooksToggle"/);
   assert.match(indexHtml, /api\.setAgentMonitorHooksEnabled/);
+  assert.match(indexHtml, /renderDashLoading\(\);/);
+  assert.match(indexHtml, /Starting your dashboard…/);
+  assert.match(indexHtml, /Reading your agent sessions\./);
+  assert.match(indexHtml, /#claude-dashboard\.panel\.active/);
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
@@ -307,12 +568,28 @@ test("embedded layout accepts navigation only from the configured host origin", 
 });
 
 test("renderer agent nav stays aligned with the embedded monitor router", () => {
-  assert.deepEqual(parseHostAgentNavRoutes(indexHtml), parseEmbeddedMonitorNavRoutes(embedAppSource));
+  // The host left nav is a curated subset of the embedded router's routes:
+  // some routes (e.g. /analytics, /run) intentionally remain reachable inside
+  // the iframe but are hidden from the host sidebar. So every host nav route
+  // must resolve to a real monitor route, but the inverse is not required.
+  const hostRoutes = parseHostAgentNavRoutes(indexHtml);
+  const monitorRoutes = new Set(parseEmbeddedMonitorNavRoutes(embedAppSource));
+  for (const route of hostRoutes) {
+    assert.ok(
+      monitorRoutes.has(route),
+      `Host nav route ${route} is not a route in the embedded monitor router`,
+    );
+  }
   // We intentionally layer host-owned route patches on top of the pinned
   // upstream client via a repo-owned App.tsx overlay, not by mutating the
   // dependency contents directly.
   assert.match(buildScriptSource, /from: embedAppSource,[\s\S]*to: path\.join\("src", "App\.tsx"\)/);
   assert.match(buildScriptSource, /for \(const override of CLIENT_FULL_FILE_OVERRIDES\)/);
+});
+
+test("owned sessions overlay keeps harness and status filters on a horizontal scroller", () => {
+  assert.match(sessionsOverlaySource, /mt-3 flex items-center gap-3 overflow-x-auto pb-1/);
+  assert.match(sessionsOverlaySource, /min-w-max/);
 });
 
 test("plans UI is gated by the host-loaded plan extraction flag", () => {
@@ -326,6 +603,213 @@ test("plans route filters in SQL and avoids shell-parsed Windows open commands",
   assert.match(plansRouteSource, /countPlans\(db, \{ sessionId, needsConfirmation \}\)/);
   assert.match(plansRouteSource, /rundll32\.exe/);
   assert.doesNotMatch(plansRouteSource, /spawn\(cmd, \["\/c", "start"/);
+});
+
+test("billing-mode two-ledger support (FEA-1434) is wired into the generated build", () => {
+  // Build script declares the billing-mode engine module + its materialization,
+  // the billing_mode column migration, and the hard-gate messages so a future
+  // upstream bump that breaks an anchor fails the build rather than silently
+  // dropping the per-session billing dimension.
+  for (const needle of [
+    "agent-monitor-billing",
+    'BILLING_MODULES = ["billing-mode"]',
+    "ADD COLUMN billing_mode",
+    "setSessionBillingMode",
+    "idx_sessions_billing_mode",
+    "column migration (FEA-1434)",
+    "billing-mode engine, FEA-1434",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing billing-mode wiring: ${needle}`,
+    );
+  }
+
+  // The canonical engine + its CJS package scope live in-repo and are copied
+  // into the generated tree at materialize time.
+  assert.ok(
+    existsSync(
+      new URL(
+        "../scripts/agent-monitor-billing/billing-mode.js",
+        import.meta.url,
+      ),
+    ),
+    "scripts/agent-monitor-billing/billing-mode.js missing",
+  );
+  assert.ok(
+    existsSync(
+      new URL(
+        "../scripts/agent-monitor-billing/package.json",
+        import.meta.url,
+      ),
+    ),
+    "scripts/agent-monitor-billing/package.json missing",
+  );
+
+  // If a generated tree is present, the migration + statement + materialized
+  // engine must have survived patching.
+  if (generatedDbSource) {
+    assert.ok(
+      generatedDbSource.includes("ADD COLUMN billing_mode"),
+      "generated db.js missing billing_mode column migration",
+    );
+    assert.ok(
+      generatedDbSource.includes("setSessionBillingMode:"),
+      "generated db.js missing setSessionBillingMode statement",
+    );
+    assert.ok(
+      existsSync(
+        new URL(
+          "../.generated/agent-monitor/server/lib/billing-mode.js",
+          import.meta.url,
+        ),
+      ),
+      "generated server/lib/billing-mode.js missing",
+    );
+  }
+});
+
+test("billing_mode write paths (FEA-1434) stamp every harness", () => {
+  // The shared stamp helper delegates detection to the canonical engine and
+  // exposes the single write entry point used by both hooks and importers.
+  const billingStamp = read("../scripts/agent-monitor-shared/billing-stamp.js");
+  assert.match(billingStamp, /require\("\.\.\/lib\/billing-mode"\)/);
+  assert.match(billingStamp, /function stampSessionBillingMode/);
+
+  // Every non-Claude importer stamps its harness via the shared helper right
+  // after setSessionHarness, so the billing mode is set the moment a session is
+  // imported (before any token-usage rollups read it).
+  const importers: Array<[string, string]> = [
+    ["../scripts/agent-monitor-codex/codex-import.js", "codex"],
+    ["../scripts/agent-monitor-cursor/cursor-import.js", "cursor"],
+    ["../scripts/agent-monitor-copilot/copilot-import.js", "copilot"],
+    ["../scripts/agent-monitor-opencode/opencode-import.js", "opencode"],
+  ];
+  for (const [rel, harness] of importers) {
+    const src = read(rel);
+    assert.ok(
+      src.includes('require("../agent-monitor-shared/billing-stamp")'),
+      `${rel} missing billing-stamp require`,
+    );
+    assert.ok(
+      src.includes(
+        `stampSessionBillingMode(dbModule.stmts, "${harness}", session.sessionId)`,
+      ),
+      `${rel} missing ${harness} billing-mode stamp`,
+    );
+  }
+
+  // Build script wires the Claude hook-route stamp, lists the helper among the
+  // materialized shared modules, and hard-gates the generated output.
+  for (const needle of [
+    "function patchHooksBillingMode",
+    "patchHooksBillingMode(generatedHooksRoute)",
+    '"billing-stamp"',
+    "billing-mode stamp (FEA-1434)",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing billing write-path wiring: ${needle}`,
+    );
+  }
+
+  // If a generated tree is present, the Claude stamp + materialized helper
+  // must have survived patching/materialization.
+  if (generatedHooksRouteSource) {
+    assert.ok(
+      generatedHooksRouteSource.includes(
+        'stampSessionBillingMode(stmts, "claude", sessionId)',
+      ),
+      "generated server/routes/hooks.js missing Claude billing-mode stamp",
+    );
+    assert.ok(
+      existsSync(
+        new URL(
+          "../.generated/agent-monitor/server/agent-monitor-shared/billing-stamp.js",
+          import.meta.url,
+        ),
+      ),
+      "generated server/agent-monitor-shared/billing-stamp.js missing",
+    );
+  }
+});
+
+test("two-ledger cost aggregation (FEA-1434) is wired into both cost endpoints", () => {
+  // Build script defines + invokes the analytics patch and extends the pricing
+  // patch with the /cost ledger split. These needles guard the patch anchors so
+  // a future upstream refactor that breaks them fails the build, not silently
+  // ships an un-split headline.
+  for (const needle of [
+    "function patchAnalyticsRoute",
+    "patchAnalyticsRoute(generatedAnalyticsRoute)",
+    "CLOSEDLOOP FEA-1434 two-ledger headline",
+    "CLOSEDLOOP FEA-1434 cost-endpoint ledger split",
+    // The headline must be keyed off headlineCost (metered + unknown), never a
+    // raw sum that would leak subscription spend into real cost.
+    "headlineCost(ledgerTotals)",
+    "cost_by_ledger: ledgerTotals",
+    // Both generated-tree hard-gates must exist.
+    "two-ledger cost split on GET /api/pricing/cost (FEA-1434)",
+    "missing the two-ledger headline split (FEA-1434)",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing two-ledger cost wiring: ${needle}`,
+    );
+  }
+
+  // If a generated tree is present, both routes must carry the split: each
+  // requires the ledger engine, buckets by billing_mode via a LEFT JOIN, sets
+  // the headline from headlineCost, and exposes cost_by_ledger.
+  if (generatedAnalyticsRouteSource) {
+    assert.ok(
+      generatedAnalyticsRouteSource.includes('require("../lib/billing-mode")'),
+      "generated analytics.js missing billing-mode require",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("cost_by_ledger: ledgerTotals"),
+      "generated analytics.js missing cost_by_ledger",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("headlineCost(ledgerTotals)"),
+      "generated analytics.js missing headlineCost headline",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("LEFT JOIN sessions"),
+      "generated analytics.js missing billing_mode LEFT JOIN",
+    );
+    // The un-joined upstream scan must be gone — that's the bug we're fixing.
+    assert.ok(
+      !generatedAnalyticsRouteSource.includes(
+        'db.prepare("SELECT * FROM token_usage")',
+      ),
+      "generated analytics.js still uses the un-joined token_usage scan",
+    );
+  }
+  if (generatedPricingRouteSource) {
+    assert.ok(
+      generatedPricingRouteSource.includes('require("../lib/billing-mode")'),
+      "generated pricing.js missing billing-mode require",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes(
+        "CLOSEDLOOP FEA-1434 cost-endpoint ledger split",
+      ),
+      "generated pricing.js missing /cost ledger split",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("cost_by_ledger: ledgerTotals"),
+      "generated pricing.js missing cost_by_ledger",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("total_cost: headlineCost(ledgerTotals)"),
+      "generated pricing.js missing headlineCost headline on /cost",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("GROUP BY s.billing_mode, tu.model"),
+      "generated pricing.js missing billing_mode-grouped ledger query",
+    );
+  }
 });
 
 test("Codex support (Addition #4/#5/#6) is wired into the generated build", () => {
@@ -403,7 +887,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
-    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"]',
+    "SHARED_MODULES = [",
     "MULTI_HARNESS_SPECS = [",
     "watcherPatchLines",
     "importPatchLines",
@@ -500,6 +984,42 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
   assert.match(stateSnippet, /OpenCode/);
 });
 
+test("FEA-1334 ingest orchestrator + progress card are wired into the build", () => {
+  // Build script registers the new shared modules, wires the orchestrator
+  // into server/index.js, and patches the /api/import/progress endpoint.
+  for (const needle of [
+    '"ingest-paths"',
+    '"ingest-progress"',
+    '"ingest-orchestrator"',
+    "ingestAllHarnesses",
+    "patchImportRoute",
+    'router.get("/progress"',
+    "FEA-1334 ingest orchestrator wiring",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing FEA-1334 wiring: ${needle}`,
+    );
+  }
+
+  // The new shared modules exist in-repo and get copied into the tree.
+  for (const m of ["ingest-paths", "ingest-progress", "ingest-orchestrator"]) {
+    assert.ok(
+      existsSync(
+        new URL(`../scripts/agent-monitor-shared/${m}.js`, import.meta.url),
+      ),
+      `scripts/agent-monitor-shared/${m}.js missing`,
+    );
+  }
+
+  // Renderer drives the floating progress card off an IPC proxy so it never
+  // makes a cross-origin fetch to the sidecar.
+  assert.match(preloadSource, /getAgentMonitorIngestProgress/);
+  assert.match(appSource, /desktop:get-agent-monitor-ingest-progress/);
+  assert.match(indexHtml, /id="ingestBanner"/);
+  assert.match(indexHtml, /getAgentMonitorIngestProgress/);
+});
+
 test("Codex harness filter now uses server-backed pagination and rebuilds on snippet edits", () => {
   assert.match(buildScriptSource, /sourceSessionsRoute/);
   assert.match(buildScriptSource, /sourcePushLib/);
@@ -508,4 +1028,94 @@ test("Codex harness filter now uses server-backed pagination and rebuilds on sni
   assert.doesNotMatch(loadTopSnippet, /filter === "waiting" \|\| harness/);
   assert.match(loadRowsSnippet, /rows = rows\.filter\(isSessionAwaitingInput\);/);
   assert.doesNotMatch(loadRowsSnippet, /\(s\.harness \|\| "claude"\)/);
+});
+
+test("two-ledger client UI (FEA-1434 Slice 4b) is wired into the build and overlays", () => {
+  // 1. The shared ledger helper is delivered as a full-file overlay so the
+  //    StatusBadge/Sessions/Dashboard/Settings overlays can import it.
+  assert.match(
+    buildScriptSource,
+    /const clientOverlayLedgerSource = path\.join\(\s*clientOverlayDir,\s*"lib",\s*"closedloop-ledger\.ts"\s*\)/,
+  );
+  assert.match(
+    buildScriptSource,
+    /from: clientOverlayLedgerSource,[\s\S]*?to: path\.join\("src", "lib", "closedloop-ledger\.ts"\)/,
+  );
+
+  // 2. Latent cache-bust bug fix: currentStamp() must hash EVERY full-file
+  //    client overlay. Before the fix it omitted Dashboard/Settings (and the
+  //    new ledger helper), so editing only those left the cached generated tree
+  //    stale. Assert all three appear inside the currentStamp() hash list.
+  const stampMatch = buildScriptSource.match(
+    /function currentStamp\(\)\s*\{[\s\S]*?\n\}/,
+  );
+  assert.ok(stampMatch, "currentStamp() function not found in build script");
+  const stampBody = stampMatch[0];
+  for (const overlayConst of [
+    "clientOverlayStatusBadgeSource",
+    "clientOverlaySessionsSource",
+    "clientOverlayDashboardSource",
+    "clientOverlaySettingsSource",
+    "clientOverlayLedgerSource",
+  ]) {
+    assert.ok(
+      stampBody.includes(overlayConst),
+      `currentStamp() must hash ${overlayConst} so editing that overlay busts the build cache`,
+    );
+  }
+
+  // 3. The Session type gains billing_mode via a declarative edit anchored on
+  //    the harness line the prior edit adds (additive optional field).
+  assert.match(
+    buildScriptSource,
+    /guard: "billing_mode\?: string \| null",\s*find: "  harness\?: string \| null;",\s*replace: "  harness\?: string \| null;\\n  billing_mode\?: string \| null;",/,
+  );
+
+  // 4. Shared helper: presentation-only classification + prefs, NO cost math.
+  assert.match(ledgerHelperSource, /export function isSubscriptionMode/);
+  assert.match(ledgerHelperSource, /export function subscriptionBadgeLabel/);
+  assert.match(ledgerHelperSource, /export interface CostByLedger/);
+  assert.match(ledgerHelperSource, /LEDGER_PREFS_KEY = "agent-monitor-ledger"/);
+  assert.match(ledgerHelperSource, /showHypotheticalCost: boolean/);
+  // The helper must never recompute dollars — cost math is server-side only.
+  assert.doesNotMatch(ledgerHelperSource, /calcPrice|computeTokenCost|total_price/);
+
+  // 5. StatusBadge overlay exports a BillingBadge that renders ONLY for
+  //    subscription sessions (no fabricated quota %).
+  assert.match(statusBadgeOverlaySource, /export function BillingBadge/);
+  assert.match(
+    statusBadgeOverlaySource,
+    /if \(!isSubscriptionMode\(billing_mode\)\) return null;/,
+  );
+
+  // 6. Sessions overlay renders the badge from the session's billing_mode.
+  assert.match(
+    sessionsOverlaySource,
+    /<BillingBadge billing_mode=\{session\.billing_mode\} \/>/,
+  );
+
+  // 7. Dashboard reads cost_by_ledger + the opt-in pref, but the headline value
+  //    stays the billed total_cost — the subscription hypothetical only ever
+  //    appears in the pill subtitle, never summed into the headline.
+  assert.match(dashboardOverlaySource, /loadLedgerPrefs\(\)\.showHypotheticalCost/);
+  assert.match(dashboardOverlaySource, /cost_by_ledger\?: CostByLedger/);
+  assert.match(
+    dashboardOverlaySource,
+    /const subscriptionCost = costByLedger\?\.subscription \?\? 0;/,
+  );
+  assert.match(dashboardOverlaySource, /sub=\{costPillSub\}/);
+  // The pill VALUE must remain total_cost (billed), never the subscription sum.
+  assert.match(
+    dashboardOverlaySource,
+    /value=\{costData \? fmtCost\(costData\.total_cost\) : "\$0\.00"\}/,
+  );
+
+  // 8. Settings persists the opt-in toggle through the shared helper.
+  assert.match(settingsOverlaySource, /loadLedgerPrefs,/);
+  assert.match(settingsOverlaySource, /saveLedgerPrefs,/);
+  assert.match(settingsOverlaySource, /"ledger\.showHypothetical"/);
+  assert.match(
+    settingsOverlaySource,
+    /onChange=\{\(v\) => updateLedgerPrefs\(\{ showHypotheticalCost: v \}\)\}/,
+  );
 });

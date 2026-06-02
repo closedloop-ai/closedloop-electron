@@ -23,6 +23,9 @@ import { Settings } from "./pages/Settings";
 import { CcConfig } from "./pages/CcConfig";
 import { Run } from "./pages/Run";
 import { Plans } from "./pages/Plans";
+import { Packs } from "./pages/Packs";
+import { PackDetail } from "./pages/PackDetail";
+import { PullRequests } from "./pages/PullRequests";
 import { NotFound } from "./pages/NotFound";
 import { isPlanExtractionEnabled } from "./lib/closedloop-host-flags";
 import { useWebSocket } from "./hooks/useWebSocket";
@@ -52,6 +55,9 @@ export default function App() {
           <Route path="cc-config" element={<CcConfig />} />
           <Route path="run" element={<Run />} />
           <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />
+          <Route path="packs" element={<Packs />} />
+          <Route path="packs/:packId" element={<PackDetail />} />
+          <Route path="pull-requests" element={<PullRequests />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<NotFound />} />
         </Route>

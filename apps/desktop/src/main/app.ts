@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -12,6 +12,7 @@ import {
   DEFAULT_DESKTOP_SETTINGS,
   GATEWAY_PROTOCOL_VERSION,
   EMPTY_CAPABILITIES,
+  type ManagedKeyHintState,
   type SavedConfig,
   type DesktopSettings,
   type RiskTier,
@@ -26,6 +27,7 @@ import {
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
 import { isGitRepository } from "../shared/git-utils.js";
+import { FEATURE_FLAGS, type FlagKey } from "../shared/feature-flags.js";
 import { ApiKeyStore } from "./api-key-store.js";
 import { AuthorizedCommandKeyStore } from "./authorized-command-key-store.js";
 import {
@@ -61,13 +63,30 @@ import {
   GatewaySigningKeyStore,
   type GatewaySigningKeyResult,
 } from "./gateway-signing-key-store.js";
-import { SettingsStore, type SavedConfigManagedPatch } from "./settings-store.js";
+import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
 import { openAgentDatabase } from "./database/index.js";
-import { HarnessImportService } from "./harness-parsers/harness-import-service.js";
-import { AgentSessionSyncService } from "./agent-session-sync-service.js";
+import {
+  AgentSessionSyncService,
+  resolveAgentMonitorDatabasePath,
+} from "./agent-session-sync-service.js";
+import {
+  createAnthropicAdminKeyStore,
+  createOpenAiAdminKeyStore,
+  type AdminKeyVendor,
+} from "./admin-key-store.js";
+import {
+  ReconciliationStore,
+  type ReconciliationQuery,
+} from "./reconciliation-store.js";
+import {
+  loadMeteredUsageRowsFromDisk,
+  reconciliationCutoffIso,
+} from "./reconciliation-worker.js";
+import { CostReconciliationService } from "./cost-reconciliation-service.js";
+import { ClaudeCodeAnalyticsService } from "./claude-code-analytics-service.js";
 import {
   isAgentMonitorHooksEnabled,
   setAgentMonitorHooksEnabled,
@@ -87,7 +106,7 @@ import {
   SUPPORTED_OPERATION_IDS,
   resolveOperationId,
 } from "./approval-operations.js";
-import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
+import { shouldAutoApprove, OPERATION_RISK_TIERS, FORCE_INTERACTIVE_OPERATIONS } from "./approval-policy.js";
 import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
@@ -132,6 +151,12 @@ import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
 import { prepareLoopCommandForExecution } from "./loop-command-preparer.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
+import {
+  buildUpdateAndRestartDisabledResult,
+  canApplyPackagedUpdate,
+  resolvePackagedUpdateCheckResult,
+  shouldHonorAlwaysAllowRule,
+} from "./update-and-restart-helpers.js";
 import {
   createQueueStatsDebounce,
   type QueueStatsDebounce,
@@ -183,6 +208,73 @@ type ManagedOnboardingState = {
   recoveryActions?: Array<"retry_automated_onboarding" | "use_manual_setup" | "choose_sandbox">;
 };
 
+const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Runtime-validate an IPC vendor argument to a known AdminKeyVendor. */
+function parseAdminKeyVendor(value: unknown): AdminKeyVendor {
+  if (value === "anthropic" || value === "openai") {
+    return value;
+  }
+  throw new Error("Admin key vendor must be 'anthropic' or 'openai'");
+}
+
+/** Runtime-validate the {vendor, key} payload for desktop:set-admin-key. */
+function parseSetAdminKeyPayload(value: unknown): {
+  vendor: AdminKeyVendor;
+  key: string;
+} {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("set-admin-key payload must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const vendor = parseAdminKeyVendor(record.vendor);
+  if (typeof record.key !== "string") {
+    throw new Error("Admin key must be a string");
+  }
+  return { vendor, key: record.key };
+}
+
+/**
+ * Runtime-validate an optional reconciliation list query from IPC. Unknown
+ * fields are dropped; malformed values are ignored rather than throwing so the
+ * diagnostics view degrades to "all rows" instead of erroring.
+ */
+function parseReconciliationQuery(value: unknown): ReconciliationQuery | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const query: ReconciliationQuery = {};
+  if (typeof record.from === "string" && ISO_DAY_RE.test(record.from)) {
+    query.from = record.from;
+  }
+  if (typeof record.to === "string" && ISO_DAY_RE.test(record.to)) {
+    query.to = record.to;
+  }
+  if (record.vendor === "anthropic" || record.vendor === "openai") {
+    query.vendor = record.vendor;
+  }
+  return Object.keys(query).length > 0 ? query : undefined;
+}
+
+/**
+ * Extract the Claude Code analytics query from an untrusted IPC payload. Only a
+ * numeric `windowDays` is read; the service clamps it to a sane range, so any
+ * other shape becomes `undefined` (the service then uses its default window).
+ */
+function parseClaudeCodeAnalyticsQuery(
+  value: unknown,
+): { windowDays?: number } | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.windowDays === "number" && Number.isFinite(record.windowDays)) {
+    return { windowDays: record.windowDays };
+  }
+  return undefined;
+}
+
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
   private readonly apiKeyStore: ApiKeyStore;
@@ -199,8 +291,9 @@ export class DesktopApplication {
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly agentMonitor: AgentMonitorSidecar;
   private readonly agentDatabase: ReturnType<typeof openAgentDatabase>;
-  private readonly harnessImport: HarnessImportService;
   private readonly agentSessionSync: AgentSessionSyncService;
+  private readonly costReconciliation: CostReconciliationService;
+  private readonly claudeCodeAnalytics: ClaudeCodeAnalyticsService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
@@ -214,6 +307,13 @@ export class DesktopApplication {
   private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
   private cloudCommandsPaused: boolean;
+  // In-memory supervisor verdict: set once the agent-monitor sidecar gives up
+  // permanently (after MAX_RESTART_ATTEMPTS). refreshTrayState() consults this so
+  // the degraded indicator sticks across later refreshes instead of being reset
+  // to ready by the next cloud heartbeat or gateway recheck. Not persisted — a
+  // fresh boot re-attempts the sidecar, so the verdict is per-process.
+  private agentMonitorFailed = false;
+  private agentMonitorFailureReason: string | null = null;
   private cloudConnectionEnabled: boolean;
   private serverCommandSigningSupported = false;
   private serverAgentSessionSyncSupported = false;
@@ -287,11 +387,28 @@ export class DesktopApplication {
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
-    this.agentMonitor = new AgentMonitorSidecar();
+    this.agentMonitor = new AgentMonitorSidecar({
+      onTerminalFailure: (reason: string) => {
+        const notification = new Notification({
+          title: "ClosedLoop Agent Monitor",
+          body: reason,
+        });
+        notification.show();
+        // Latch the failure and route through refreshTrayState() — the single
+        // owner of tray state — so the degraded indicator survives subsequent
+        // refreshes. A direct tray.setState here would be stomped by the next
+        // refreshTrayState() call (cloud heartbeat, gateway recheck).
+        this.agentMonitorFailed = true;
+        this.agentMonitorFailureReason = reason;
+        this.refreshTrayState();
+      },
+    });
+    this.agentMonitor.setSandboxBaseDirectory(
+      this.settingsStore.getSandboxBaseDirectory(),
+    );
     this.agentDatabase = openAgentDatabase(
       path.join(app.getPath("userData"), "agent-dashboard.sqlite"),
     );
-    this.harnessImport = new HarnessImportService(this.agentDatabase);
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -347,6 +464,29 @@ export class DesktopApplication {
       () => this.getActiveGatewayId(),
       () => this.settingsStore.getBinaryPaths(),
       (patch) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
+      async () => {
+        if (app.isPackaged) {
+          const result = await autoUpdater.checkForUpdates();
+          const remoteVersion = result?.updateInfo?.version;
+          return resolvePackagedUpdateCheckResult(
+            app.getVersion(),
+            this.packagedUpdateState,
+            remoteVersion
+          );
+        }
+        return this.checkForUpdate();
+      },
+      async () => {
+        if (app.isPackaged) {
+          if (!canApplyPackagedUpdate(app.getVersion(), this.packagedUpdateState)) {
+            throw new Error("Update has not finished downloading yet");
+          }
+          autoUpdater.quitAndInstall();
+          return;
+        }
+        await this.applyUpdate();
+      },
+      () => this.settingsStore.getUpdateAndRestartEnabled(),
       () => this.apiKeyStore.getApiKeyProvenance(),
       (request) => this.signDesktopRequest(request),
       (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
@@ -398,7 +538,12 @@ export class DesktopApplication {
       pluginVersion: getCodePluginVersion(),
       desktopClientVersion: app.getVersion(),
       gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
-      supportedOperations: [...SUPPORTED_OPERATION_IDS],
+      getEnabledOperations: () => {
+        const enabled = this.settingsStore.getUpdateAndRestartEnabled();
+        return SUPPORTED_OPERATION_IDS.filter(
+          (id) => id !== "update_and_restart" || enabled
+        );
+      },
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => {
         this.serverCommandSigningSupported = false;
@@ -514,8 +659,43 @@ export class DesktopApplication {
       isRelayReady: () =>
         this.serverAgentSessionSyncSupported &&
         this.cloudStatus.state === "online",
+      isChunkedSyncEnabled: () => this.settingsStore.getFlag("agentSessionChunkedSyncEnabled"),
+      getSandboxBaseDirectory: () =>
+        this.settingsStore.getSandboxBaseDirectory(),
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
       getUserDataPath: () => app.getPath("userData"),
+      onBatchOutcome: (event) => {
+        Observability.agentSessionSyncBatchFailed(event);
+      },
+    });
+    // FEA-1435/1436: nightly cost reconciliation lives entirely in main. It owns
+    // the org-level vendor Admin key stores (safeStorage, never exposed to the
+    // sidecar or renderer) and the reconciliation store, and reconciles the local
+    // genai-prices estimate (read from dashboard.db READ-ONLY) against what each
+    // vendor actually billed. loadUsageRows re-opens the live DB each run, scoped
+    // to the recent window, and returns [] when the sidecar has not created it.
+    // One Anthropic Admin key store, shared by reconciliation (compares the local
+    // estimate against the billed cost_report) and Claude Code analytics (reads
+    // Anthropic's own per-user usage estimate). Sharing the store means a key
+    // saved once powers both, and there is a single owner of the key material.
+    const anthropicKeyStore = createAnthropicAdminKeyStore();
+    this.costReconciliation = new CostReconciliationService({
+      anthropicKeyStore,
+      openaiKeyStore: createOpenAiAdminKeyStore(),
+      store: new ReconciliationStore(),
+      loadUsageRows: () =>
+        loadMeteredUsageRowsFromDisk(
+          resolveAgentMonitorDatabasePath(app.getPath("userData")),
+          reconciliationCutoffIso(new Date()),
+        ),
+      log: (message) => gatewayLog.info("cost-reconciliation", message),
+    });
+    // FEA-1436: Claude Code per-user usage view. Read-only, main-only, and uses
+    // the SAME Anthropic Admin key as reconciliation. The estimate it returns is
+    // Anthropic's own — it never overrides the local genai-prices ledger.
+    this.claudeCodeAnalytics = new ClaudeCodeAnalyticsService({
+      anthropicKeyStore,
+      log: (message) => gatewayLog.info("claude-code-analytics", message),
     });
     this.recovery = new GatewayRecoveryManager({
       probe: () => this.probeGatewayAlive(),
@@ -544,6 +724,11 @@ export class DesktopApplication {
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       loopTokenStore: this.loopTokenStore,
       schedulers: this.schedulers,
+      // Wire PoP deps so boot-recovered loops attach X-Desktop-* headers and
+      // use the managed-key fallback for revival (AC-005).
+      getApiKeyProvenance: () => this.apiKeyStore.getApiKeyProvenance(),
+      signDesktopRequest: (request) => this.signDesktopRequest(request),
+      onDesktopPopUnavailable: (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
     });
     this.registerIpcHandlers();
     this.registerOnboardingFileOpenHandler();
@@ -607,7 +792,10 @@ export class DesktopApplication {
       this.agentSessionSync.start();
     }
 
-    this.harnessImport.start();
+    // FEA-1435/1436: schedule nightly cost reconciliation. Independent of the
+    // Agent Monitor toggle — the scheduled tick no-ops unless a vendor Admin key
+    // is configured, and loadUsageRows returns [] when there is no dashboard.db.
+    this.costReconciliation.start();
 
     try {
       await this.server.start();
@@ -1669,8 +1857,8 @@ export class DesktopApplication {
     this.queueStatsTelemetryDebounce.cancel();
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
-    this.harnessImport.stop();
     this.agentDatabase.close();
+    this.costReconciliation.stop();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -2052,6 +2240,18 @@ export class DesktopApplication {
       return;
     }
 
+    // A permanently-failed agent monitor keeps the tray degraded even when cloud
+    // is online/connecting (gateway-down above remains the higher-severity signal).
+    if (this.agentMonitorFailed) {
+      this.tray.setState(
+        "degraded",
+        explicitDetails ??
+          this.agentMonitorFailureReason ??
+          `Serving on localhost:${this.server.getActivePort()} | agent monitor unavailable`,
+      );
+      return;
+    }
+
     if (this.cloudCommandsPaused) {
       this.tray.setState(
         "degraded",
@@ -2112,6 +2312,13 @@ export class DesktopApplication {
       };
     }
 
+    if (
+      operationId === "update_and_restart" &&
+      !this.settingsStore.getUpdateAndRestartEnabled()
+    ) {
+      return buildUpdateAndRestartDisabledResult();
+    }
+
     const settings = this.settingsStore.getAll();
     const requestScopePath = resolveApprovalScopePath(request.body);
     const activeAlwaysAllowRules = pruneExpiredAlwaysAllowRules(
@@ -2120,7 +2327,13 @@ export class DesktopApplication {
     if (activeAlwaysAllowRules.length !== settings.alwaysAllowRules.length) {
       this.settingsStore.setAlwaysAllowRules(activeAlwaysAllowRules);
     }
+    const isForceInteractiveOperation =
+      !shouldHonorAlwaysAllowRule(
+        operationId,
+        FORCE_INTERACTIVE_OPERATIONS as ReadonlySet<string>
+      );
     if (
+      !isForceInteractiveOperation &&
       matchesAlwaysAllowRule(activeAlwaysAllowRules, {
         operationId,
         method: request.method,
@@ -2133,7 +2346,10 @@ export class DesktopApplication {
 
     const configuredTier =
       settings.autoApprovalRules[operationId] ?? settings.defaultApprovalTier;
+    // Force-interactive operations skip auto-approve and always go through
+    // the interactive approval queue.
     if (
+      !isForceInteractiveOperation &&
       shouldAutoApprove(
         operationId,
         configuredTier,
@@ -2165,7 +2381,7 @@ export class DesktopApplication {
       APPROVAL_TIMEOUT_MS,
     );
 
-    if (decision === "always_allow") {
+    if (decision === "always_allow" && !isForceInteractiveOperation) {
       this.saveAlwaysAllowRuleForPending(pending);
     }
 
@@ -2371,6 +2587,61 @@ export class DesktopApplication {
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
+    // FEA-1334: proxy the sidecar's cold-start ingest progress so the renderer
+    // can drive the floating progress card without a cross-origin fetch.
+    // Returns null whenever the sidecar is not reachable — the renderer treats
+    // that as "keep polling, nothing to show yet".
+    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
+      const baseUrl = this.agentMonitor.getUrl();
+      if (!baseUrl) {
+        return null;
+      }
+      try {
+        const response = await fetch(`${baseUrl}/api/import/progress`, {
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (!response.ok) {
+          return null;
+        }
+        return await response.json();
+      } catch {
+        return null;
+      }
+    });
+    // FEA-1334: clear the dashboard DB and restart the sidecar so it
+    // re-imports every agent session from scratch. The sidecar's empty-DB
+    // boot path clears the persisted ingest caches and re-runs the
+    // orchestrator, which the progress banner tracks.
+    ipcMain.handle("desktop:reprocess-agent-logs", async () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { ok: false, error: "Agent Dashboard is disabled in Settings." };
+      }
+      try {
+        await this.agentMonitor.stop();
+        const agentMonitorDir = path.join(
+          app.getPath("userData"),
+          "agent-monitor",
+        );
+        for (const name of [
+          "dashboard.db",
+          "dashboard.db-wal",
+          "dashboard.db-shm",
+        ]) {
+          try {
+            rmSync(path.join(agentMonitorDir, name));
+          } catch {
+            /* file may not exist — fine */
+          }
+        }
+        void this.agentMonitor.start();
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
     );
@@ -2414,7 +2685,7 @@ export class DesktopApplication {
       "desktop:update-settings",
       async (
         _event,
-        partial: {
+        partial: Partial<Record<FlagKey, boolean>> & {
           sandboxBaseDirectory?: string;
           onboardingCompleted?: boolean;
           relayOrigin?: string;
@@ -2426,9 +2697,6 @@ export class DesktopApplication {
             "auto" | "none" | "low" | "medium" | "high"
           >;
           verboseLogging?: boolean;
-          agentMonitorEnabled?: boolean;
-          planExtractionEnabled?: boolean;
-          commandSigningEnforcementEnabled?: boolean;
         },
       ) => {
         if ("binaryPaths" in partial) {
@@ -2517,6 +2785,18 @@ export class DesktopApplication {
         ) {
           await this.applyAgentMonitorSetting(nextPartial.agentMonitorEnabled);
         }
+        if (
+          typeof nextPartial.cloudCommandsPaused === "boolean" &&
+          nextPartial.cloudCommandsPaused !== this.cloudCommandsPaused
+        ) {
+          this.setCloudCommandsPaused(nextPartial.cloudCommandsPaused);
+        }
+        if (
+          typeof nextPartial.cloudConnectionEnabled === "boolean" &&
+          nextPartial.cloudConnectionEnabled !== this.cloudConnectionEnabled
+        ) {
+          this.setCloudConnectionEnabled(nextPartial.cloudConnectionEnabled);
+        }
 
         if (
           typeof partial.sandboxBaseDirectory === "string" &&
@@ -2525,12 +2805,26 @@ export class DesktopApplication {
             normalizeScopePath(currentSettings.sandboxBaseDirectory)
         ) {
           await seedReposConfig(selectedSandbox);
+          this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
+          if (this.settingsStore.getAgentMonitorEnabled()) {
+            await this.agentMonitor.stop();
+            void this.agentMonitor.start();
+          }
         }
+
+        // Notify renderer of flag changes so the Feature Flags panel can refresh.
+        this.desktopWindow
+          .getWindow()
+          ?.webContents.send("desktop:flags-changed");
 
         this.restartCloudSocket();
         return updated;
       },
     );
+    ipcMain.handle("desktop:get-all-flags", () => ({
+      registry: FEATURE_FLAGS,
+      flags: this.settingsStore.getAllFlags(),
+    }));
     ipcMain.handle("desktop:get-runtime-status", () => ({
       port: this.server.getActivePort(),
       cloudStatus: this.cloudStatus,
@@ -2775,6 +3069,33 @@ export class DesktopApplication {
       this.restartCloudSocket();
       return this.apiKeyStore.getStatus();
     });
+    // FEA-1435/1436: vendor Admin key intake + cost reconciliation. These handlers
+    // delegate to the main-only CostReconciliationService. Only existence-only
+    // statuses, persisted drift rows, and key-free run summaries cross IPC — the
+    // Admin key material itself never does. The vendor and query inputs are
+    // runtime-validated here before use (IPC payloads are untrusted).
+    ipcMain.handle("desktop:get-admin-key-statuses", () =>
+      this.costReconciliation.getAdminKeyStatuses(),
+    );
+    ipcMain.handle("desktop:set-admin-key", (_event, payload: unknown) => {
+      const { vendor, key } = parseSetAdminKeyPayload(payload);
+      return this.costReconciliation.setAdminKey(vendor, key);
+    });
+    ipcMain.handle("desktop:clear-admin-key", (_event, vendor: unknown) =>
+      this.costReconciliation.clearAdminKey(parseAdminKeyVendor(vendor)),
+    );
+    ipcMain.handle("desktop:run-cost-reconciliation", () =>
+      this.costReconciliation.runReconciliationNow(),
+    );
+    ipcMain.handle("desktop:list-cost-reconciliation", (_event, query: unknown) =>
+      this.costReconciliation.listRows(parseReconciliationQuery(query)),
+    );
+    // FEA-1436: Claude Code per-user usage (Anthropic's own estimate). Read-only;
+    // uses the same Anthropic Admin key. The query is runtime-validated (untrusted
+    // IPC) and the result carries no key material — only per-actor usage rows.
+    ipcMain.handle("desktop:get-claude-code-analytics", (_event, query: unknown) =>
+      this.claudeCodeAnalytics.fetchAnalytics(parseClaudeCodeAnalyticsQuery(query)),
+    );
     ipcMain.handle(
       "desktop:get-cloud-commands-paused",
       () => this.cloudCommandsPaused,
@@ -2800,6 +3121,13 @@ export class DesktopApplication {
     ipcMain.handle("desktop:get-onboarding-state", () =>
       this.getOnboardingState(),
     );
+    // FEA-1333: mark the one-time Agent Dashboard welcome as seen so it does
+    // not show again. Separate from desktop:complete-onboarding, which owns
+    // the gateway "Setup Required" flow.
+    ipcMain.handle("desktop:mark-dashboard-welcome-seen", () => {
+      this.settingsStore.setDashboardWelcomeSeen(true);
+      return { ok: true };
+    });
     ipcMain.handle(
       "desktop:complete-onboarding",
       async (
@@ -3284,6 +3612,35 @@ export class DesktopApplication {
       }
       return this.agentDatabase.dashboard.getWorkflowData();
     });
+
+    // Verify no channel name collision: grep confirms 'desktop:get-managed-key-hint-state'
+    // and 'desktop:dismiss-managed-key-hint' do not exist elsewhere in registerIpcHandlers.
+
+    ipcMain.handle("desktop:get-managed-key-hint-state", (): ManagedKeyHintState => {
+      try {
+        const provenance = this.apiKeyStore.getApiKeyProvenance();
+        const dismissedAt = this.settingsStore.getManagedKeyHintDismissedAt();
+        const lastSeenProvenance = this.settingsStore.getManagedKeyHintLastSeenProvenance();
+        const shouldShow = shouldShowManagedKeyHint(provenance, dismissedAt, lastSeenProvenance);
+        return { provenance, shouldShow };
+      } catch {
+        // Fail-closed: return safe default if apiKeyStore or settingsStore throws.
+        return { shouldShow: false, provenance: null };
+      }
+    });
+
+    ipcMain.handle("desktop:dismiss-managed-key-hint", (): { success: boolean } => {
+      try {
+        // Security: provenance is sourced from main-process apiKeyStore only —
+        // renderer is untrusted; we must never accept provenance from IPC event args.
+        const { dismissedAt, lastSeenProvenance } = buildDismissState(this.apiKeyStore);
+        this.settingsStore.setManagedKeyHintDismissedAt(dismissedAt);
+        this.settingsStore.setManagedKeyHintLastSeenProvenance(lastSeenProvenance);
+        return { success: true };
+      } catch {
+        return { success: false };
+      }
+    });
   }
 
   private signDesktopRequest(
@@ -3485,6 +3842,25 @@ function maybeString(value: unknown): string | null {
     return null;
   }
   return value.trim();
+}
+
+/**
+ * Builds the state to persist when the user dismisses the managed-key hint.
+ * Extracted as a standalone function to keep the ipcMain callback thin and
+ * enable unit testing without Electron IPC mocking.
+ *
+ * Security: provenance is sourced from the main-process apiKeyStore only —
+ * renderer is untrusted and must never control what is written to settings.
+ */
+function buildDismissState(apiKeyStore: ApiKeyStore): {
+  dismissedAt: string;
+  lastSeenProvenance: "DESKTOP_MANAGED" | "USER_CREATED";
+} {
+  const provenance = apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED";
+  return {
+    dismissedAt: new Date().toISOString(),
+    lastSeenProvenance: provenance,
+  };
 }
 
 function describeRequestLocation(request: GatewayApprovalRequest): string {

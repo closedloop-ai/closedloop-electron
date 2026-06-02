@@ -49,16 +49,19 @@ import type {
   LocalJobExecuteFinalizationStatus,
   LocalJobFinalizationSource,
 } from "../../main/job-store.js";
+import { createStubJobStore } from "../../main/job-store.js";
 import {
   EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
   isExecuteNoWorkCompletion,
   isRetryableFinalizationError,
+  makeHeartbeatFinalizeFn,
   tryUploadArtifacts,
   tryUploadSupportBundle,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore, LoopTokenMeta } from "../../main/loop-token-store.js";
+import type { LoopPopDeps } from "../../main/loop-lifecycle.js";
 import type { LoopSchedulerContext } from "../../main/loop-scheduler-context.js";
 import { parseJwtExpiry } from "../../main/jwt-utils.js";
 import { Observability } from "../../main/observability.js";
@@ -112,6 +115,10 @@ import {
   uploadArtifacts,
 } from "./loop-http.js";
 import {
+  clearPendingLoopExit,
+  registerPendingLoopExit,
+} from "./symphony-loop-lifecycle.js";
+import {
   CLONE_GIT_TIMEOUT,
   expandHome,
   fetchOrigin,
@@ -125,6 +132,7 @@ import {
   SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
+import type { BootstrapRunResult } from "./symphony-utils.js";
 export {
   readFileTail,
   readLogTail,
@@ -299,6 +307,13 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   [LoopCommand.Manual]: "NOT_REQUIRED",
 };
 const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
+  LoopCommand.Plan,
+  LoopCommand.Execute,
+  LoopCommand.RequestChanges,
+  LoopCommand.RequestPrdChanges,
+  LoopCommand.GeneratePrd,
+]);
+const BOOTSTRAP_PREFLIGHT_COMMANDS = new Set<LoopCommand>([
   LoopCommand.Plan,
   LoopCommand.Execute,
   LoopCommand.RequestChanges,
@@ -632,6 +647,7 @@ export function registerRecoveredLoop(loopId: string, pid: number): void {
 }
 
 export function unregisterLoop(loopId: string): void {
+  clearPendingLoopExit(loopId);
   runningLoops.delete(loopId);
 }
 
@@ -653,6 +669,62 @@ function parseJsonBody(
 
 function shellEscape(value: string): string {
   return "'" + value.replaceAll("'", String.raw`'\''`) + "'";
+}
+
+function bootstrapMarkerForResult(result: BootstrapRunResult): string {
+  switch (result.status) {
+    case "completed":
+      return "[bootstrap-completed] Bootstrap completed.";
+    case "skipped-artifacts":
+      return "[bootstrap-skipped] Bootstrap skipped; artifacts already exist.";
+    case "skipped-plugin-missing":
+      return "[bootstrap-skipped] Bootstrap skipped; plugin is not installed.";
+    case "failed":
+      return "[bootstrap-failed] Bootstrap failed; continuing without generated agents.";
+    case "timed-out":
+      return "[bootstrap-timeout] Bootstrap timed out; continuing without generated agents.";
+  }
+}
+
+async function postBootstrapOutput(args: {
+  apiBaseUrl: string;
+  loopId: string;
+  token: string;
+  chunk: string;
+}): Promise<void> {
+  const result = await postLoopEventBounded(
+    args.apiBaseUrl,
+    args.loopId,
+    () => args.token,
+    {
+      type: LoopEventType.Output,
+      data: { chunk: args.chunk },
+    },
+  );
+  if (!result.success) {
+    loopError(
+      args.loopId,
+      `Failed to post bootstrap progress event: ${result.error ?? "unknown error"}`,
+    );
+  }
+}
+
+async function runLoopBootstrapPreflight(args: {
+  worktreeDir: string;
+  loopId: string;
+  apiBaseUrl: string;
+  token: string;
+}): Promise<BootstrapRunResult> {
+  await postBootstrapOutput({
+    ...args,
+    chunk: "[bootstrap-started] Checking bootstrap artifacts.",
+  });
+  const result = await runBootstrapIfNeeded(args.worktreeDir, args.loopId);
+  await postBootstrapOutput({
+    ...args,
+    chunk: bootstrapMarkerForResult(result),
+  });
+  return result;
 }
 
 /**
@@ -1629,7 +1701,6 @@ async function ensureWorktreeImpl(
     return;
   }
 
-  await runBootstrapIfNeeded(worktreeDir, loopId);
   await runLoopsSetupScript(worktreeDir, loopId);
 }
 
@@ -1727,7 +1798,6 @@ async function ensureLoopWorktreeMaterialized(args: {
   }
 
   await pushAndRecordLoopBranch(args);
-  await runBootstrapIfNeeded(args.worktreeDir, args.loopId);
   await runLoopsSetupScript(args.worktreeDir, args.loopId);
 }
 
@@ -6021,6 +6091,7 @@ async function handleLoopRequest(
   worktreeProvider?: WorktreeProvider,
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
+  popDeps?: LoopPopDeps,
 ): Promise<void> {
   const wt = worktreeProvider ?? defaultWorktreeProvider;
   // Derive the callback URL from the gateway's trusted configuration.
@@ -6840,29 +6911,18 @@ async function handleLoopRequest(
         });
         if (!executeAdditionalsOk) return;
 
-        // Bootstrap additional-repo worktrees sequentially.
-        // On failure, clean up only the additional worktrees — the primary
-        // here may be a reused parent PLAN's worktree, and an additional-repo
-        // bootstrap blip (npm install hiccup, transient network) must not
-        // destroy parent state. `cleanupAdditionalWorktrees` runs the smart
-        // retention check and keeps any prior entry that has uncommitted
-        // changes (typically bootstrap output like package-lock.json or
-        // node_modules) so the user does not lose work; retained trees are
-        // reused on retry via `reuseStaleWorktree: true` in
-        // `provisionAdditionalRepoWorktrees`.
         for (const addEntry of additionalWorktreeDirs) {
           try {
             await materializeContextPack(addEntry.dir, addEntry.fullName, body.loopId, bodyAgents, bodyRepoConfigs);
-            await runBootstrapIfNeeded(addEntry.dir, body.loopId);
-          } catch (bootstrapErr) {
+          } catch (materializeErr) {
             loopError(
               body.loopId,
-              `bootstrap failed for additional repo worktree: ${addEntry.dir}`,
-              bootstrapErr,
+              `context-pack materialization failed for additional repo worktree: ${addEntry.dir}`,
+              materializeErr,
             );
             gatewayLog.error(
-              "bootstrap-additional-repo-failed",
-              `loopId=${body.loopId} dir=${addEntry.dir} error=${String(bootstrapErr)}`,
+              "context-pack-additional-repo-failed",
+              `loopId=${body.loopId} dir=${addEntry.dir} error=${String(materializeErr)}`,
             );
             // Remove the failed worktree
             try {
@@ -6888,11 +6948,11 @@ async function handleLoopRequest(
               {
                 type: LoopEventType.Error,
                 code: LoopErrorCode.BranchCreateFailed,
-                message: `Bootstrap failed for additional repo worktree: ${addEntry.dir}`,
+                message: `Context-pack materialization failed for additional repo worktree: ${addEntry.dir}`,
               },
             );
             return json(context, 500, {
-              error: "Bootstrap failed for additional repo worktree",
+              error: "Context-pack materialization failed for additional repo worktree",
             });
           }
         }
@@ -6918,7 +6978,6 @@ async function handleLoopRequest(
           matErr,
         );
       }
-      await runBootstrapIfNeeded(worktreeDir, body.loopId);
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
@@ -7115,6 +7174,24 @@ async function handleLoopRequest(
     } else {
       await postLoopEvent(apiBaseUrl, body.loopId, () => body.closedLoopAuthToken, {
         type: LoopEventType.Started,
+      });
+    }
+
+    if (worktreeDir && BOOTSTRAP_PREFLIGHT_COMMANDS.has(body.command)) {
+      for (const addEntry of additionalWorktreeDirs) {
+        await runLoopBootstrapPreflight({
+          worktreeDir: addEntry.dir,
+          loopId: body.loopId,
+          apiBaseUrl,
+          token: body.closedLoopAuthToken,
+        });
+      }
+
+      await runLoopBootstrapPreflight({
+        worktreeDir,
+        loopId: body.loopId,
+        apiBaseUrl,
+        token: body.closedLoopAuthToken,
       });
     }
 
@@ -7661,6 +7738,7 @@ async function handleLoopRequest(
           });
         }
       }
+      clearPendingLoopExit(body.loopId);
       try {
         await stopTailer.flush();
       } catch (err) {
@@ -7748,6 +7826,7 @@ async function handleLoopRequest(
 
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
+    registerPendingLoopExit(body.loopId);
     runningLoops.set(body.loopId, { pid, child, stage: "running" });
     stopTailer = startOutputTailer(
       tailerJsonlPath,
@@ -7847,12 +7926,66 @@ async function handleLoopRequest(
         apiBaseUrl,
         getToken: () => loopTokenStore.getLoopToken(body.loopId)?.token ?? null,
         loopTokenStore,
+        // Thread PoP deps into registerSleep so the sleep-recovery heartbeat
+        // on system wake fires with PoP headers and managed-key Authorization
+        // fallback. Without this, the sleep-recovery path (most likely revival
+        // trigger) fires without PoP headers — SEC-002 finding.
+        getApiKey: popDeps?.getApiKey,
+        getApiKeyProvenance: popDeps?.getApiKeyProvenance,
+        signDesktopRequest: popDeps?.signDesktopRequest,
+        onDesktopPopUnavailable: popDeps?.onDesktopPopUnavailable,
       });
     }
     schedulers.startHeartbeat(body.loopId, {
       apiBaseUrl,
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+      loopTokenStore,
+      // Thread PoP fields so every heartbeat attaches X-Desktop-* PoP headers
+      // when provenance is DESKTOP_MANAGED (AC-002, AC-004).
+      getApiKey: popDeps?.getApiKey,
+      getApiKeyProvenance: popDeps?.getApiKeyProvenance,
+      signDesktopRequest: popDeps?.signDesktopRequest,
+      onDesktopPopUnavailable: popDeps?.onDesktopPopUnavailable,
+      // Supply getTokenMeta for proactive JWT-expiry detection (T-1.4 / AC-011).
+      // getTokenMeta wins over getToken in postLoopHeartbeat, so it must carry
+      // the same body.closedLoopAuthToken fallback getToken has — otherwise a
+      // USER_CREATED loop short-circuits to missing_token when safeStorage is
+      // unavailable (setLoopToken threw at start, so the store is empty). The
+      // synthesized meta omits expiresAt so isJwtUsable treats it as a usable
+      // legacy token, matching the pseudo-meta postLoopHeartbeat builds for the
+      // legacy getToken path.
+      getTokenMeta: loopTokenStore
+        ? () =>
+            loopTokenStore.getLoopToken(body.loopId) ?? { token: body.closedLoopAuthToken }
+        : undefined,
+      // When jobStore is absent (legacy no-store path), the heartbeat cannot look up or
+      // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied
+      // (runHeartbeatTick logs a warning and skips finalizeFn when getByLoopId returns
+      // undefined) and a no-op finalizeFn that the owning scheduler never needs.
+      jobStore: jobStore ?? createStubJobStore(),
+      finalizeFn: jobStore
+        ? makeHeartbeatFinalizeFn(
+            {
+              jobStore,
+              // Real telemetry so heartbeat-terminated loops launched via this
+              // path are visible to monitoring (not swallowed by a no-op).
+              telemetry: Observability.getTelemetryEmitter(),
+              getToken: () =>
+                loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+              apiBaseUrl,
+              isProcessRunning,
+              getAllowedDirectories,
+              loopTokenStore,
+              schedulers,
+            },
+            "heartbeat-terminal",
+          )
+        : async () => {},
+      // Pass the process liveness checker for T-1.5 process-alive guard.
+      isProcessRunning,
+      // Canonical telemetry so the process-alive suppression event is observable.
+      telemetry: Observability.getTelemetryEmitter(),
     });
 
     json(context, 200, {
@@ -7864,6 +7997,7 @@ async function handleLoopRequest(
   } finally {
     // Clean up sentinel and persisted token if we never reached a successful spawn
     if (!spawnedSuccessfully) {
+      clearPendingLoopExit(body.loopId);
       runningLoops.delete(body.loopId);
       loopTokenStore?.deleteLoopToken(body.loopId);
       // Best-effort cleanup of any additional repo worktrees created before spawn failed
@@ -7965,6 +8099,7 @@ async function handleLoopKill(
   }
 
   runningLoops.delete(loopId);
+  clearPendingLoopExit(loopId);
   json(context, 200, { success: true, message: "Loop process terminated" });
 }
 
@@ -7983,6 +8118,7 @@ export function registerSymphonyLoopRoutes(
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
   getBinaryPaths?: BinaryPathsResolver,
+  popDeps?: LoopPopDeps,
 ): void {
   dispatcher.register("POST", "/api/gateway/symphony/loop", async (context) => {
     const run = () =>
@@ -7996,6 +8132,7 @@ export function registerSymphonyLoopRoutes(
         worktreeProvider,
         loopTokenStore,
         getSymphonyDir,
+        popDeps,
       );
 
     if (getBinaryPaths) {

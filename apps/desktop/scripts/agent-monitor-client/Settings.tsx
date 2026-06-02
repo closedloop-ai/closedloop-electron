@@ -1,0 +1,1165 @@
+/**
+ * @file Settings.tsx
+ * @description Provides a settings page for managing model pricing rules, notification preferences, and system information with real-time updates and actionable controls for data management and hook configuration.
+ * @author Son Nguyen <hoangson091104@gmail.com>
+ */
+
+import { useEffect, useState, useCallback, useRef, useSyncExternalStore } from "react";
+import { useTranslation } from "react-i18next";
+import {
+  DollarSign,
+  RefreshCw,
+  Database,
+  Plug,
+  HardDrive,
+  AlertTriangle,
+  RotateCcw,
+  CheckCircle,
+  XCircle,
+  Server,
+  Bell,
+  BellOff,
+  BellRing,
+  FileDown,
+  Eraser,
+  Play,
+  Zap,
+  AlertCircle,
+  GitBranch,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldX,
+  Clock,
+  Cpu,
+  Globe,
+  Wifi,
+  Activity,
+  Users,
+  Layers,
+  Coins,
+  BarChart3,
+  Settings as SettingsIcon,
+  FolderOpen,
+} from "lucide-react";
+import { api } from "../lib/api";
+import { eventBus } from "../lib/eventBus";
+import { fmt, fmtCost } from "../lib/format";
+import { subscribeToPush, unsubscribeFromPush } from "../lib/push";
+import { Tip } from "../components/Tip";
+import { ImportHistory } from "../components/ImportHistory";
+// CLOSEDLOOP FEA-1433: the hand-editable pricing table is gone. genai-prices is
+// the single source of truth for rates, so the ModelPricing CRUD type is no
+// longer used by this read-only catalog view.
+import type { WSMessage } from "../lib/types";
+// CLOSEDLOOP FEA-1434: shared two-ledger client helper. Settings is the writer
+// of the "show hypothetical API cost" preference; the Dashboard reads it.
+import {
+  loadLedgerPrefs,
+  saveLedgerPrefs,
+  type LedgerPrefs,
+} from "../lib/closedloop-ledger";
+
+// ─── Notification preferences ───
+
+const NOTIF_KEY = "agent-monitor-notifications";
+
+interface NotifPrefs {
+  enabled: boolean;
+  onNewSession: boolean;
+  onSessionError: boolean;
+  onSessionComplete: boolean;
+  onSubagentSpawn: boolean;
+}
+
+const defaultNotif: NotifPrefs = {
+  enabled: false,
+  onNewSession: true,
+  onSessionError: true,
+  onSessionComplete: false,
+  onSubagentSpawn: false,
+};
+
+function loadNotifPrefs(): NotifPrefs {
+  try {
+    const raw = localStorage.getItem(NOTIF_KEY);
+    if (!raw) return { ...defaultNotif };
+    return { ...defaultNotif, ...JSON.parse(raw) };
+  } catch {
+    return { ...defaultNotif };
+  }
+}
+
+function saveNotifPrefs(prefs: NotifPrefs) {
+  localStorage.setItem(NOTIF_KEY, JSON.stringify(prefs));
+}
+
+// ─── Helpers ───
+
+// CLOSEDLOOP FEA-1433: the read-only pricing catalog reflects what the
+// canonical token-cost engine (genai-prices) computed for the models actually
+// used. Each row mirrors a /api/pricing/cost breakdown entry, including the
+// `priced` flag and `unpriced_reason`, so unpriced models surface honestly
+// instead of collapsing to a silent $0. The upstream CostBreakdown type does
+// not declare these engine fields, so we type them locally.
+interface PricedBreakdownRow {
+  model: string;
+  provider: string | null;
+  cost: number | null;
+  input_cost: number | null;
+  output_cost: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  priced: boolean;
+  unpriced_reason: string | null;
+}
+
+interface PricingEngineStamp {
+  name: string;
+  version: string;
+}
+
+interface SystemInfo {
+  db: { path: string; size: number; counts: Record<string, number> };
+  hooks: { installed: boolean; path: string; hooks: Record<string, boolean> };
+  server: { uptime: number; node_version: string; platform: string; ws_connections: number };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatUptime(seconds: number): string {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function useCountUp(end: number | null, durationMs = 1000) {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    if (end === null) {
+      setCount(0);
+      return;
+    }
+
+    let startTimestamp: number | null = null;
+    let animationFrameId: number;
+    const startValue = count;
+
+    const step = (timestamp: number) => {
+      if (!startTimestamp) startTimestamp = timestamp;
+      const progress = Math.min((timestamp - startTimestamp) / durationMs, 1);
+      // easeOutQuart
+      const easeProgress = 1 - Math.pow(1 - progress, 4);
+      setCount(startValue + (end - startValue) * easeProgress);
+
+      if (progress < 1) {
+        animationFrameId = window.requestAnimationFrame(step);
+      } else {
+        setCount(end);
+      }
+    };
+
+    animationFrameId = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(animationFrameId);
+  }, [end, durationMs]);
+
+  return count;
+}
+
+// ─── Toggle component ───
+
+function Toggle({
+  checked,
+  onChange,
+  label,
+  description,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  description?: string;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-3 cursor-pointer group">
+      <div className="min-w-0">
+        <p className="text-sm text-gray-300 group-hover:text-gray-200 transition-colors">{label}</p>
+        {description && <p className="text-xs text-gray-500 mt-0.5">{description}</p>}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ${
+          checked ? "bg-blue-500" : "bg-surface-4"
+        }`}
+      >
+        <span
+          className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform duration-200 ${
+            checked ? "translate-x-4" : "translate-x-0"
+          }`}
+        />
+      </button>
+    </label>
+  );
+}
+
+// ─── Main component ───
+
+export function Settings() {
+  const { t } = useTranslation("settings");
+  // CLOSEDLOOP FEA-1433: read-only catalog state. `breakdown` is the engine's
+  // per-model output for the models actually used; `engine` is the genai-prices
+  // source-of-truth stamp. There is no editor state — the pricing table is no
+  // longer host-editable (genai-prices owns the rates).
+  const [breakdown, setBreakdown] = useState<PricedBreakdownRow[]>([]);
+  const [engine, setEngine] = useState<PricingEngineStamp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [totalCost, setTotalCost] = useState<number | null>(null);
+  const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionResult, setActionResult] = useState<{
+    key: string;
+    message: string;
+    isError: boolean;
+  } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<string | null>(null);
+  const [notifPrefs, setNotifPrefs] = useState<NotifPrefs>(loadNotifPrefs);
+  // CLOSEDLOOP FEA-1434: per-user "show hypothetical API cost for subscription
+  // sessions" preference (localStorage, default off). Read by the Dashboard.
+  const [ledgerPrefs, setLedgerPrefs] = useState<LedgerPrefs>(loadLedgerPrefs);
+  const [abandonHours, setAbandonHours] = useState("24");
+  const [purgeDays, setPurgeDays] = useState("90");
+  const [claudeHome, setClaudeHomeState] = useState("");
+  const [claudeHomeInput, setClaudeHomeInput] = useState("");
+  const [claudeHomeSaving, setClaudeHomeSaving] = useState(false);
+  const [claudeHomeError, setClaudeHomeError] = useState<string | null>(null);
+
+  const wsConnected = useSyncExternalStore(eventBus.onConnection, () => eventBus.connected);
+  const animatedTotalCost = useCountUp(totalCost);
+
+  const load = useCallback(async () => {
+    try {
+      const [pricingRes, costRes, infoRes, claudeHomeRes] = await Promise.all([
+        api.pricing.list(),
+        api.pricing.totalCost(),
+        api.settings.info(),
+        api.settings.claudeHome.get(),
+      ]);
+      // The sidecar's GET /api/pricing returns the genai-prices engine stamp
+      // (single source of truth) alongside the legacy rows; the upstream client
+      // type predates the stamp, so read it through a narrow cast.
+      setEngine((pricingRes as { engine?: PricingEngineStamp }).engine ?? null);
+      setTotalCost(costRes.total_cost);
+      // The cost breakdown carries the engine's per-model priced/unpriced verdict
+      // (fields the upstream CostBreakdown type does not declare).
+      setBreakdown((costRes.breakdown ?? []) as unknown as PricedBreakdownRow[]);
+      setSysInfo(infoRes);
+      setClaudeHomeState(claudeHomeRes.claude_home);
+      setClaudeHomeInput(claudeHomeRes.claude_home);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("messages.failedLoad"));
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useEffect(() => {
+    const refreshInfo = () =>
+      api.settings
+        .info()
+        .then(setSysInfo)
+        .catch(() => {});
+    const interval = setInterval(refreshInfo, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    return eventBus.subscribe((msg: WSMessage) => {
+      if (
+        msg.type === "session_created" ||
+        msg.type === "session_updated" ||
+        msg.type === "agent_created" ||
+        msg.type === "agent_updated" ||
+        msg.type === "new_event"
+      ) {
+        api.settings
+          .info()
+          .then(setSysInfo)
+          .catch(() => {});
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!actionResult) return;
+    const timeout = setTimeout(() => setActionResult(null), 5000);
+    return () => clearTimeout(timeout);
+  }, [actionResult]);
+
+  const updateNotifPrefs = (patch: Partial<NotifPrefs>) => {
+    setNotifPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      saveNotifPrefs(next);
+      return next;
+    });
+  };
+
+  const updateLedgerPrefs = (patch: Partial<LedgerPrefs>) => {
+    setLedgerPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      saveLedgerPrefs(next);
+      return next;
+    });
+  };
+
+  const requestNotifPermission = async () => {
+    if (!("Notification" in window)) return;
+    const perm = await Notification.requestPermission();
+    if (perm === "granted") {
+      updateNotifPrefs({ enabled: true });
+      await subscribeToPush();
+    }
+  };
+
+  // CLOSEDLOOP FEA-1433: the add/edit/delete pricing handlers were removed.
+  // genai-prices is the single source of truth for rates, so there is no
+  // host-editable rule table to write to (the PUT/DELETE /api/pricing routes
+  // are gone). The catalog below is read-only.
+
+  const runAction = async (key: string, fn: () => Promise<string>) => {
+    setActionLoading(key);
+    setActionResult(null);
+    setConfirmAction(null);
+    try {
+      const message = await fn();
+      setActionResult({ key, message, isError: false });
+      await load();
+    } catch (err) {
+      setActionResult({
+        key,
+        message: t("messages.actionFailed", {
+          message: err instanceof Error ? err.message : t("messages.unknownError"),
+        }),
+        isError: true,
+      });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleClearData = () =>
+    runAction("clear", async () => {
+      const res = await api.settings.clearData();
+      const total = Object.values(res.cleared).reduce((s, n) => s + n, 0);
+      return t("danger.clearedResult", { count: total });
+    });
+
+  const handleReinstallHooks = () =>
+    runAction("hooks", async () => {
+      const res = await api.settings.reinstallHooks();
+      return res.ok ? t("hooks.success") : t("hooks.failed");
+    });
+
+  // CLOSEDLOOP FEA-1433: "Reset pricing to defaults" was removed. It reseeded
+  // the legacy model_pricing table, which no longer feeds any cost calculation
+  // (genai-prices owns the rates). There is nothing host-editable to reset.
+
+  const handleCleanup = () =>
+    runAction("cleanup", async () => {
+      const params: { abandon_hours?: number; purge_days?: number } = {};
+      const ah = parseFloat(abandonHours);
+      const pd = parseFloat(purgeDays);
+      if (ah > 0) params.abandon_hours = ah;
+      if (pd > 0) params.purge_days = pd;
+      const res = await api.settings.cleanup(params);
+      const parts = [];
+      if (res.abandoned > 0) parts.push(`${res.abandoned}${t("data.abandonedResult")}`);
+      if (res.purged_sessions > 0)
+        parts.push(
+          `${res.purged_sessions}${t("data.purgedResult", { events: res.purged_events, agents: res.purged_agents })}`
+        );
+      return parts.length > 0 ? parts.join(". ") : t("data.nothingToClean");
+    });
+
+  const handleSaveClaudeHome = async () => {
+    if (claudeHomeInput === claudeHome) return;
+    setClaudeHomeSaving(true);
+    setClaudeHomeError(null);
+    try {
+      const res = await api.settings.claudeHome.set(claudeHomeInput);
+      setClaudeHomeState(res.claude_home);
+      setClaudeHomeInput(res.claude_home);
+    } catch (err) {
+      setClaudeHomeError(err instanceof Error ? err.message : t("claudeHome.saveFailed"));
+    } finally {
+      setClaudeHomeSaving(false);
+    }
+  };
+
+  // CLOSEDLOOP FEA-1433: the editable pricing-row form (renderEditCells) and its
+  // edit-mode derivations were removed. The catalog renders the engine's
+  // per-model verdict read-only; there is no inline editing.
+  const pricedRows = breakdown.filter((r) => r.priced);
+  const unpricedRows = breakdown.filter((r) => !r.priced);
+
+  const actionBanner = (keys: string[]) => {
+    const match = actionResult && keys.includes(actionResult.key) ? actionResult : null;
+    if (!match) return null;
+    return (
+      <div
+        className={`px-3 py-2 rounded-lg text-xs ${
+          match.isError
+            ? "bg-red-500/10 border border-red-500/20 text-red-400"
+            : "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+        }`}
+      >
+        {match.message}
+      </div>
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64 text-gray-500">
+        {t("common:loading")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="animate-fade-in space-y-8">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center">
+            <SettingsIcon className="w-4.5 h-4.5 text-accent" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-semibold text-gray-100">{t("title")}</h1>
+              {wsConnected ? (
+                <span className="flex items-center gap-1.5 text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse-dot" />
+                  {t("common:live")}
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 text-[11px] text-gray-400 bg-gray-500/10 border border-gray-500/20 px-2 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+                  {t("common:offline")}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-gray-500">{t("subtitle")}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <a
+            href={api.settings.exportData()}
+            download
+            className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-border text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+          >
+            <FileDown className="w-3.5 h-3.5" />
+            {t("exportData")}
+          </a>
+          <button onClick={load} className="btn-ghost">
+            <RefreshCw className="w-4 h-4" /> {t("common:refresh")}
+          </button>
+        </div>
+      </div>
+
+      {/* Cost summary card */}
+      <div className="card p-6">
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+              <DollarSign className="w-6 h-6 text-emerald-400" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-500">{t("common:cost.totalEstimatedCost")}</p>
+              <p className="text-2xl font-semibold text-gray-100">
+                <Tip
+                  raw={
+                    totalCost !== null
+                      ? `$${totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                      : undefined
+                  }
+                >
+                  {totalCost !== null ? fmtCost(animatedTotalCost) : "$-.--"}
+                </Tip>
+              </p>
+            </div>
+          </div>
+          <div className="text-right text-xs text-gray-500">
+            <p>{t("acrossSessions")}</p>
+            <p>{t("basedOnUsage")}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* CLOSEDLOOP FEA-1434: two-ledger display preference. The headline total
+          counts only really-billed spend (metered API + unknown). Sessions
+          covered by a flat subscription (Claude Pro/Max, Codex, Cursor Pro,
+          Copilot) are priced as a hypothetical "would have cost" and kept out
+          of that total. This opt-in surfaces that hypothetical on the Dashboard;
+          it never changes the billed headline. Default off. */}
+      <div className="card p-5">
+        <div className="flex items-center gap-3 mb-1">
+          <Coins className="w-4 h-4 text-gray-500" />
+          <Toggle
+            checked={ledgerPrefs.showHypotheticalCost}
+            onChange={(v) => updateLedgerPrefs({ showHypotheticalCost: v })}
+            label={t(
+              "ledger.showHypothetical",
+              "Show hypothetical API cost for subscription sessions",
+            )}
+            description={t(
+              "ledger.showHypotheticalDescription",
+              "Display what subscription-covered usage (Pro/Max, Codex, Cursor Pro, Copilot) would have cost at metered API rates. This is never added to the billed total.",
+            )}
+          />
+        </div>
+      </div>
+
+      {/* ─── MODEL PRICING (read-only catalog, FEA-1433) ───
+          genai-prices is the single source of truth for rates. The host no
+          longer edits a pricing table; this section shows the engine version
+          stamp and the engine's per-model verdict for the models actually used,
+          surfacing unpriced models honestly instead of as a silent $0. */}
+      <section>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <DollarSign className="w-4 h-4 text-gray-500" />
+              {t("pricing.title")}
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-gray-400 bg-surface-3 border border-border px-1.5 py-0.5 rounded-full">
+                {t("pricing.readOnlyBadge", "read-only")}
+              </span>
+            </h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {t(
+                "pricing.catalogDescription",
+                "Token costs are computed by the pricing engine below — the single source of truth for rates. This catalog is read-only and lists the models you've actually used.",
+              )}
+            </p>
+          </div>
+          {engine && (
+            <span
+              className="inline-flex items-center gap-1.5 text-[11px] font-mono text-gray-300 bg-surface-2 border border-border px-2.5 py-1 rounded-md"
+              title={t("pricing.engineStampTooltip", {
+                name: engine.name,
+                version: engine.version,
+                defaultValue: "Prices sourced from {{name}} v{{version}}",
+              })}
+            >
+              <Coins className="w-3.5 h-3.5 text-emerald-400" />
+              {engine.name} v{engine.version}
+            </span>
+          )}
+        </div>
+
+        {error && (
+          <div className="mb-4 px-4 py-2.5 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-400">
+            {error}
+          </div>
+        )}
+
+        {breakdown.length === 0 ? (
+          <div className="card p-6 text-center text-sm text-gray-500">
+            {t(
+              "pricing.catalogEmpty",
+              "No token usage yet. Models will appear here with their engine-computed costs once you run sessions.",
+            )}
+          </div>
+        ) : (
+          <div className="card overflow-x-auto">
+            <table className="w-full min-w-[700px]">
+              <thead>
+                <tr className="border-b border-border text-left">
+                  <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+                    {t("common:cost.model")}
+                  </th>
+                  <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+                    {t("pricing.provider", "Provider")}
+                  </th>
+                  <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase tracking-wider text-right">
+                    {t("pricing.inputCost", "Input cost")}
+                  </th>
+                  <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase tracking-wider text-right">
+                    {t("pricing.outputCost", "Output cost")}
+                  </th>
+                  <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase tracking-wider text-right">
+                    {t("pricing.totalCost", "Cost")}
+                  </th>
+                  <th className="w-28 px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase tracking-wider text-right">
+                    {t("pricing.status", "Status")}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {pricedRows.map((row) => (
+                  <tr key={row.model} className="hover:bg-surface-4 transition-colors">
+                    <td className="px-4 py-3 text-sm font-mono text-gray-300">{row.model}</td>
+                    <td className="px-4 py-3 text-sm text-gray-400">{row.provider ?? "—"}</td>
+                    <td className="px-4 py-3 text-sm text-gray-400 text-right font-mono">
+                      {row.input_cost != null ? fmtCost(row.input_cost) : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-400 text-right font-mono">
+                      {row.output_cost != null ? fmtCost(row.output_cost) : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-200 text-right font-mono">
+                      {row.cost != null ? fmtCost(row.cost) : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 px-1.5 py-0.5 rounded-full">
+                        {t("pricing.statusPriced", "priced")}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {unpricedRows.map((row) => (
+                  <tr key={row.model} className="hover:bg-surface-4 transition-colors">
+                    <td className="px-4 py-3 text-sm font-mono text-gray-300">{row.model}</td>
+                    <td className="px-4 py-3 text-sm text-gray-400">{row.provider ?? "—"}</td>
+                    <td className="px-4 py-3 text-sm text-gray-600 text-right font-mono">—</td>
+                    <td className="px-4 py-3 text-sm text-gray-600 text-right font-mono">—</td>
+                    <td className="px-4 py-3 text-sm text-gray-600 text-right font-mono">—</td>
+                    <td className="px-4 py-3 text-right">
+                      <span
+                        className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.5 rounded-full"
+                        title={
+                          row.unpriced_reason ??
+                          t("pricing.statusUnpricedTooltip", "Not priced by the pricing engine")
+                        }
+                      >
+                        {t("pricing.statusUnpriced", "not priced")}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {unpricedRows.length > 0 && (
+          <p className="text-xs text-amber-300/80 mt-3">
+            {t("pricing.unpricedNote", {
+              count: unpricedRows.length,
+              defaultValue:
+                "{{count}} model(s) could not be priced by the engine and are excluded from cost totals. Update the pricing engine to add coverage.",
+            })}
+          </p>
+        )}
+      </section>
+
+      {/* ─── HOOK CONFIGURATION ─── */}
+      <section>
+        <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2 mb-1">
+          <Plug className="w-4 h-4 text-gray-500" />
+          {t("hooks.title")}
+        </h3>
+        <p className="text-xs text-gray-500 mb-4">{t("hooks.description")}</p>
+
+        <div className="card p-5 space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3">
+              {sysInfo?.hooks.installed ? (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full">
+                  <CheckCircle className="w-3.5 h-3.5" /> {t("hooks.allInstalled")}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-full">
+                  <AlertTriangle className="w-3.5 h-3.5" /> {t("hooks.incomplete")}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={handleReinstallHooks}
+              disabled={actionLoading !== null}
+              className="btn-ghost text-xs disabled:opacity-50"
+            >
+              {actionLoading === "hooks" ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="w-3.5 h-3.5" />
+              )}
+              {t("hooks.reinstall")}
+            </button>
+          </div>
+
+          {actionBanner(["hooks"])}
+
+          {sysInfo && (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+                {Object.entries(sysInfo.hooks.hooks).map(([hook, active]) => (
+                  <div
+                    key={hook}
+                    className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md bg-surface-2"
+                  >
+                    {active ? (
+                      <CheckCircle className="w-3 h-3 text-emerald-400 flex-shrink-0" />
+                    ) : (
+                      <XCircle className="w-3 h-3 text-red-400 flex-shrink-0" />
+                    )}
+                    <span className="text-gray-400 truncate">{hook}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-gray-600 font-mono truncate">{sysInfo.hooks.path}</p>
+            </>
+          )}
+        </div>
+      </section>
+
+      {/* ─── CLAUDE HOME ─── */}
+      <section>
+        <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2 mb-1">
+          <FolderOpen className="w-4 h-4 text-gray-500" />
+          {t("claudeHome.title")}
+        </h3>
+        <p className="text-xs text-gray-500 mb-4">{t("claudeHome.description")}</p>
+
+        <div className="card p-5 space-y-4">
+          <div className="flex items-center gap-3">
+            <input
+              type="text"
+              value={claudeHomeInput}
+              onChange={(e) => {
+                setClaudeHomeInput(e.target.value);
+                setClaudeHomeError(null);
+              }}
+              className="flex-1 bg-surface-4 border border-surface-3 rounded-lg px-3 py-2 text-sm text-gray-200 font-mono focus:outline-none focus:border-violet-500/50"
+              placeholder={t("claudeHome.placeholder")}
+            />
+            <button
+              onClick={handleSaveClaudeHome}
+              disabled={claudeHomeSaving || claudeHomeInput === claudeHome}
+              className="btn-primary px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {claudeHomeSaving ? t("claudeHome.saving") : t("claudeHome.save")}
+            </button>
+          </div>
+          {claudeHomeError && <p className="text-xs text-red-400">{claudeHomeError}</p>}
+          {claudeHome && (
+            <p className="text-xs text-gray-500">
+              {t("claudeHome.current")} <code className="text-gray-400">{claudeHome}</code>
+            </p>
+          )}
+        </div>
+      </section>
+
+      {/* ─── IMPORT HISTORY ─── */}
+      <ImportHistory />
+
+      {/* ─── NOTIFICATIONS ─── */}
+      <section>
+        <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2 mb-1">
+          <Bell className="w-4 h-4 text-gray-500" />
+          {t("notifications.title")}
+        </h3>
+        <p className="text-xs text-gray-500 mb-4">{t("notifications.description")}</p>
+
+        <div className="card p-5 space-y-5">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3">
+              <div
+                className={`w-10 h-10 rounded-xl flex items-center justify-center transition-colors ${
+                  notifPrefs.enabled
+                    ? "bg-blue-500/10 border border-blue-500/20"
+                    : "bg-surface-2 border border-border"
+                }`}
+              >
+                {notifPrefs.enabled ? (
+                  <BellRing className="w-5 h-5 text-blue-400" />
+                ) : (
+                  <BellOff className="w-5 h-5 text-gray-500" />
+                )}
+              </div>
+              <Toggle
+                checked={notifPrefs.enabled}
+                onChange={async (v) => {
+                  if (v) {
+                    if ("Notification" in window && Notification.permission !== "granted") {
+                      requestNotifPermission();
+                    } else {
+                      updateNotifPrefs({ enabled: true });
+                      await subscribeToPush();
+                    }
+                  } else {
+                    updateNotifPrefs({ enabled: false });
+                    await unsubscribeFromPush();
+                  }
+                }}
+                label={t("notifications.enable")}
+              />
+            </div>
+            {"Notification" in window && (
+              <span
+                className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${
+                  Notification.permission === "granted"
+                    ? "text-emerald-400 bg-emerald-500/10 border border-emerald-500/20"
+                    : Notification.permission === "denied"
+                      ? "text-red-400 bg-red-500/10 border border-red-500/20"
+                      : "text-amber-400 bg-amber-500/10 border border-amber-500/20"
+                }`}
+              >
+                {Notification.permission === "granted" ? (
+                  <ShieldCheck className="w-3 h-3" />
+                ) : Notification.permission === "denied" ? (
+                  <ShieldX className="w-3 h-3" />
+                ) : (
+                  <ShieldAlert className="w-3 h-3" />
+                )}
+                {Notification.permission === "granted"
+                  ? t("notifications.granted")
+                  : Notification.permission === "denied"
+                    ? t("notifications.blocked")
+                    : t("notifications.required")}
+              </span>
+            )}
+          </div>
+
+          {notifPrefs.enabled && (
+            <div className="space-y-3 pt-4 border-t border-border">
+              <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">
+                {t("notifications.notifyWhen")}
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="flex items-center gap-3 bg-surface-2 rounded-lg px-3.5 py-3">
+                  <Play className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                  <Toggle
+                    checked={notifPrefs.onNewSession}
+                    onChange={(v) => updateNotifPrefs({ onNewSession: v })}
+                    label={t("notifications.newSession")}
+                  />
+                </div>
+                <div className="flex items-center gap-3 bg-surface-2 rounded-lg px-3.5 py-3">
+                  <CheckCircle className="w-4 h-4 text-violet-400 flex-shrink-0" />
+                  <Toggle
+                    checked={notifPrefs.onSessionComplete}
+                    onChange={(v) => updateNotifPrefs({ onSessionComplete: v })}
+                    label={t("notifications.sessionComplete")}
+                  />
+                </div>
+                <div className="flex items-center gap-3 bg-surface-2 rounded-lg px-3.5 py-3">
+                  <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                  <Toggle
+                    checked={notifPrefs.onSessionError}
+                    onChange={(v) => updateNotifPrefs({ onSessionError: v })}
+                    label={t("notifications.sessionError")}
+                  />
+                </div>
+                <div className="flex items-center gap-3 bg-surface-2 rounded-lg px-3.5 py-3">
+                  <GitBranch className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                  <Toggle
+                    checked={notifPrefs.onSubagentSpawn}
+                    onChange={(v) => updateNotifPrefs({ onSubagentSpawn: v })}
+                    label={t("notifications.subagentSpawned")}
+                  />
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-border">
+                <button
+                  onClick={async () => {
+                    if (!("Notification" in window) || Notification.permission !== "granted")
+                      return;
+                    await fetch("/api/push/send", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        title: t("notifications.testTitle"),
+                        body: t("notifications.testBody"),
+                      }),
+                    });
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md text-gray-400 hover:text-gray-200 hover:bg-surface-4 border border-border transition-colors"
+                >
+                  <Zap className="w-3 h-3" />
+                  {t("notifications.sendTest")}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!notifPrefs.enabled && (
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <BellOff className="w-3.5 h-3.5" />
+              {t("notifications.disabledInfo")}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ─── DATA MANAGEMENT ─── */}
+      <section>
+        <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2 mb-1">
+          <Database className="w-4 h-4 text-gray-500" />
+          {t("data.title")}
+        </h3>
+        <p className="text-xs text-gray-500 mb-4">{t("data.description")}</p>
+
+        <div className="space-y-4">
+          <div className="card p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold flex-shrink-0">
+                {t("data.dbOverview")}
+              </p>
+              {sysInfo && (
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-600 font-mono bg-surface-2 px-2.5 py-1 rounded-md min-w-0">
+                  <HardDrive className="w-3 h-3 flex-shrink-0" />
+                  <span className="truncate">{sysInfo.db.path}</span>
+                </div>
+              )}
+            </div>
+
+            {sysInfo ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                {(() => {
+                  const tableIcons: Record<string, React.ReactNode> = {
+                    sessions: <Layers className="w-4 h-4 text-blue-400" />,
+                    agents: <Users className="w-4 h-4 text-emerald-400" />,
+                    events: <Activity className="w-4 h-4 text-violet-400" />,
+                    token_usage: <Coins className="w-4 h-4 text-amber-400" />,
+                    model_pricing: <BarChart3 className="w-4 h-4 text-cyan-400" />,
+                  };
+                  const tableLabels: Record<string, string> = {
+                    sessions: t("tables.sessions"),
+                    agents: t("tables.agents"),
+                    events: t("tables.events"),
+                    token_usage: t("tables.sessionsWithCost"),
+                    model_pricing: t("tables.pricingRules"),
+                  };
+                  const tableColors: Record<string, string> = {
+                    sessions: "border-blue-500/20",
+                    agents: "border-emerald-500/20",
+                    events: "border-violet-500/20",
+                    token_usage: "border-amber-500/20",
+                    model_pricing: "border-cyan-500/20",
+                  };
+                  return Object.entries(sysInfo.db.counts).map(([table, count]) => (
+                    <div
+                      key={table}
+                      className={`bg-surface-2 rounded-lg px-3 py-3 border-l-2 ${tableColors[table] || "border-gray-500/20"}`}
+                    >
+                      <div className="flex items-center gap-2 mb-1.5">
+                        {tableIcons[table] || <Database className="w-4 h-4 text-gray-500" />}
+                        <p className="text-[11px] text-gray-500 uppercase tracking-wider">
+                          {tableLabels[table] || table.replace(/_/g, " ")}
+                        </p>
+                      </div>
+                      <p className="text-xl font-semibold text-gray-200">
+                        <Tip raw={count.toLocaleString()}>{fmt(count)}</Tip>
+                      </p>
+                    </div>
+                  ));
+                })()}
+                <div className="bg-surface-2 rounded-lg px-3 py-3 border-l-2 border-indigo-500/20">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <HardDrive className="w-4 h-4 text-indigo-400" />
+                    <p className="text-[11px] text-gray-500 uppercase tracking-wider">
+                      {t("data.dbSize")}
+                    </p>
+                  </div>
+                  <p className="text-xl font-semibold text-gray-200">
+                    {formatBytes(sysInfo.db.size)}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">{t("data.loadingDb")}</p>
+            )}
+          </div>
+
+          {/* Session Cleanup */}
+          <div className="card p-5 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center">
+                <Eraser className="w-4 h-4 text-amber-400" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-300">{t("data.sessionCleanup")}</p>
+                <p className="text-xs text-gray-500">{t("data.cleanupDesc")}</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="bg-surface-2 rounded-lg px-4 py-3">
+                <label className="text-xs text-gray-400 block mb-2">{t("data.abandonAfter")}</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="1"
+                    value={abandonHours}
+                    onChange={(e) => setAbandonHours(e.target.value)}
+                    className="input w-20 text-sm text-right font-mono"
+                  />
+                  <span className="text-xs text-gray-500">{t("common:hours")}</span>
+                </div>
+              </div>
+              <div className="bg-surface-2 rounded-lg px-4 py-3">
+                <label className="text-xs text-gray-400 block mb-2">{t("data.purgeAfter")}</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="1"
+                    value={purgeDays}
+                    onChange={(e) => setPurgeDays(e.target.value)}
+                    className="input w-20 text-sm text-right font-mono"
+                  />
+                  <span className="text-xs text-gray-500">{t("common:days")}</span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={() =>
+                confirmAction === "cleanup" ? handleCleanup() : setConfirmAction("cleanup")
+              }
+              disabled={actionLoading !== null}
+              className={`text-xs px-3 py-1.5 rounded-md transition-colors disabled:opacity-50 ${
+                confirmAction === "cleanup"
+                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                  : "text-gray-400 hover:text-gray-300 hover:bg-surface-4 border border-border"
+              }`}
+            >
+              {actionLoading === "cleanup" ? (
+                <RefreshCw className="w-3 h-3 animate-spin inline mr-1" />
+              ) : (
+                <Eraser className="w-3 h-3 inline mr-1" />
+              )}
+              {confirmAction === "cleanup" ? t("data.confirmCleanup") : t("data.runCleanup")}
+            </button>
+
+            {actionBanner(["cleanup"])}
+          </div>
+
+          {/* Danger zone */}
+          <div className="card p-5 space-y-4 border-red-500/10">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center">
+                <AlertTriangle className="w-4 h-4 text-red-400" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-red-400">{t("danger.title")}</p>
+                <p className="text-xs text-gray-500">{t("danger.description")}</p>
+              </div>
+            </div>
+
+            {confirmAction === "clear" ? (
+              <div className="bg-red-500/5 border border-red-500/20 rounded-lg px-4 py-3 flex items-center justify-between flex-wrap gap-3">
+                <span className="text-xs text-amber-400">{t("danger.warning")}</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleClearData}
+                    disabled={actionLoading !== null}
+                    className="text-xs px-3 py-1.5 rounded-md bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 transition-colors disabled:opacity-50"
+                  >
+                    {actionLoading === "clear" ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin inline mr-1" />
+                    ) : null}
+                    {t("danger.yesClearAll")}
+                  </button>
+                  <button
+                    onClick={() => setConfirmAction(null)}
+                    className="text-xs px-3 py-1.5 rounded-md text-gray-400 hover:bg-surface-4 transition-colors"
+                  >
+                    {t("common:cancel")}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmAction("clear")}
+                disabled={actionLoading !== null}
+                className="text-xs px-3 py-1.5 rounded-md text-red-400 hover:bg-red-500/10 border border-red-500/20 transition-colors disabled:opacity-50"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 inline mr-1" />
+                {t("danger.clearAllData")}
+              </button>
+            )}
+
+            {actionBanner(["clear"])}
+          </div>
+        </div>
+      </section>
+
+      {/* ─── ABOUT ─── */}
+      <section>
+        <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2 mb-1">
+          <Server className="w-4 h-4 text-gray-500" />
+          {t("about.title")}
+        </h3>
+        <p className="text-xs text-gray-500 mb-4">{t("about.description")}</p>
+
+        {sysInfo ? (
+          <div className="card p-5">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-surface-2 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Clock className="w-4 h-4 text-blue-400" />
+                  <p className="text-[11px] text-gray-500 uppercase tracking-wider">
+                    {t("about.uptime")}
+                  </p>
+                </div>
+                <p className="text-sm font-semibold text-gray-200">
+                  {formatUptime(sysInfo.server.uptime)}
+                </p>
+              </div>
+              <div className="bg-surface-2 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Cpu className="w-4 h-4 text-emerald-400" />
+                  <p className="text-[11px] text-gray-500 uppercase tracking-wider">
+                    {t("about.nodejs")}
+                  </p>
+                </div>
+                <p className="text-sm font-semibold text-gray-200 font-mono">
+                  {sysInfo.server.node_version}
+                </p>
+              </div>
+              <div className="bg-surface-2 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Globe className="w-4 h-4 text-violet-400" />
+                  <p className="text-[11px] text-gray-500 uppercase tracking-wider">
+                    {t("about.platform")}
+                  </p>
+                </div>
+                <p className="text-sm font-semibold text-gray-200">{sysInfo.server.platform}</p>
+              </div>
+              <div className="bg-surface-2 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Wifi className="w-4 h-4 text-amber-400" />
+                  <p className="text-[11px] text-gray-500 uppercase tracking-wider">
+                    {t("about.wsClients")}
+                  </p>
+                </div>
+                <p className="text-sm font-semibold text-gray-200">
+                  {sysInfo.server.ws_connections}
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500">{t("about.loadingInfo")}</p>
+        )}
+      </section>
+    </div>
+  );
+}

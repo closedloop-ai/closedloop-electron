@@ -96,7 +96,7 @@ export function Tools() {
   }, [selected, loadEvents]);
 
   return (
-    <div className="p-6">
+    <div>
       <div className="mb-4">
         <h1 className="text-lg font-semibold text-gray-100">Tools</h1>
         <p className="text-xs text-gray-500">
@@ -125,6 +125,7 @@ export function Tools() {
               return (
                 <button
                   key={t.tool_name}
+                  data-testid="audit-tool-row"
                   onClick={() => setSelected(t.tool_name)}
                   className={`block w-full text-left rounded-lg border px-3 py-2 transition-colors ${
                     active

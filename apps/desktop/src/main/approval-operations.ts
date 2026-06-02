@@ -31,6 +31,8 @@ export const SUPPORTED_OPERATION_IDS = [
   "codex_review",
   "codex_argue",
   "git_action",
+  "git_local_changes",
+  "git_local_commit_push",
   "git_pr",
   "git_branch_worktree",
   "health_check",
@@ -40,13 +42,14 @@ export const SUPPORTED_OPERATION_IDS = [
   "filesystem",
   "desktop_security_upgrade",
   "binary_paths_settings",
+  "update_and_restart",
   BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID
 ] as const;
 
 export type OperationId = (typeof SUPPORTED_OPERATION_IDS)[number];
 
-export function resolveOperationId(pathname: string): string | null {
+export function resolveOperationId(pathname: string): OperationId | null {
   if (!pathname.startsWith("/api/gateway/")) {
     return null;
   }
@@ -129,6 +132,15 @@ export function resolveOperationId(pathname: string): string | null {
   if (pathname === "/api/gateway/git/branch-worktree") {
     return "git_branch_worktree";
   }
+  if (
+    pathname === "/api/gateway/git/local-changes" ||
+    pathname === "/api/gateway/git/local-changes/diff"
+  ) {
+    return "git_local_changes";
+  }
+  if (pathname === "/api/gateway/git/local-changes/commit-push") {
+    return "git_local_commit_push";
+  }
   if (pathname.startsWith("/api/gateway/git/pr") || pathname === "/api/gateway/git/user") {
     return "git_pr";
   }
@@ -155,6 +167,9 @@ export function resolveOperationId(pathname: string): string | null {
   }
   if (pathname.startsWith("/api/gateway/deploy")) {
     return "deploy";
+  }
+  if (pathname === "/api/gateway/update-and-restart") {
+    return "update_and_restart";
   }
   if (pathname === "/api/gateway/learnings") {
     return "learnings";

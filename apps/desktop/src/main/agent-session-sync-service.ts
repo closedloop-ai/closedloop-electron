@@ -21,11 +21,38 @@ import {
   readLaunchMetadata,
   type LaunchMetadata,
 } from "../server/operations/symphony-utils.js";
+import { expandHomePath } from "../shared/path-utils.js";
+import { computeTokenCost } from "../shared/token-cost.js";
+import type { BillingMode } from "../shared/billing-mode.js";
+import { resolveBillingMode } from "./billing-mode-detector.js";
 
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
 const MIN_INCREMENTAL_SYNC_INTERVAL_MS = 30_000;
-const SESSION_BATCH_SIZE = 10;
+// Maximum number of candidate session IDs to pull from the queue per sync cycle.
+const INCREMENTAL_SESSION_BATCH_SIZE = 10;
+export const BACKFILL_SESSION_BATCH_SIZE = 3;
+// Maximum serialized JSON payload size per batch (256 KiB).
+export const SESSION_PAYLOAD_BYTE_CAP = 262_144;
+// After this many consecutive ack timeouts on the same session, dead-letter it
+// so one oversized or slow session does not permanently block the queue.
+export const MAX_CONSECUTIVE_TIMEOUTS = 3;
+// FEA-1461: after this many consecutive `rate_limited` rejections on the same
+// session, dead-letter it. Higher than the timeout threshold because
+// rate-limits are more legitimately transient (the relay may genuinely just
+// be throttling a burst), but still bounded so a persistently-rejected
+// session cannot infinite-loop the sync queue + log spam.
+export const MAX_CONSECUTIVE_RATE_LIMITED = 5;
+// FEA-1461: after a `rate_limited` rejection, defer re-attempting the same
+// session for this long. Prevents the 5-second sync tick from re-chunking and
+// re-sending the same oversized session every cycle (the original symptom).
+// Other queued sessions continue to flow through `pickReadyCandidates`.
+export const RATE_LIMIT_BACKOFF_MS = 30_000;
+
+export function estimateSessionPayloadBytes(session: SyncedAgentSession): number {
+  return Buffer.byteLength(JSON.stringify(session));
+}
+
 const { app } = electron;
 
 type SessionCursorRow = {
@@ -45,6 +72,7 @@ type SessionRow = {
   awaiting_input_since: string | null;
   metadata: string | null;
   harness: string | null;
+  billing_mode: string | null;
 };
 
 type AgentRow = {
@@ -84,25 +112,28 @@ type TokenUsageRow = {
   cache_write_tokens: number;
 };
 
-type PricingRow = {
-  model_pattern: string;
-  input_per_mtok: number;
-  output_per_mtok: number;
-  cache_read_per_mtok: number;
-  cache_write_per_mtok: number;
-};
-
 export type SessionAttributionResolverCache = {
   attributionByCwd: Map<string, SyncedAgentSessionAttribution | null>;
   launchMetadataRootByCwd: Map<string, string | null>;
   repoFullNameByPath: Map<string, string | null>;
 };
 
+export type AgentSessionSyncTelemetryEvent = {
+  outcome: "failure";
+  reason: DesktopAgentSessionsAckReason;
+  syncMode: AgentSessionSyncMode;
+  sessionCount: number;
+  payloadBytes: number;
+};
+
 export interface AgentSessionSyncServiceOptions {
   isAgentMonitorEnabled: () => boolean;
   isRelayReady: () => boolean;
+  isChunkedSyncEnabled?: () => boolean;
+  getSandboxBaseDirectory?: () => string;
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
+  onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
 }
 
 export class AgentSessionSyncService {
@@ -114,6 +145,7 @@ export class AgentSessionSyncService {
   private observedIdsAtTopUpdatedAt = new Set<string>();
   private lastIncrementalBatchAttemptedAtMs = 0;
   private featureDisabledForRelaySession = false;
+  private firstAckReceived = false;
   private incrementalQueue: string[] = [];
   private readonly incrementalQueuedIds = new Set<string>();
   private backfillQueue: string[] = [];
@@ -123,6 +155,27 @@ export class AgentSessionSyncService {
     launchMetadataRootByCwd: new Map(),
     repoFullNameByPath: new Map(),
   };
+  /** Consecutive timeout count per session ID for dead-letter detection. */
+  private readonly timeoutCountById = new Map<string, number>();
+  /**
+   * FEA-1461: consecutive `rate_limited` count per session ID. Parallel to
+   * `timeoutCountById` — kept separate so the existing timeout dead-letter
+   * threshold and the new rate-limit threshold do not contaminate each other.
+   */
+  private readonly rateLimitedCountById = new Map<string, number>();
+  /**
+   * FEA-1461: per-session deferred-retry deadline (ms since epoch). While the
+   * deadline is in the future, `pickReadyCandidates` skips the session.
+   */
+  private readonly nextRetryAfterMs = new Map<string, number>();
+  /** Session IDs removed from the queue after exceeding MAX_CONSECUTIVE_TIMEOUTS or MAX_CONSECUTIVE_RATE_LIMITED. */
+  private readonly deadLetteredIds = new Set<string>();
+  /** Remaining chunks for an oversized session being sent in parts. */
+  private pendingChunks: {
+    sessionId: string;
+    syncMode: AgentSessionSyncMode;
+    chunks: SyncedAgentSession[];
+  } | null = null;
 
   constructor(options: AgentSessionSyncServiceOptions) {
     this.options = options;
@@ -148,6 +201,7 @@ export class AgentSessionSyncService {
     }
     if (!this.options.isRelayReady()) {
       this.featureDisabledForRelaySession = false;
+      this.firstAckReceived = false;
       this.lastIncrementalBatchAttemptedAtMs = 0;
     }
     if (!this.shouldRun()) {
@@ -159,9 +213,13 @@ export class AgentSessionSyncService {
   }
 
   private shouldRun(): boolean {
-    return (
-      this.options.isAgentMonitorEnabled() && this.options.isRelayReady()
-    ) && !this.featureDisabledForRelaySession;
+    // Allow syncing when the relay reports ready via serverCapabilities, or
+    // when we have already received a confirmed ack in this relay session
+    // (so the service does not rely solely on serverCapabilities.agentSessionSync).
+    // The firstAckReceived flag starts false, so initial syncs still proceed
+    // via isRelayReady() before any ack is received.
+    const relayAccepting = this.options.isRelayReady() || this.firstAckReceived;
+    return this.options.isAgentMonitorEnabled() && relayAccepting && !this.featureDisabledForRelaySession;
   }
 
   private ensureTimer(): void {
@@ -198,46 +256,178 @@ export class AgentSessionSyncService {
       let syncMode: AgentSessionSyncMode | null = null;
       let syncIds: string[] = [];
       let batch: AgentSessionSyncBatch | null = null;
+      let accumulatedBytes = 0;
 
-      const db = new DatabaseSync(dbPath);
-      try {
-        db.exec("PRAGMA busy_timeout = 1000");
-        this.initializeBackfillQueueIfNeeded(db);
-        this.enqueueIncrementalUpdates(db);
-
-        const nowMs = Date.now();
-        if (
-          this.incrementalQueue.length > 0 &&
-          nowMs - this.lastIncrementalBatchAttemptedAtMs >=
-            MIN_INCREMENTAL_SYNC_INTERVAL_MS
-        ) {
-          syncMode = "incremental";
-          syncIds = this.incrementalQueue.slice(0, SESSION_BATCH_SIZE);
-          this.lastIncrementalBatchAttemptedAtMs = nowMs;
-        } else if (this.backfillQueue.length > 0) {
-          syncMode = "backfill";
-          syncIds = this.backfillQueue.slice(0, SESSION_BATCH_SIZE);
+      // If there are pending chunks from a previous oversized session split,
+      // send the next chunk without touching the DB or queues.
+      if (this.pendingChunks && this.pendingChunks.chunks.length > 0) {
+        const { sessionId, syncMode: chunkMode, chunks } = this.pendingChunks;
+        const chunk = chunks.shift()!;
+        accumulatedBytes = estimateSessionPayloadBytes(chunk);
+        const isLast = chunks.length === 0;
+        if (isLast) {
+          this.pendingChunks = null;
         }
-
-        if (!syncMode || syncIds.length === 0) {
-          return;
-        }
-
-        const sessions = loadSyncedSessions(db, syncIds, this.attributionCache);
-        if (sessions.length === 0) {
-          this.dequeue(syncMode, syncIds);
-          return;
-        }
-
+        gatewayLog.info(
+          TAG,
+          `sending chunked session ${sessionId} (~${formatBytes(accumulatedBytes)}); ` +
+            `${chunks.length} chunk(s) remaining`,
+        );
         batch = {
           schemaVersion: AGENT_SESSION_SYNC_SCHEMA_VERSION,
           batchId: randomUUID(),
-          syncMode,
-          sessionCount: sessions.length,
-          sessions,
+          syncMode: chunkMode,
+          sessionCount: 1,
+          sessions: [chunk],
         };
-      } finally {
-        db.close();
+        syncMode = chunkMode;
+        syncIds = [sessionId];
+        // Skip DB access — go straight to send.
+      } else {
+        const db = new DatabaseSync(dbPath);
+        try {
+          db.exec("PRAGMA busy_timeout = 5000");
+          this.initializeBackfillQueueIfNeeded(db);
+          this.enqueueIncrementalUpdates(db);
+
+          const nowMs = Date.now();
+          let candidateIds: string[] = [];
+          // FEA-1461: try incremental first. `pickReadyCandidates` may filter
+          // out every queued session (all in rate-limit backoff). When that
+          // happens, fall through to backfill so it does not get starved
+          // for the whole backoff window — previously the early-return
+          // below would skip backfill entirely on every tick.
+          if (
+            this.incrementalQueue.length > 0 &&
+            nowMs - this.lastIncrementalBatchAttemptedAtMs >=
+              MIN_INCREMENTAL_SYNC_INTERVAL_MS
+          ) {
+            candidateIds = this.pickReadyCandidates(
+              this.incrementalQueue,
+              INCREMENTAL_SESSION_BATCH_SIZE,
+              nowMs,
+            );
+            if (candidateIds.length > 0) {
+              syncMode = "incremental";
+              // Only stamp the throttle timestamp if we actually selected
+              // at least one ready candidate. Stamping when every candidate
+              // was filtered by backoff would unnecessarily delay a session
+              // added to the queue moments later by the full
+              // MIN_INCREMENTAL_SYNC_INTERVAL_MS window.
+              this.lastIncrementalBatchAttemptedAtMs = nowMs;
+            }
+          }
+          if (candidateIds.length === 0 && this.backfillQueue.length > 0) {
+            const backfillCandidates = this.pickReadyCandidates(
+              this.backfillQueue,
+              BACKFILL_SESSION_BATCH_SIZE,
+              nowMs,
+            );
+            if (backfillCandidates.length > 0) {
+              syncMode = "backfill";
+              candidateIds = backfillCandidates;
+            }
+          }
+
+          if (!syncMode || candidateIds.length === 0) {
+            return;
+          }
+
+          const chunkedSyncEnabled = this.options.isChunkedSyncEnabled?.() ?? false;
+
+          // Load all candidate sessions from SQLite, then accumulate into the
+          // batch until adding the next session would exceed the 256 KiB cap.
+          // Sessions that individually exceed the cap are either chunked (if
+          // the feature flag is on) or skipped/dead-lettered.
+          const rawSessions = loadSyncedSessions(
+            db,
+            candidateIds,
+            this.attributionCache,
+          );
+
+          const sandboxBase = this.options.getSandboxBaseDirectory?.() ?? "";
+          const sandboxSkipped: string[] = [];
+          const candidateSessions = rawSessions.filter((s) => {
+            if (isSessionInSandbox(s.cwd, sandboxBase)) {
+              return true;
+            }
+            sandboxSkipped.push(s.externalSessionId);
+            return false;
+          });
+          if (sandboxSkipped.length > 0) {
+            this.dequeue(syncMode, sandboxSkipped);
+            gatewayLog.debug(
+              TAG,
+              `filtered ${sandboxSkipped.length} session(s) outside sandbox`,
+            );
+          }
+
+          if (candidateSessions.length === 0) {
+            this.dequeue(syncMode, candidateIds);
+            return;
+          }
+
+          const sessions: SyncedAgentSession[] = [];
+          const skippedOversized: string[] = [];
+          syncIds = [];
+          for (const session of candidateSessions) {
+            const sanitized = sanitizeSessionForSync(session);
+            const sessionBytes = estimateSessionPayloadBytes(sanitized);
+            if (sessionBytes > SESSION_PAYLOAD_BYTE_CAP && sessions.length === 0) {
+              if (chunkedSyncEnabled) {
+                const chunks = chunkOversizedSession(sanitized, SESSION_PAYLOAD_BYTE_CAP);
+                const first = chunks.shift()!;
+                if (chunks.length > 0) {
+                  this.pendingChunks = {
+                    sessionId: sanitized.externalSessionId,
+                    syncMode,
+                    chunks,
+                  };
+                }
+                sessions.push(first);
+                syncIds.push(sanitized.externalSessionId);
+                accumulatedBytes += estimateSessionPayloadBytes(first);
+                gatewayLog.info(
+                  TAG,
+                  `chunking oversized session ${sanitized.externalSessionId} (~${formatBytes(sessionBytes)}) into ` +
+                    `${chunks.length + 1} chunks of ≤${formatBytes(SESSION_PAYLOAD_BYTE_CAP)}`,
+                );
+              } else {
+                skippedOversized.push(sanitized.externalSessionId);
+                this.deadLetteredIds.add(sanitized.externalSessionId);
+                gatewayLog.warn(
+                  TAG,
+                  `skipping oversized session ${sanitized.externalSessionId} (~${formatBytes(sessionBytes)}) — ` +
+                    `exceeds ${formatBytes(SESSION_PAYLOAD_BYTE_CAP)} payload cap; ` +
+                    `enable chunked session sync or wait for server-side support`,
+                );
+              }
+              continue;
+            }
+            if (
+              sessions.length > 0 &&
+              accumulatedBytes + sessionBytes > SESSION_PAYLOAD_BYTE_CAP
+            ) {
+              break;
+            }
+            sessions.push(sanitized);
+            syncIds.push(sanitized.externalSessionId);
+            accumulatedBytes += sessionBytes;
+          }
+          if (skippedOversized.length > 0) {
+            this.dequeue(syncMode, skippedOversized);
+          }
+
+          batch = {
+            schemaVersion: AGENT_SESSION_SYNC_SCHEMA_VERSION,
+            batchId: randomUUID(),
+            syncMode,
+            sessionCount: sessions.length,
+            sessions,
+          };
+        } finally {
+          db.close();
+        }
       }
 
       if (!batch || !syncMode || syncIds.length === 0) {
@@ -245,7 +435,7 @@ export class AgentSessionSyncService {
       }
 
       const ack = await this.options.sendBatch(batch);
-      this.handleBatchAck(syncMode, syncIds, batch.sessionCount, ack);
+      this.handleBatchAck(syncMode, syncIds, batch.sessionCount, accumulatedBytes, ack);
     } catch (error) {
       gatewayLog.warn(
         TAG,
@@ -324,19 +514,85 @@ export class AgentSessionSyncService {
     this.observedIdsAtTopUpdatedAt = nextTopIds;
   }
 
+  /**
+   * FEA-1461: pick up to `limit` session IDs from `queue`, skipping any whose
+   * deferred-retry deadline (set by a prior `rate_limited` failure) is still
+   * in the future. Order is preserved for selected IDs so the queue remains
+   * stable; only the backed-off entries are skipped, not reordered.
+   */
+  private pickReadyCandidates(
+    queue: readonly string[],
+    limit: number,
+    nowMs: number,
+  ): string[] {
+    const result: string[] = [];
+    for (const id of queue) {
+      const deadline = this.nextRetryAfterMs.get(id);
+      if (deadline !== undefined && deadline > nowMs) {
+        continue;
+      }
+      result.push(id);
+      if (result.length >= limit) {
+        break;
+      }
+    }
+    return result;
+  }
+
   private handleBatchAck(
     syncMode: AgentSessionSyncMode,
     ids: string[],
     sessionCount: number,
+    payloadBytes: number,
     ack: DesktopAgentSessionsAck,
   ): void {
     if (ack.accepted) {
-      this.dequeue(syncMode, ids);
+      this.firstAckReceived = true;
+      // Only dequeue the session after all chunks have been sent.
+      const hasMoreChunks = this.pendingChunks !== null &&
+        ids.length === 1 &&
+        this.pendingChunks.sessionId === ids[0];
+      if (!hasMoreChunks) {
+        for (const id of ids) {
+          this.timeoutCountById.delete(id);
+          // FEA-1461: a successful ack resets the rate-limit counter and
+          // clears any deferred-retry deadline for this session, so a future
+          // rate-limited rejection starts the count over at 1.
+          this.rateLimitedCountById.delete(id);
+          this.nextRetryAfterMs.delete(id);
+        }
+        this.dequeue(syncMode, ids);
+      }
+      const deadLetterSuffix = this.deadLetteredIds.size > 0
+        ? ` deadLettered=${this.deadLetteredIds.size}`
+        : "";
+      const chunkSuffix = hasMoreChunks
+        ? ` (chunk; ${this.pendingChunks!.chunks.length} remaining)`
+        : "";
       gatewayLog.info(
         TAG,
-        `synced ${sessionCount} agent sessions (${syncMode}); remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length}`,
+        `synced ${sessionCount} agent sessions (${syncMode})${chunkSuffix}; remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length}${deadLetterSuffix}`,
       );
       return;
+    }
+
+    // On any failure, discard remaining chunks for this session — partial
+    // chunk sequences are not useful without server-side reassembly.
+    //
+    // FEA-1461: the next retry will re-fetch + re-chunk the source session
+    // from SQLite. That re-chunk work is bounded for transient failures
+    // (rate_limited) by the per-session backoff added below — the same
+    // session is not re-attempted within RATE_LIMIT_BACKOFF_MS — and by the
+    // MAX_CONSECUTIVE_RATE_LIMITED dead-letter trip. True resume-from-chunk-N
+    // would eliminate the re-chunk work entirely but requires server-side
+    // partial-payload reassembly that does not exist today; tracked as out
+    // of scope on FEA-1461.
+    if (this.pendingChunks && ids.includes(this.pendingChunks.sessionId)) {
+      gatewayLog.warn(
+        TAG,
+        `discarding ${this.pendingChunks.chunks.length} remaining chunk(s) for session ${this.pendingChunks.sessionId} after batch failure (${ack.reason})`,
+      );
+      this.pendingChunks = null;
     }
 
     if (ack.reason === DesktopAgentSessionsAckReason.ValidationFailed) {
@@ -345,23 +601,117 @@ export class AgentSessionSyncService {
         `dropping ${ids.length} ${syncMode} agent-session payload(s) after validation_failed to avoid a permanent sync stall`,
       );
       this.dequeue(syncMode, ids);
-      return;
-    }
-
-    if (ack.reason === DesktopAgentSessionsAckReason.FeatureDisabled) {
+    } else if (ack.reason === DesktopAgentSessionsAckReason.FeatureDisabled) {
       this.featureDisabledForRelaySession = true;
       this.clearTimer();
       gatewayLog.info(
         TAG,
         "pausing agent-session sync until the relay reconnects because the current relay session rejected agent-session batches with feature_disabled",
       );
-      return;
+    } else if (ack.reason === DesktopAgentSessionsAckReason.AckTimeout) {
+      const deadLettered: string[] = [];
+      for (const id of ids) {
+        const count = (this.timeoutCountById.get(id) ?? 0) + 1;
+        if (count >= MAX_CONSECUTIVE_TIMEOUTS) {
+          deadLettered.push(id);
+          this.timeoutCountById.delete(id);
+          // FEA-1461: also clear any orphaned rate-limit state for this
+          // session so a dead-lettered id leaves no Map entries behind.
+          this.rateLimitedCountById.delete(id);
+          this.nextRetryAfterMs.delete(id);
+          this.deadLetteredIds.add(id);
+        } else {
+          this.timeoutCountById.set(id, count);
+        }
+      }
+      if (deadLettered.length > 0) {
+        this.dequeue(syncMode, deadLettered);
+        gatewayLog.warn(
+          TAG,
+          `dead-lettered ${deadLettered.length} oversized/slow agent session(s) after ${MAX_CONSECUTIVE_TIMEOUTS} consecutive ack timeouts ` +
+            `(payload ~${formatBytes(payloadBytes)}); ids: ${deadLettered.join(", ")}; ` +
+            `remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length} deadLettered=${this.deadLetteredIds.size}`,
+        );
+      }
+      if (deadLettered.length < ids.length) {
+        const attempt = this.timeoutCountById.get(ids.find((id) => !this.deadLetteredIds.has(id))!) ?? 0;
+        gatewayLog.info(
+          TAG,
+          `agent-session batch (${syncMode}, ~${formatBytes(payloadBytes)}) timed out waiting for server ack ` +
+            `(attempt ${attempt}/${MAX_CONSECUTIVE_TIMEOUTS}); batch left queued for retry`,
+        );
+      }
+    } else if (ack.reason === DesktopAgentSessionsAckReason.RateLimited) {
+      // FEA-1461: previously fell through to the bare `else` below — debug
+      // log only, no counter, no dead-letter, no dequeue, no backoff. For an
+      // oversized session that's permanently throttled, that produced an
+      // infinite retry loop (re-chunking + log spam every 5s).
+      //
+      // FEA-1461 review fix (PR #258, Codex P1): `cloud-socket.sendAgentSessions`
+      // returns `RateLimited` for BOTH server-side payload throttling AND
+      // local transport unavailability (`!isRelayReady()` or socket
+      // disconnected after the batch was prepared). Treating a relay flap
+      // as a session-payload problem would dead-letter perfectly good
+      // sessions after 5 disconnects. Re-check relay readiness here: if the
+      // relay is down right now, the ack came from the transport layer —
+      // defer with backoff but do NOT increment the dead-letter counter.
+      const relayHealthy = this.options.isRelayReady();
+      const deadLettered: string[] = [];
+      const deferred: string[] = [];
+      const retryDeadline = Date.now() + RATE_LIMIT_BACKOFF_MS;
+      for (const id of ids) {
+        const previousCount = this.rateLimitedCountById.get(id) ?? 0;
+        const count = relayHealthy ? previousCount + 1 : previousCount;
+        if (relayHealthy && count >= MAX_CONSECUTIVE_RATE_LIMITED) {
+          deadLettered.push(id);
+          this.rateLimitedCountById.delete(id);
+          this.nextRetryAfterMs.delete(id);
+          // FEA-1461: also clear any orphaned timeout state for this
+          // session so a dead-lettered id leaves no Map entries behind.
+          this.timeoutCountById.delete(id);
+          this.deadLetteredIds.add(id);
+        } else {
+          if (relayHealthy) {
+            this.rateLimitedCountById.set(id, count);
+          }
+          this.nextRetryAfterMs.set(id, retryDeadline);
+          deferred.push(id);
+        }
+      }
+      if (deadLettered.length > 0) {
+        this.dequeue(syncMode, deadLettered);
+        gatewayLog.warn(
+          TAG,
+          `dead-lettered ${deadLettered.length} agent session(s) after ${MAX_CONSECUTIVE_RATE_LIMITED} consecutive rate_limited rejections ` +
+            `(payload ~${formatBytes(payloadBytes)}); ids: ${deadLettered.join(", ")}; ` +
+            `remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length} deadLettered=${this.deadLetteredIds.size}`,
+        );
+      }
+      if (deferred.length > 0) {
+        const sampleId = deferred[0];
+        const attempt = this.rateLimitedCountById.get(sampleId) ?? 0;
+        gatewayLog.info(
+          TAG,
+          `agent-session batch (${syncMode}, ~${formatBytes(payloadBytes)}) rate_limited ` +
+            `(${relayHealthy ? "server payload throttle" : "transport unavailable"}); ` +
+            `deferring ${deferred.length} session(s) for ${Math.round(RATE_LIMIT_BACKOFF_MS / 1000)}s ` +
+            `(attempt ${attempt}/${MAX_CONSECUTIVE_RATE_LIMITED}); batch left queued for retry`,
+        );
+      }
+    } else {
+      gatewayLog.debug(
+        TAG,
+        `agent-session batch rejected by server (${syncMode}): ${ack.reason}`,
+      );
     }
 
-    gatewayLog.debug(
-      TAG,
-      `agent-session batch rejected (${syncMode}): ${ack.reason}`,
-    );
+    this.options.onBatchOutcome?.({
+      outcome: "failure",
+      reason: ack.reason,
+      syncMode,
+      sessionCount,
+      payloadBytes,
+    });
   }
 
   private dequeue(syncMode: AgentSessionSyncMode, ids: string[]): void {
@@ -381,6 +731,66 @@ export class AgentSessionSyncService {
       this.backfillQueuedIds.delete(id);
     }
   }
+}
+
+export function isSessionInSandbox(
+  cwd: string | null | undefined,
+  sandboxBaseDirectory: string | null | undefined,
+): boolean {
+  if (!sandboxBaseDirectory) {
+    return false;
+  }
+  if (!cwd) {
+    return false;
+  }
+  const normalizedCwd = path.resolve(expandHomePath(cwd));
+  const normalizedSandbox = path.resolve(expandHomePath(sandboxBaseDirectory));
+  if (normalizedCwd === normalizedSandbox) {
+    return true;
+  }
+  const prefix = normalizedSandbox.endsWith(path.sep)
+    ? normalizedSandbox
+    : normalizedSandbox + path.sep;
+  return normalizedCwd.startsWith(prefix);
+}
+
+export function sanitizeSessionForSync(
+  session: SyncedAgentSession,
+): SyncedAgentSession {
+  return {
+    ...session,
+    agents: session.agents.map((agent) => ({
+      ...agent,
+      task: null,
+    })),
+    events: session.events.map((event) => ({
+      ...event,
+      data: stripDataContent(event.data),
+    })),
+  };
+}
+
+const STRIPPED_LEAF_KEYS = new Set(["prompt", "content", "stdout", "stderr"]);
+
+function stripDataContent(data: SyncJsonValue | undefined): SyncJsonValue | undefined {
+  if (data === undefined || data === null) {
+    return data;
+  }
+  if (typeof data !== "object") {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => stripDataContent(item) ?? null);
+  }
+  const obj = data as Record<string, SyncJsonValue>;
+  const rest: Record<string, SyncJsonValue> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (STRIPPED_LEAF_KEYS.has(k)) {
+      continue;
+    }
+    rest[k] = (typeof v === "object" && v !== null ? stripDataContent(v) : v) ?? null;
+  }
+  return Object.keys(rest).length > 0 ? rest : null;
 }
 
 export function resolveAgentMonitorDatabasePath(
@@ -458,7 +868,8 @@ export function loadSyncedSessions(
         ended_at,
         awaiting_input_since,
         metadata,
-        harness
+        harness,
+        billing_mode
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -522,20 +933,6 @@ export function loadSyncedSessions(
     `,
     ids,
   );
-  const pricingRows = db
-    .prepare(
-      `
-        SELECT
-          model_pattern,
-          input_per_mtok,
-          output_per_mtok,
-          cache_read_per_mtok,
-          cache_write_per_mtok
-        FROM model_pricing
-        ORDER BY LENGTH(model_pattern) DESC, model_pattern ASC
-      `,
-    )
-    .all() as PricingRow[];
 
   const sessionsById = new Map(sessionRows.map((row) => [row.id, row]));
   const agentsBySessionId = groupRowsBySessionId(agentRows);
@@ -551,14 +948,19 @@ export function loadSyncedSessions(
     const attribution = resolveSessionAttribution(row.cwd, cache);
     const tokenUsageByModel: SyncedAgentSessionTokenUsage[] = (
       tokenUsageBySessionId.get(id) ?? []
-    ).map((tokenRow) => ({
-      model: tokenRow.model,
-      inputTokens: tokenRow.input_tokens,
-      outputTokens: tokenRow.output_tokens,
-      cacheReadTokens: tokenRow.cache_read_tokens,
-      cacheWriteTokens: tokenRow.cache_write_tokens,
-      estimatedCostUsd: estimateTokenUsageCostUsd(tokenRow, pricingRows),
-    }));
+    ).map((tokenRow) => {
+      const estimatedCostUsd = estimateTokenUsageCostUsd(tokenRow);
+      return {
+        model: tokenRow.model,
+        inputTokens: tokenRow.input_tokens,
+        outputTokens: tokenRow.output_tokens,
+        cacheReadTokens: tokenRow.cache_read_tokens,
+        cacheWriteTokens: tokenRow.cache_write_tokens,
+        // Omit entirely when the model is not priced — the contract field is
+        // optional, so an absent value renders as "—" rather than a silent $0.
+        ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
+      };
+    });
 
     return [
       {
@@ -566,6 +968,7 @@ export function loadSyncedSessions(
         name: row.name,
         status: row.status,
         harness: row.harness,
+        billingMode: resolveBillingModeForRow(row),
         cwd: row.cwd,
         model: row.model,
         startedAt: row.started_at,
@@ -604,24 +1007,39 @@ export function loadSyncedSessions(
   });
 }
 
+/**
+ * Estimate the USD cost for one token-usage row using the canonical
+ * genai-prices engine (`src/shared/token-cost.ts`). Returns `undefined` when
+ * the model is not priced so the caller can omit the optional contract field
+ * (no silent $0). Library prices are returned UNCHANGED — no local rounding,
+ * clamping, or override (the override pipeline was the source of the v1
+ * overcharge bugs; see token-cost.ts).
+ */
 export function estimateTokenUsageCostUsd(
   tokenUsage: TokenUsageRow,
-  pricingRows: PricingRow[],
-): number {
-  const pricing = pricingRows.find((row) =>
-    sqliteLikeMatch(tokenUsage.model, row.model_pattern),
-  );
-  if (!pricing) {
-    return 0;
-  }
+): number | undefined {
+  const result = computeTokenCost({
+    model: tokenUsage.model,
+    inputTokens: tokenUsage.input_tokens,
+    outputTokens: tokenUsage.output_tokens,
+    cacheReadTokens: tokenUsage.cache_read_tokens,
+    cacheWriteTokens: tokenUsage.cache_write_tokens,
+  });
+  return result.priced && result.costUsd != null ? result.costUsd : undefined;
+}
 
-  return roundUsd(
-    (tokenUsage.input_tokens * pricing.input_per_mtok +
-      tokenUsage.output_tokens * pricing.output_per_mtok +
-      tokenUsage.cache_read_tokens * pricing.cache_read_per_mtok +
-      tokenUsage.cache_write_tokens * pricing.cache_write_per_mtok) /
-      1_000_000,
-  );
+/**
+ * Resolve a session's billing mode for the sync payload (CLOSEDLOOP FEA-1434).
+ * The sidecar importers and the Claude session route stamp the real mode at
+ * ingest; this fills the gap for legacy rows (migrated to the default
+ * 'unknown') by best-effort detecting from the live desktop environment. A
+ * stored, definite mode always wins over re-detection.
+ */
+export function resolveBillingModeForRow(row: SessionRow): BillingMode {
+  return resolveBillingMode({
+    billingMode: row.billing_mode,
+    harness: row.harness,
+  });
 }
 
 function selectRowsByIds<T>(
@@ -780,15 +1198,47 @@ function isSyncJsonObject(value: SyncJsonValue | null): value is SyncJsonObject 
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function sqliteLikeMatch(value: string, pattern: string): boolean {
-  const escaped = pattern.replaceAll(/([.+^${}()|[\]\\])/g, "\\$1");
-  const regex = new RegExp(
-    `^${escaped.replaceAll("%", ".*").replaceAll("_", ".")}$`,
-    "i",
-  );
-  return regex.test(value);
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-function roundUsd(value: number): number {
-  return Math.round(value * 1_000_000) / 1_000_000;
+/**
+ * Split an oversized session into multiple chunks, each within the byte cap.
+ * Every chunk contains the full session metadata, agents, and token usage;
+ * only the events array is paginated across chunks.
+ */
+export function chunkOversizedSession(
+  session: SyncedAgentSession,
+  maxBytes: number,
+): SyncedAgentSession[] {
+  const baseSession: SyncedAgentSession = { ...session, events: [] };
+  const baseBytes = estimateSessionPayloadBytes(baseSession);
+  const eventBudget = maxBytes - baseBytes;
+
+  // If session metadata alone exceeds the cap, send it without events.
+  if (eventBudget <= 0 || session.events.length === 0) {
+    return [baseSession];
+  }
+
+  const chunks: SyncedAgentSession[] = [];
+  let currentEvents: typeof session.events = [];
+  let currentBytes = 0;
+
+  for (const event of session.events) {
+    const eventBytes = Buffer.byteLength(JSON.stringify(event));
+    if (currentBytes > 0 && currentBytes + eventBytes > eventBudget) {
+      chunks.push({ ...session, events: currentEvents });
+      currentEvents = [];
+      currentBytes = 0;
+    }
+    currentEvents.push(event);
+    currentBytes += eventBytes;
+  }
+  if (currentEvents.length > 0) {
+    chunks.push({ ...session, events: currentEvents });
+  }
+
+  return chunks.length > 0 ? chunks : [baseSession];
 }

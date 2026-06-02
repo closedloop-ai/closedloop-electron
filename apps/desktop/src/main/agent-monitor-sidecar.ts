@@ -1,8 +1,11 @@
 import { app } from "electron";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
 import { gatewayLog } from "./gateway-logger.js";
@@ -17,6 +20,16 @@ const READY_POLL_INTERVAL_MS = 500;
 // legacy import competing for the event loop. Ready != import-complete; the
 // iframe shows a loading state and populates progressively over the socket.
 const READY_TIMEOUT_MS = 60_000;
+// EADDRINUSE crashes do not surface until the child has finished its SQLite
+// init / migrations / Express boot and reached listen(). Live testing on a
+// dev build observed up to ~2.5s between spawn and the EADDRINUSE error;
+// production machines under load could be slower. Hold the readiness verdict
+// long enough that an exit during init reliably arrives before we reset the
+// restart counter, otherwise a foreign process on the same port answers
+// /api/health while our child is still initializing and the supervisor loops
+// forever at attempt 1/N. 5s leaves enough margin without making a real
+// successful boot feel sluggish (cold start is already 60s budget).
+const READY_STABILITY_WINDOW_MS = 5_000;
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_BASE_DELAY_MS = 1_000;
 const RESTART_MAX_DELAY_MS = 30_000;
@@ -25,7 +38,13 @@ const RESTART_MAX_DELAY_MS = 30_000;
 // forced process.exit(0). DB integrity is already flushed by then, so a short
 // grace + process-group SIGKILL keeps app shutdown within budget.
 const STOP_GRACE_MS = 2_000;
+// Bounds how long reclaimOrphan waits for a SIGKILLed orphan to actually exit
+// (and release the fixed port) before launch() respawns. Kept short — same order
+// as STOP_GRACE_MS — so a lingering pid can never stall the fire-and-forget boot;
+// handleExit()'s exponential-backoff restart loop is the fallback if it times out.
+const RECLAIM_WAIT_TIMEOUT_MS = 2_000;
 const requireFromHere = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 
 // Runs the generated Claude-Code-Agent-Monitor runtime tree as a managed
 // localhost child process. The Electron binary is reused as the Node runtime
@@ -35,11 +54,27 @@ const requireFromHere = createRequire(import.meta.url);
 export class AgentMonitorSidecar {
   private child: ChildProcess | null = null;
   private readonly port = AGENT_MONITOR_PORT;
+  private readonly sessionToken = randomUUID();
+  private readonly dataDir = path.join(
+    app.getPath("userData"),
+    "agent-monitor",
+  );
   private started = false;
   private stopping = false;
   private ready = false;
   private restartAttempts = 0;
   private readyResolvers: Array<(ok: boolean) => void> = [];
+  private lastExitWasPortConflict = false;
+  private onTerminalFailure?: (reason: string) => void;
+  private sandboxBaseDirectory = "";
+
+  constructor(options?: { onTerminalFailure?: (reason: string) => void }) {
+    this.onTerminalFailure = options?.onTerminalFailure;
+  }
+
+  setSandboxBaseDirectory(dir: string): void {
+    this.sandboxBaseDirectory = dir;
+  }
 
   isReady(): boolean {
     return this.ready;
@@ -103,6 +138,7 @@ export class AgentMonitorSidecar {
       }
       gatewayLog.info(TAG, "agent monitor stopped");
     } finally {
+      await this.deletePidFile();
       this.restartAttempts = 0;
       this.stopping = false;
     }
@@ -117,10 +153,131 @@ export class AgentMonitorSidecar {
     }
   }
 
+  private async deletePidFile(): Promise<void> {
+    try {
+      await fs.unlink(path.join(this.dataDir, "sidecar.pid"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        gatewayLog.warn(TAG, `failed to delete PID file: ${describe(error)}`);
+      }
+    }
+  }
+
+  private async reclaimOrphan(): Promise<void> {
+    const pidFile = path.join(this.dataDir, "sidecar.pid");
+    let raw: string;
+    try {
+      raw = await fs.readFile(pidFile, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      gatewayLog.warn(TAG, `failed to read PID file: ${describe(error)}`);
+      return;
+    }
+    let pid: number;
+    let sessionToken: string | undefined;
+    let recordedStartTime: string | null;
+    try {
+      const parsed = JSON.parse(raw) as {
+        pid: number;
+        sessionToken?: string;
+        startTime?: string | null;
+      };
+      pid = parsed.pid;
+      sessionToken = parsed.sessionToken;
+      recordedStartTime = parsed.startTime ?? null;
+    } catch (error) {
+      gatewayLog.warn(TAG, `failed to parse PID file: ${describe(error)}`);
+      await this.deletePidFile();
+      return;
+    }
+    if (!Number.isInteger(pid) || pid <= 0) {
+      gatewayLog.warn(
+        TAG,
+        `PID file contains invalid pid=${pid} — deleting without kill`,
+      );
+      await this.deletePidFile();
+      return;
+    }
+    if (!sessionToken) {
+      gatewayLog.warn(
+        TAG,
+        `PID file missing sessionToken — potential foreign process on pid=${pid}, skipping kill`,
+      );
+      await this.deletePidFile();
+      return;
+    }
+    if (isRunning(pid)) {
+      // sessionToken presence only proves THIS app authored the PID file — it
+      // cannot prove the pid still belongs to our sidecar (the token is written
+      // and read by the same record, so it has no independent witness). PIDs are
+      // recycled, and our port is fixed, so a stale pid may now belong to an
+      // unrelated process. Before SIGKILL we verify ownership against the live
+      // process itself: its command line must still be running our sidecar
+      // entry, and its OS start-time must match what we recorded at spawn. Both
+      // are independent of the PID file, so a recycled/foreign pid fails the
+      // check and is never killed.
+      const { entryFile } = resolveAgentMonitorPaths();
+      const [command, liveStartTime] = await Promise.all([
+        getProcessCommand(pid),
+        getProcessStartTime(pid),
+      ]);
+      const runsOurEntry = command !== null && command.includes(entryFile);
+      // If we could not record a start-time at spawn (ps unavailable), fall back
+      // to the command-line identity alone rather than refusing to ever reclaim.
+      const startTimeMatches =
+        recordedStartTime === null ||
+        (liveStartTime !== null && liveStartTime === recordedStartTime);
+      if (runsOurEntry && startTimeMatches) {
+        gatewayLog.info(TAG, `reclaiming orphan sidecar pid=${pid}`);
+        killGroup(pid, "SIGKILL");
+        // SIGKILL delivery is not synchronous with the OS releasing the orphan's
+        // listening socket on our fixed port. Wait (bounded) for the pid to
+        // actually exit so the imminent respawn in launch() binds on the first
+        // attempt instead of racing a not-yet-released port and hitting
+        // EADDRINUSE. The deadline guarantees this never stalls the
+        // fire-and-forget boot; if the pid lingers past it, handleExit()'s
+        // exponential-backoff restart loop recovers on a later attempt.
+        const deadline = Date.now() + RECLAIM_WAIT_TIMEOUT_MS;
+        while (isRunning(pid) && Date.now() < deadline) {
+          await delay(READY_POLL_INTERVAL_MS);
+        }
+      } else {
+        gatewayLog.warn(
+          TAG,
+          `pid=${pid} does not match our sidecar identity (recycled or foreign process) — skipping kill`,
+        );
+      }
+    }
+    await this.deletePidFile();
+  }
+
+  private async writePidFile(pid: number): Promise<void> {
+    const pidFile = path.join(this.dataDir, "sidecar.pid");
+    const tmpFile = `${pidFile}.tmp`;
+    const payload = JSON.stringify({
+      pid,
+      sessionToken: this.sessionToken,
+      startTime: await getProcessStartTime(pid),
+      recordedAt: new Date().toISOString(),
+    });
+    try {
+      await fs.mkdir(this.dataDir, { recursive: true });
+      await fs.writeFile(tmpFile, payload, "utf-8");
+      await fs.rename(tmpFile, pidFile);
+    } catch (error) {
+      gatewayLog.warn(TAG, `failed to write PID file: ${describe(error)}`);
+    }
+  }
+
   private async launch(): Promise<void> {
     if (!this.started || this.stopping) {
       return;
     }
+
+    this.lastExitWasPortConflict = false;
+    await this.reclaimOrphan();
 
     const { rootDir, entryFile } = resolveAgentMonitorPaths();
     if (!existsSync(entryFile)) {
@@ -133,17 +290,8 @@ export class AgentMonitorSidecar {
       return;
     }
 
-    const dbPath = path.join(
-      app.getPath("userData"),
-      "agent-monitor",
-      "dashboard.db",
-    );
-    const pushKeysPath = path.join(
-      app.getPath("userData"),
-      "agent-monitor",
-      "data",
-      "vapid-keys.json",
-    );
+    const dbPath = path.join(this.dataDir, "dashboard.db");
+    const pushKeysPath = path.join(this.dataDir, "data", "vapid-keys.json");
     const runtimeNodePath = buildRuntimeNodePath();
 
     const child = spawn(process.execPath, [entryFile], {
@@ -162,6 +310,9 @@ export class AgentMonitorSidecar {
         // Hooks are host-managed via explicit opt-in (agent-monitor-hooks.ts).
         // Never let the generated server silently auto-install them.
         CCAM_AUTO_INSTALL_HOOKS: "0",
+        ...(this.sandboxBaseDirectory
+          ? { SANDBOX_BASE_DIRECTORY: this.sandboxBaseDirectory }
+          : {}),
       },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -178,32 +329,66 @@ export class AgentMonitorSidecar {
       TAG,
       `starting agent monitor pid=${child.pid} port=${this.port}`,
     );
+    await this.writePidFile(child.pid);
 
     pipeLines(child.stdout, (line) => gatewayLog.debug(TAG, line));
-    pipeLines(child.stderr, (line) => gatewayLog.warn(TAG, line));
+    pipeLines(child.stderr, (line) => {
+      if (line.includes("EADDRINUSE")) {
+        this.lastExitWasPortConflict = true;
+      }
+      gatewayLog.warn(TAG, line);
+    });
     child.on("error", (error) =>
       gatewayLog.error(TAG, `process error: ${describe(error)}`),
     );
     child.on("exit", (code, signal) => this.handleExit(code, signal));
 
-    const healthy = await this.waitForHealth();
-    if (healthy) {
-      this.restartAttempts = 0;
-      gatewayLog.info(TAG, `agent monitor ready at ${this.getUrl()}`);
-      this.flushReady(true);
-    } else {
-      gatewayLog.warn(
-        TAG,
-        `agent monitor did not become healthy on port ${this.port}`,
-      );
-      this.flushReady(false);
+    const healthy = await this.waitForHealth(child);
+    // Don't trust a bare /api/health 200 — a foreign process on the same port
+    // (orphaned dev sidecar, prior app instance, deliberate standalone build)
+    // will answer while OUR child is mid-EADDRINUSE crash. Re-verify our child
+    // is still the active one and still alive, then hold for a short stability
+    // window and re-verify once more. Only then is readiness real and the
+    // restart counter is safe to clear.
+    if (healthy && this.isChildAliveAndCurrent(child)) {
+      await delay(READY_STABILITY_WINDOW_MS);
+      if (this.isChildAliveAndCurrent(child)) {
+        this.restartAttempts = 0;
+        gatewayLog.info(
+          TAG,
+          `agent monitor ready at http://${HOST}:${this.port}`,
+        );
+        this.flushReady(true);
+        return;
+      }
     }
+    // A newer launch() call has already replaced this.child — the current
+    // launch has been superseded, so suppress the stale warn and skip
+    // flushReady(false) to avoid overwriting the newer launch's outcome.
+    if (this.child !== child) {
+      return;
+    }
+    gatewayLog.warn(
+      TAG,
+      `agent monitor did not become healthy on port ${this.port}`,
+    );
+    this.flushReady(false);
+  }
+
+  // Single source of truth for "the child we just spawned is still our
+  // active reference AND still running". Keeping this in one place means a
+  // future change cannot quietly skip half the guard at one of the three
+  // call sites (waitForHealth poll, post-health gate, post-stability gate)
+  // and reintroduce the false-positive-ready race fixed in FEA-1403.
+  private isChildAliveAndCurrent(child: ChildProcess): boolean {
+    return this.child === child && child.exitCode === null;
   }
 
   private handleExit(
     code: number | null,
     signal: NodeJS.Signals | null,
   ): void {
+    void this.deletePidFile();
     const shouldRestart = this.started && !this.stopping;
     this.child = null;
     this.ready = false;
@@ -223,6 +408,10 @@ export class AgentMonitorSidecar {
         TAG,
         `giving up after ${this.restartAttempts} restart attempts`,
       );
+      const reason = this.lastExitWasPortConflict
+        ? `Agent monitor failed: port ${this.port} is in use by another process. Close the conflicting process and restart.`
+        : `Agent monitor failed after ${this.restartAttempts} restart attempts.`;
+      this.onTerminalFailure?.(reason);
       return;
     }
     const attempt = ++this.restartAttempts;
@@ -244,10 +433,14 @@ export class AgentMonitorSidecar {
     }, backoff);
   }
 
-  private async waitForHealth(): Promise<boolean> {
+  private async waitForHealth(child: ChildProcess): Promise<boolean> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (this.stopping || this.child == null) {
+      // Identity-scoped: a 200 from /api/health is only meaningful if it's
+      // OUR child still serving it. If `this.child` has been replaced by a
+      // newer launch, or the spawned child has already exited, abandon the
+      // poll so the caller does not credit the success to this process.
+      if (this.stopping || !this.isChildAliveAndCurrent(child)) {
         return false;
       }
       if (await healthOk(this.port)) {
@@ -328,6 +521,12 @@ function pipeLines(
 }
 
 function killGroup(pid: number, signal: NodeJS.Signals): void {
+  // Defense-in-depth: a non-positive pid would make process.kill(-pid, ...)
+  // signal the current process group (pid=0 → -0 → 0), killing the app itself.
+  if (!Number.isInteger(pid) || pid <= 0) {
+    gatewayLog.warn(TAG, `killGroup ignoring invalid pid=${pid}`);
+    return;
+  }
   try {
     // Negative pid targets the detached process group.
     process.kill(-pid, signal);
@@ -345,6 +544,47 @@ function isRunning(pid: number): boolean {
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+// OS-observed process identity used to confirm a recorded pid still belongs to
+// our sidecar before SIGKILL (see reclaimOrphan). `ps` is available on both
+// macOS (the packaged target) and Linux; on macOS another process's env is not
+// readable and there is no /proc, so the command line + start-time are the only
+// portable, independent ownership signals. Both helpers return null on any
+// failure so the caller fails safe (skip kill) rather than throwing.
+
+// Full argv of `pid` (-ww disables width truncation so a long entry path is
+// never cut off). Used to check the live process is still running our sidecar.
+async function getProcessCommand(pid: number): Promise<string | null> {
+  return queryProcess(pid, "command=");
+}
+
+// OS start-time of `pid`. Stable for the life of a process, so a recycled pid
+// (now a different process) reports a different value than what we recorded.
+async function getProcessStartTime(pid: number): Promise<string | null> {
+  return queryProcess(pid, "lstart=");
+}
+
+async function queryProcess(
+  pid: number,
+  field: "command=" | "lstart=",
+): Promise<string | null> {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  try {
+    const { stdout } = await execFileAsync("ps", [
+      "-ww",
+      "-p",
+      String(pid),
+      "-o",
+      field,
+    ]);
+    const value = stdout.trim();
+    return value.length > 0 ? value : null;
+  } catch {
+    return null;
   }
 }
 

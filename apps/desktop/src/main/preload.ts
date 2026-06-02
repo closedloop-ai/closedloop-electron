@@ -1,3 +1,4 @@
+import type { ManagedKeyHintState } from "../shared/contracts.js";
 import { contextBridge, ipcRenderer } from "electron";
 
 const desktopApi = {
@@ -44,6 +45,23 @@ const desktopApi = {
   setApiKey: (apiKey: string) =>
     ipcRenderer.invoke("desktop:set-api-key", apiKey) as Promise<unknown>,
   clearApiKey: () => ipcRenderer.invoke("desktop:clear-api-key") as Promise<unknown>,
+  // FEA-1435/1436: vendor Admin key intake + cost reconciliation. The bridge only
+  // ever moves existence-only statuses, persisted drift rows, and key-free run
+  // summaries — never the Admin key material itself (main-process only).
+  getAdminKeyStatuses: () =>
+    ipcRenderer.invoke("desktop:get-admin-key-statuses") as Promise<unknown>,
+  setAdminKey: (vendor: string, key: string) =>
+    ipcRenderer.invoke("desktop:set-admin-key", { vendor, key }) as Promise<unknown>,
+  clearAdminKey: (vendor: string) =>
+    ipcRenderer.invoke("desktop:clear-admin-key", vendor) as Promise<unknown>,
+  runCostReconciliation: () =>
+    ipcRenderer.invoke("desktop:run-cost-reconciliation") as Promise<unknown>,
+  listCostReconciliation: (query?: unknown) =>
+    ipcRenderer.invoke("desktop:list-cost-reconciliation", query) as Promise<unknown>,
+  // FEA-1436: Claude Code per-user usage (Anthropic's own estimate). Returns
+  // per-actor usage rows only — never any Admin key material.
+  getClaudeCodeAnalytics: (query?: unknown) =>
+    ipcRenderer.invoke("desktop:get-claude-code-analytics", query) as Promise<unknown>,
   getCloudCommandsPaused: () =>
     ipcRenderer.invoke("desktop:get-cloud-commands-paused") as Promise<unknown>,
   setCloudCommandsPaused: (paused: boolean) =>
@@ -55,6 +73,11 @@ const desktopApi = {
   getOnboardingState: () => ipcRenderer.invoke("desktop:get-onboarding-state") as Promise<unknown>,
   completeOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:complete-onboarding", payload) as Promise<unknown>,
+  // FEA-1333: mark the one-time Agent Dashboard welcome as seen.
+  markDashboardWelcomeSeen: () =>
+    ipcRenderer.invoke("desktop:mark-dashboard-welcome-seen") as Promise<{
+      ok: boolean;
+    }>,
   startDeviceOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:start-device-onboarding", payload) as Promise<unknown>,
   dismissOnboardingPopup: (payload: { permanent: boolean }) =>
@@ -130,6 +153,50 @@ const desktopApi = {
       "desktop:set-agent-monitor-hooks-enabled",
       enabled,
     ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>,
+  getAllFlags: () =>
+    ipcRenderer.invoke("desktop:get-all-flags") as Promise<unknown>,
+  onFlagsChanged: (callback: () => void) => {
+    ipcRenderer.on("desktop:flags-changed", callback);
+  },
+  // FEA-1334: cold-start ingest progress for the floating progress card.
+  // Resolves null when the sidecar is unreachable or has no progress yet.
+  getAgentMonitorIngestProgress: () =>
+    ipcRenderer.invoke(
+      "desktop:get-agent-monitor-ingest-progress",
+    ) as Promise<{
+      running: boolean;
+      startedAt: number | null;
+      updatedAt: number | null;
+      finishedAt: number | null;
+      total: number;
+      parsed: number;
+      imported: number;
+      byHarness: Record<
+        string,
+        { total: number; parsed: number; imported: number; complete: boolean }
+      >;
+    } | null>,
+  // FEA-1334: clear the dashboard DB and restart the sidecar so it re-imports
+  // every agent session from scratch. The progress banner tracks the re-import.
+  reprocessAgentLogs: () =>
+    ipcRenderer.invoke("desktop:reprocess-agent-logs") as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  /**
+   * Returns the current state of the managed-key revival limitation hint (D5).
+   * The main process reads provenance from apiKeyStore — renderer does not control
+   * what is returned.
+   */
+  getManagedKeyHintState: () =>
+    ipcRenderer.invoke("desktop:get-managed-key-hint-state") as Promise<ManagedKeyHintState>,
+  /**
+   * Dismisses the managed-key revival limitation hint (D5).
+   * The main process records the current provenance from apiKeyStore.
+   * The renderer does not supply any arguments — provenance is main-process-only.
+   */
+  dismissManagedKeyHint: () =>
+    ipcRenderer.invoke("desktop:dismiss-managed-key-hint") as Promise<{ success: boolean }>,
   db: {
     getSessions: () => ipcRenderer.invoke("desktop:db:get-sessions") as Promise<unknown>,
     getSession: (id: string) => ipcRenderer.invoke("desktop:db:get-session", id) as Promise<unknown>,
@@ -144,7 +211,7 @@ const desktopApi = {
     getAgentHierarchy: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agent-hierarchy", sessionId) as Promise<unknown>,
     getAnalytics: () => ipcRenderer.invoke("desktop:db:get-analytics") as Promise<unknown>,
     getWorkflowData: () => ipcRenderer.invoke("desktop:db:get-workflow-data") as Promise<unknown>,
-  }
+  },
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

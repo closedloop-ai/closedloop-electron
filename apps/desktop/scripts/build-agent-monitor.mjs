@@ -60,11 +60,18 @@ const generatedSessionsRoute = path.join(
   "sessions.js",
 );
 const generatedDbFile = path.join(generatedRootDir, "server", "db.js");
+const generatedCompatSqlite = path.join(generatedRootDir, "server", "compat-sqlite.js");
 const generatedHooksRoute = path.join(
   generatedRootDir,
   "server",
   "routes",
   "hooks.js",
+);
+const generatedImportRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "import.js",
 );
 const generatedPricingRoute = path.join(
   generatedRootDir,
@@ -72,7 +79,18 @@ const generatedPricingRoute = path.join(
   "routes",
   "pricing.js",
 );
+const generatedAnalyticsRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "analytics.js",
+);
 const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
+const generatedWebSocketFile = path.join(
+  generatedRootDir,
+  "server",
+  "websocket.js",
+);
 const generatedCcDiscovery = path.join(
   generatedRootDir,
   "server",
@@ -93,6 +111,28 @@ const generatedUninstallHooks = path.join(
 const stampFile = path.join(generatedRootDir, ".build-stamp");
 const viteBin = resolvePackageBin("vite", "vite");
 
+// FEA-1407: shared CJS body for the isSessionInSandbox helper injected into
+// both hooks.js and import-history.js. Single source of truth — the two patch
+// functions reference this constant instead of inlining separate copies.
+const IS_SESSION_IN_SANDBOX_CJS = [
+  "function isSessionInSandbox(cwd, sandboxBase) {",
+  "  if (!sandboxBase) return false;",
+  "  if (!cwd) return false;",
+  '  const _path = require("path");',
+  '  const _os = require("os");',
+  "  function _expandHome(p) {",
+  '    if (p === "~") return _os.homedir();',
+  '    if (p.startsWith("~/")) return _path.join(_os.homedir(), p.slice(2));',
+  "    return p;",
+  "  }",
+  "  const nc = _path.resolve(_expandHome(cwd));",
+  "  const ns = _path.resolve(_expandHome(sandboxBase));",
+  "  if (nc === ns) return true;",
+  '  const prefix = ns.endsWith(_path.sep) ? ns : ns + _path.sep;',
+  "  return nc.startsWith(prefix);",
+  "}",
+].join("\n");
+
 // CLOSEDLOOP multi-harness support: proven ingestion modules live in-repo and
 // are copied into the generated server/lib at materialize time (parallel to
 // how uninstall-hooks.js is written). Their logic is architecture-independent
@@ -108,7 +148,20 @@ const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watc
 const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
 const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
 const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
-const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"];
+const SHARED_MODULES = [
+  "harness-watcher-utils",
+  "import-session-utils",
+  "parser-utils",
+  "catchup-cache",
+  // CLOSEDLOOP FEA-1334: cold-start ingest orchestration + persisted-cache
+  // path resolution + the progress singleton GET /api/import/progress reads.
+  "ingest-paths",
+  "ingest-progress",
+  "ingest-orchestrator",
+  // CLOSEDLOOP FEA-1434: write-path billing-mode stamping shared by the Claude
+  // hook route and every non-Claude importer (requires ../lib/billing-mode).
+  "billing-stamp",
+];
 const MULTI_HARNESS_SPECS = [
   {
     key: "codex",
@@ -218,6 +271,54 @@ const PACK_CATALOG_CLIENT_PAGES = [
   "Sparkline",
 ];
 
+// CLOSEDLOOP engineer GitHub activity capture (FEA-1226): PR records captured
+// from session logs (command-gated to `gh pr create` output) into the shared
+// dashboard.db. Same materialization pattern as agent-monitor-plans —
+// pr-parsers + pull-request-store + pr-extractor into server/lib;
+// pull-requests-route.js into server/routes; PullRequests.tsx into the client.
+const prModulesDir = path.join(appDir, "scripts", "agent-monitor-pull-requests");
+const PR_MODULES = ["pr-parsers", "pull-request-store", "pr-extractor", "pr-backfill"];
+
+// CLOSEDLOOP token cost (FEA-1431): the canonical token-cost engine wrapping
+// @pydantic/genai-prices. Same materialization pattern as the modules above —
+// copied into the generated server/lib so the pricing route's
+// require("./cost-pricing") resolves, and so its require("@pydantic/genai-prices")
+// resolves by walking up to the (hoisted, prod) node_modules. The desktop-main
+// ESM twin (src/shared/token-cost.ts) is kept byte-equal by a parity test.
+const costModulesDir = path.join(appDir, "scripts", "agent-monitor-cost");
+const COST_MODULES = ["cost-pricing"];
+
+// CLOSEDLOOP token cost (FEA-1434): the canonical billing-mode engine. Same
+// materialization pattern as the token-cost engine — copied into the generated
+// server/lib so the sidecar importers' require("../lib/billing-mode") resolves.
+// The desktop-main ESM twin (src/shared/billing-mode.ts) is kept byte-equal by
+// a parity test (test/billing-mode.test.ts).
+const billingModulesDir = path.join(appDir, "scripts", "agent-monitor-billing");
+const BILLING_MODULES = ["billing-mode"];
+
+// CLOSEDLOOP token cost (FEA-1433): read the pinned genai-prices version from the
+// installed package so the read-only pricing catalog stamp always matches the
+// library actually bundled. The package's exports map blocks
+// require("@pydantic/genai-prices/package.json") at runtime, so we read the file
+// directly here at build time and inject the literal into the generated route.
+// Fail loud (no silent null stamp) — a missing version means a broken install.
+function resolveGenaiPricesVersion() {
+  const pkgPath = path.join(
+    appDir,
+    "node_modules",
+    "@pydantic",
+    "genai-prices",
+    "package.json",
+  );
+  const version = JSON.parse(readFileSync(pkgPath, "utf8")).version;
+  if (!version) {
+    throw new Error(
+      "Unable to read @pydantic/genai-prices version for the pricing catalog stamp (FEA-1433). Run `pnpm install` for apps/desktop.",
+    );
+  }
+  return version;
+}
+
 // CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
 // the desktop app. These ClosedLoop-authored files are copied over the
 // upstream client source before the Vite build — Layout.tsx adds embed mode
@@ -227,6 +328,15 @@ const embedModulesDir = path.join(appDir, "scripts", "agent-monitor-embed");
 const embedAppSource = path.join(embedModulesDir, "App.tsx");
 const embedLayoutSource = path.join(embedModulesDir, "Layout.tsx");
 const embedTailwindSource = path.join(embedModulesDir, "tailwind.config.js");
+const clientOverlayDir = path.join(appDir, "scripts", "agent-monitor-client");
+const clientOverlayStatusBadgeSource = path.join(clientOverlayDir, "StatusBadge.tsx");
+const clientOverlaySessionsSource = path.join(clientOverlayDir, "Sessions.tsx");
+const clientOverlayDashboardSource = path.join(clientOverlayDir, "Dashboard.tsx");
+const clientOverlaySettingsSource = path.join(clientOverlayDir, "Settings.tsx");
+// CLOSEDLOOP FEA-1434: shared two-ledger client helper (prefs + cost_by_ledger
+// shape + presentation-only billing-mode classification) imported by the
+// Dashboard, Settings, StatusBadge, and Sessions overlays.
+const clientOverlayLedgerSource = path.join(clientOverlayDir, "lib", "closedloop-ledger.ts");
 const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: embedAppSource,
@@ -240,42 +350,34 @@ const CLIENT_FULL_FILE_OVERRIDES = [
     from: embedTailwindSource,
     to: "tailwind.config.js",
   },
-];
-
-// Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
-// These keep cost stats working without requiring users to hand-enter common
-// rules after startup. Rates are per 1M tokens.
-const HOST_DEFAULT_PRICING = [
-  // Opus family
-  ["claude-opus-4-7%", "Claude Opus 4.7", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-6%", "Claude Opus 4.6", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-5%", "Claude Opus 4.5", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-1%", "Claude Opus 4.1", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-2%", "Claude Opus 4", 15, 75, 1.5, 18.75],
-  // Sonnet family
-  ["claude-sonnet-4-6%", "Claude Sonnet 4.6", 3, 15, 0.3, 3.75],
-  ["claude-sonnet-4-5%", "Claude Sonnet 4.5", 3, 15, 0.3, 3.75],
-  ["claude-sonnet-4-2%", "Claude Sonnet 4", 3, 15, 0.3, 3.75],
-  ["claude-3-7-sonnet%", "Claude Sonnet 3.7", 3, 15, 0.3, 3.75],
-  ["claude-3-5-sonnet%", "Claude Sonnet 3.5", 3, 15, 0.3, 3.75],
-  // Haiku family
-  ["claude-haiku-4-5%", "Claude Haiku 4.5", 1, 5, 0.1, 1.25],
-  ["claude-3-5-haiku%", "Claude Haiku 3.5", 0.8, 4, 0.08, 1],
-  ["claude-3-haiku%", "Claude Haiku 3", 0.25, 1.25, 0.03, 0.3],
-  // GPT-5 family
-  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 0],
-  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0],
-  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0],
-  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 0],
-  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 0],
-  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0],
-  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0],
-  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 0],
-  // OpenCode-hosted free models
-  ["big-pickle%", "Big Pickle", 0, 0, 0, 0],
-  ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0],
-  // Legacy
-  ["claude-3-opus%", "Claude Opus 3", 15, 75, 1.5, 18.75],
+  {
+    // CLOSEDLOOP FEA-1434: delivered first among the ClosedLoop overlays since
+    // the StatusBadge, Sessions, Dashboard, and Settings overlays import it.
+    // Order is cosmetic (every cpSync copy runs before Vite resolves imports),
+    // but keeping the shared module first documents the dependency direction.
+    from: clientOverlayLedgerSource,
+    to: path.join("src", "lib", "closedloop-ledger.ts"),
+  },
+  {
+    from: clientOverlayStatusBadgeSource,
+    to: path.join("src", "components", "StatusBadge.tsx"),
+  },
+  {
+    from: clientOverlaySessionsSource,
+    to: path.join("src", "pages", "Sessions.tsx"),
+  },
+  {
+    from: clientOverlayDashboardSource,
+    to: path.join("src", "pages", "Dashboard.tsx"),
+  },
+  {
+    // CLOSEDLOOP FEA-1433: the pricing editor (PUT/DELETE /api/pricing) was
+    // removed in the genai-prices migration. This overlay replaces it with a
+    // read-only catalog stamped with the pinned engine version + a per-model
+    // priced/unpriced breakdown sourced from the canonical token-cost engine.
+    from: clientOverlaySettingsSource,
+    to: path.join("src", "pages", "Settings.tsx"),
+  },
 ];
 
 const force =
@@ -373,6 +475,7 @@ function currentStamp() {
     sourceSessionsRoute,
     sourceHooksRoute,
     sourceDbFile,
+    sourceCompatSqlite,
     sourcePushLib,
     sourceClientIndex,
     fileURLToPath(import.meta.url),
@@ -396,24 +499,28 @@ function currentStamp() {
     ...PACK_CATALOG_CLIENT_PAGES.map((p) =>
       path.join(packModulesDir, "client", `${p}.tsx`),
     ),
+    ...PR_MODULES.map((m) => path.join(prModulesDir, `${m}.js`)),
+    path.join(prModulesDir, "pull-requests-route.js"),
+    path.join(prModulesDir, "client", "PullRequests.tsx"),
+    ...COST_MODULES.map((m) => path.join(costModulesDir, `${m}.js`)),
+    ...BILLING_MODULES.map((m) => path.join(billingModulesDir, `${m}.js`)),
     embedAppSource,
     embedLayoutSource,
     embedTailwindSource,
+    clientOverlayStatusBadgeSource,
+    clientOverlaySessionsSource,
+    // CLOSEDLOOP FEA-1434: the Dashboard, Settings, and shared ledger overlays
+    // were previously omitted from the stamp, so editing only those files left
+    // the cached generated tree stale (the build short-circuits when the stamp
+    // matches and the tree exists). Hash every full-file client overlay so any
+    // overlay edit busts the cache.
+    clientOverlayDashboardSource,
+    clientOverlaySettingsSource,
+    clientOverlayLedgerSource,
   ]) {
     h.update(readFileSync(file));
   }
   return h.digest("hex");
-}
-
-function renderDefaultPricingSource(rows = HOST_DEFAULT_PRICING) {
-  return [
-    "const DEFAULT_PRICING = [",
-    ...rows.map(
-      ([pattern, name, input, output, cacheRead, cacheWrite]) =>
-        `  [${JSON.stringify(pattern)}, ${JSON.stringify(name)}, ${input}, ${output}, ${cacheRead}, ${cacheWrite}],`,
-    ),
-    "];",
-  ].join("\n");
 }
 
 function buildClient() {
@@ -477,6 +584,33 @@ function materializeRuntimeTree() {
       path.join(generatedLibDir, `${m}.js`),
     );
   }
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): pr-parsers +
+  // pull-request-store + pr-extractor into server/lib alongside plan modules.
+  for (const m of PR_MODULES) {
+    cpSync(
+      path.join(prModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1431): the canonical token-cost engine into
+  // server/lib so the pricing route's require("../lib/cost-pricing") resolves.
+  // The engine's own require("@pydantic/genai-prices") resolves by walking up
+  // to the hoisted (prod) node_modules — the same resolution the other
+  // server/lib modules rely on.
+  for (const m of COST_MODULES) {
+    cpSync(
+      path.join(costModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1434): the canonical billing-mode engine into
+  // server/lib so the importers' require("../lib/billing-mode") resolves.
+  for (const m of BILLING_MODULES) {
+    cpSync(
+      path.join(billingModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
   cpSync(
     path.join(sourceRootDir, "scripts"),
     path.join(generatedRootDir, "scripts"),
@@ -513,7 +647,23 @@ function materializeRuntimeTree() {
     path.join(packModulesDir, "catalog-seed.json"),
     path.join(generatedLibDir, "catalog-seed.json"),
   );
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): the pull-requests
+  // HTTP route alongside the plans/packs routes. Reads the `pull_requests`
+  // table created by ensurePullRequestSchema.
+  cpSync(
+    path.join(prModulesDir, "pull-requests-route.js"),
+    path.join(generatedRootDir, "server", "routes", "pull-requests.js"),
+  );
   patchImportHistory(generatedImportHistory);
+  patchImportHistoryForPullRequests(generatedImportHistory);
+  // CLOSEDLOOP token reconciliation fix: replace the subagent-only guard
+  // with an unconditional writeSessionTokens call so non-Claude harnesses
+  // can update token_usage on re-import. Must run AFTER patchImportHistory
+  // since both modify the same file.
+  patchImportHistoryTokenReconcile(generatedImportHistory);
+  patchImportHistoryMetaImported(generatedImportHistory);
+  patchImportHistoryMetadataRefresh(generatedImportHistory);
+  patchImportHistorySandboxFilter(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
   cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
     recursive: true,
@@ -525,8 +675,16 @@ function materializeRuntimeTree() {
   patchSessionsRoute(generatedSessionsRoute);
   patchDbFile(generatedDbFile);
   patchPricingRoute(generatedPricingRoute);
+  patchAnalyticsRoute(generatedAnalyticsRoute);
   patchHooksRoute(generatedHooksRoute);
+  patchCompatSqliteBeginImmediate(generatedCompatSqlite);
+  patchHooksTranscriptOutsideTx(generatedHooksRoute);
+  patchHooksWriteQueueAndWatchdog(generatedHooksRoute);
+  patchHooksSandboxFilter(generatedHooksRoute);
+  patchHooksBillingMode(generatedHooksRoute);
+  patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
+  patchWebSocketFile(generatedWebSocketFile);
   patchCcDiscovery(generatedCcDiscovery);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
@@ -597,6 +755,40 @@ function patchServerIndex(file) {
     );
   }
 
+  if (!source.includes("__closedloopDestroyConnections")) {
+    const serverNeedle = [
+      "function startServer(app, port) {",
+      "  const server = http.createServer(app);",
+      "  initWebSocket(server);",
+    ].join("\n");
+    if (!source.includes(serverNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the startServer bootstrap for socket ownership tracking.`,
+      );
+    }
+    source = source.replace(
+      serverNeedle,
+      [
+        "function startServer(app, port) {",
+        "  const server = http.createServer(app);",
+        "  initWebSocket(server);",
+        "  const sockets = new Set();",
+        "  server.on(\"connection\", (socket) => {",
+        "    sockets.add(socket);",
+        "    socket.on(\"close\", () => {",
+        "      sockets.delete(socket);",
+        "    });",
+        "  });",
+        "  server.__closedloopDestroyConnections = () => {",
+        "    for (const socket of sockets) {",
+        "      try { socket.destroy(); } catch { /* ignore */ }",
+        "    }",
+        "    sockets.clear();",
+        "  };",
+      ].join("\n"),
+    );
+  }
+
   if (!source.includes('process.env.CCAM_ENABLE_RUN === "1"')) {
     const runNeedle = '  app.use("/api/run", runRouter);';
     if (!source.includes(runNeedle)) {
@@ -655,24 +847,50 @@ function patchServerIndex(file) {
       "    }",
     ],
   );
-  const importPatchLines = MULTI_HARNESS_SPECS.flatMap(
-    ({ key, importFn, importModule, importedLog, errorLog }) => [
-      "  try {",
-      `    const { ${importFn} } = require("./lib/${importModule}");`,
-      `    ${importFn}(_dbMod)`,
-      "      .then(({ imported, errors }) => {",
-      "        if (imported > 0)",
-      `          console.log("Imported " + imported + " ${importedLog}");`,
-      "        if (errors > 0)",
-      `          console.log(errors + " ${errorLog}");`,
-      "      })",
-      "      .catch(() => {});",
-      "  } catch (err) {",
-      `    console.warn("${key} import failed to start:", err.message);`,
-      "  }",
-      "",
-    ],
+  // CLOSEDLOOP FEA-1334: a single ingest orchestrator replaces the four
+  // independent per-harness import chains. It runs every non-Claude importer
+  // as one coordinated unit (still fire-and-forget, still never blocks boot)
+  // and feeds the ingest-progress singleton that GET /api/import/progress
+  // exposes to the desktop floating progress card. The harness importers are
+  // dependency-injected so ingest-orchestrator.js stays a pure, identical
+  // module in both the generated runtime tree and the source tree.
+  const orchestratorHarnessLines = MULTI_HARNESS_SPECS.map(
+    ({ key, importFn, importModule }) =>
+      `        { key: ${JSON.stringify(key)}, importAll: require("./lib/${importModule}").${importFn} },`,
   );
+  const importPatchLines = [
+    "  try {",
+    "    // CLOSEDLOOP FEA-1334: a fresh/empty DB no longer matches the",
+    "    // persisted ingest caches — drop them so every harness re-parses in",
+    "    // full and reports an honest total to the progress bar.",
+    "    if (existingCount === 0) {",
+    "      try {",
+    '        require("./agent-monitor-shared/ingest-paths").clearIngestState();',
+    "      } catch (e) { void e; }",
+    "    }",
+    '    const { ingestAllHarnesses } = require("./agent-monitor-shared/ingest-orchestrator");',
+    "    const _ingestHarnesses = [",
+    ...orchestratorHarnessLines,
+    "    ];",
+    "    // CLOSEDLOOP FEA-1334: on an empty DB the one-time Claude legacy",
+    "    // import is the bulk of the cold-start work — run it through the",
+    "    // orchestrator too so it shares the progress bar.",
+    "    if (existingCount === 0) {",
+    "      _ingestHarnesses.unshift({",
+    '        key: "claude",',
+    "        importAll: async (db, opts) => {",
+    "          const _r = await importAllSessions(db, opts);",
+    "          try { await backfillCompactions(db); } catch (e) { void e; }",
+    "          return _r;",
+    "        },",
+    "      });",
+    "    }",
+    "    ingestAllHarnesses({ dbModule: _dbMod, harnesses: _ingestHarnesses }).catch(() => {});",
+    "  } catch (err) {",
+    '    console.warn("ingest orchestrator failed to start:", err.message);',
+    "  }",
+    "",
+  ];
 
   // CLOSEDLOOP multi-harness support — start watchers for all non-Claude harnesses
   // next to cc-watcher (these tools have no hooks; the watcher is their only live path).
@@ -728,12 +946,84 @@ function patchServerIndex(file) {
     );
   }
 
-  // CLOSEDLOOP multi-harness support — import sessions from all non-Claude
-  // harnesses on every startup (not gated on a zero-row count, unlike the
-  // Claude import: these tools have no hooks so sessions created while the
-  // app was closed must still appear; all imports are idempotent).
-  // Fire-and-forget; never blocks boot.
-  if (!source.includes("importAllCodexSessions")) {
+  if (!source.includes('require("./websocket").closeWebSocket();')) {
+    const shutdownNeedle = [
+      "    // Stop all file watchers and clear their retry intervals",
+      '    try { require("./lib/cc-watcher").stopCcWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/codex-watcher").stopCodexWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/cursor-watcher").stopCursorWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/copilot-watcher").stopCopilotWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/opencode-watcher").stopOpenCodeWatcher(); } catch { /* ignore */ }',
+      "    if (httpServer) {",
+    ].join("\n");
+    if (!source.includes(shutdownNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the shutdown cleanup block for sidecar ownership hardening.`,
+      );
+    }
+    source = source.replace(
+      shutdownNeedle,
+      [
+        "    // Stop all file watchers and clear their retry intervals",
+        '    try { require("./lib/cc-watcher").stopCcWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/codex-watcher").stopCodexWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/cursor-watcher").stopCursorWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/copilot-watcher").stopCopilotWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/opencode-watcher").stopOpenCodeWatcher(); } catch { /* ignore */ }',
+        "    try { updateScheduler && updateScheduler.stop(); } catch { /* ignore */ }",
+        "    if (catalogFetchTimer) clearInterval(catalogFetchTimer);",
+        '    try { require("./websocket").closeWebSocket(); } catch { /* ignore */ }',
+        "    if (httpServer) {",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("httpServer.closeAllConnections")) {
+    const closeNeedle = [
+      "    if (httpServer) {",
+      "      httpServer.close(() => {",
+      '        console.log("HTTP server closed.");',
+      "      });",
+      "    }",
+    ].join("\n");
+    if (!source.includes(closeNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the HTTP shutdown block for forced connection teardown.`,
+      );
+    }
+    source = source.replace(
+      closeNeedle,
+      [
+        "    if (httpServer) {",
+        "      httpServer.close(() => {",
+        '        console.log("HTTP server closed.");',
+        "      });",
+        "      try {",
+        "        if (typeof httpServer.closeAllConnections === \"function\") {",
+        "          httpServer.closeAllConnections();",
+        "        }",
+        "      } catch { /* ignore */ }",
+        "      try {",
+        "        if (typeof httpServer.closeIdleConnections === \"function\") {",
+        "          httpServer.closeIdleConnections();",
+        "        }",
+        "      } catch { /* ignore */ }",
+        "      try {",
+        "        if (typeof httpServer.__closedloopDestroyConnections === \"function\") {",
+        "          httpServer.__closedloopDestroyConnections();",
+        "        }",
+        "      } catch { /* ignore */ }",
+        "    }",
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP FEA-1334 — import sessions from all non-Claude harnesses on
+  // every startup via the unified ingest orchestrator (not gated on a
+  // zero-row count, unlike the Claude import: these tools have no hooks so
+  // sessions created while the app was closed must still appear; all imports
+  // are idempotent). Fire-and-forget; never blocks boot.
+  if (!source.includes("ingestAllHarnesses")) {
     const tailNeedle = [
       "  }",
       "}",
@@ -764,6 +1054,50 @@ function patchServerIndex(file) {
     );
   }
 
+  if (!source.includes("let updateScheduler = null;")) {
+    const serverNeedle = [
+      "  const PORT = parseInt(process.env.DASHBOARD_PORT || \"4820\", 10);",
+      "  const app = createApp();",
+      "  let httpServer = null;",
+    ].join("\n");
+    if (!source.includes(serverNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the main bootstrap for scheduler handle ownership.`,
+      );
+    }
+    source = source.replace(
+      serverNeedle,
+      [
+        "  const PORT = parseInt(process.env.DASHBOARD_PORT || \"4820\", 10);",
+        "  const app = createApp();",
+        "  let httpServer = null;",
+        "  let updateScheduler = null;",
+        "  let catalogFetchTimer = null;",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("updateScheduler = startUpdateScheduler({ broadcast });")) {
+    const updateNeedle = [
+      '    const { startUpdateScheduler } = require("./update-scheduler");',
+      '    const { broadcast } = require("./websocket");',
+      "    startUpdateScheduler({ broadcast });",
+    ].join("\n");
+    if (!source.includes(updateNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the update scheduler startup block for handle ownership.`,
+      );
+    }
+    source = source.replace(
+      updateNeedle,
+      [
+        '    const { startUpdateScheduler } = require("./update-scheduler");',
+        '    const { broadcast } = require("./websocket");',
+        "    updateScheduler = startUpdateScheduler({ broadcast });",
+      ].join("\n"),
+    );
+  }
+
   // CLOSEDLOOP plan-extraction (FEA-1189): backfill ~/.claude/plans/*.md on
   // EVERY startup. The upstream Claude legacy import is gated on a zero-row DB
   // (`if (existingCount === 0)`), so on a populated DB the plan extraction
@@ -786,7 +1120,65 @@ function patchServerIndex(file) {
         "  } catch (e) {",
         '    console.warn("[plans] backfill failed:", e && e.message);',
         "  }",
+        // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): mirror the
+        // plan backfill for pull-request URLs. Same `existingCount === 0` gap
+        // — historical sessions that ran before this feature shipped never
+        // get re-imported, so their captured PRs never reach the DB. This
+        // standalone file scan (idempotent, deterministic-id-deduped, mtime-
+        // skipped on repeat boots) closes that gap. Forward-looking capture
+        // still goes through the importSession PR-extract block on the hook
+        // → POST path.
+        //
+        // Deferred via setImmediate so the first-run scan runs after the
+        // current synchronous startup tick completes — boot is not blocked
+        // by it. Note: this is NOT tied to a sidecar "ready" signal; it
+        // simply defers to the next event-loop tick, which is enough to
+        // keep the boot critical path clean even at thousands of files.
+        // The mtime cache in pr_backfill_seen makes subsequent boots
+        // ~stat-time at any scale (see PR #238 review feedback).
+        "  setImmediate(() => {",
+        "    try {",
+        '      require("./lib/pr-backfill").runClaudePrBackfill(dbModule.db);',
+        "    } catch (e) {",
+        '      console.warn("[pull-requests] backfill failed:", e && e.message);',
+        "    }",
+        "  });",
         '  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;',
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP FEA-1334: the one-time Claude legacy import now runs through the
+  // ingest orchestrator (see the claude harness in the multi-harness block) so
+  // it shares the desktop progress bar. Remove the standalone fire-and-forget
+  // block so the same sessions are not imported twice.
+  if (source.includes("importAllSessions(dbModule)\n      .then(")) {
+    const legacyClaudeBlock = [
+      "  if (existingCount === 0) {",
+      "    importAllSessions(dbModule)",
+      "      .then(({ imported, skipped, errors }) => {",
+      "        if (imported > 0) console.log(`Imported ${imported} legacy sessions from ~/.claude/`);",
+      "        if (errors > 0) console.log(`${errors} session files had errors during import`);",
+      "      })",
+      "      .then(() => backfillCompactions(dbModule))",
+      "      .then(({ backfilled }) => {",
+      "        if (backfilled > 0)",
+      "          console.log(`Backfilled ${backfilled} compaction events from ~/.claude/`);",
+      "      })",
+      "      .catch(() => {});",
+      "  }",
+    ].join("\n");
+    if (!source.includes(legacyClaudeBlock)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the standalone Claude legacy-import block (FEA-1334).`,
+      );
+    }
+    source = source.replace(
+      legacyClaudeBlock,
+      [
+        "  // CLOSEDLOOP FEA-1334: the one-time Claude legacy import runs through",
+        "  // the ingest orchestrator below (the claude harness) so it shares the",
+        "  // desktop progress bar; the standalone import block was removed.",
       ].join("\n"),
     );
   }
@@ -836,6 +1228,26 @@ function patchServerIndex(file) {
         '  app.use("/api/skills", skillsRouter);',
         openApiNeedle,
       ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): register the
+  // /api/pull-requests route (read surface for the Pull Requests page + tile).
+  if (!source.includes('require("./routes/pull-requests")')) {
+    const requireNeedle = 'const skillsRouter = require("./routes/skills");';
+    const openApiNeedle = '  app.get("/api/openapi.json", (_req, res) => {';
+    if (!source.includes(requireNeedle) || !source.includes(openApiNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the skills-router require / openapi anchors (pull-requests route, FEA-1226).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      `${requireNeedle}\nconst pullRequestsRouter = require("./routes/pull-requests");`,
+    );
+    source = source.replace(
+      openApiNeedle,
+      `  app.use("/api/pull-requests", pullRequestsRouter);\n${openApiNeedle}`,
     );
   }
 
@@ -920,6 +1332,70 @@ function patchServerIndex(file) {
     );
   }
 
+  if (!source.includes("catalogFetchTimer = require(\"./lib/catalog-fetcher\").scheduleCatalogFetch(dbModule.db);")) {
+    const catalogNeedle = '    require("./lib/catalog-fetcher").scheduleCatalogFetch(dbModule.db);';
+    if (!source.includes(catalogNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the catalog schedule startup block for timer ownership.`,
+      );
+    }
+    source = source.replace(
+      catalogNeedle,
+      '    catalogFetchTimer = require("./lib/catalog-fetcher").scheduleCatalogFetch(dbModule.db);',
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+function patchWebSocketFile(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes("function closeWebSocket()")) {
+    const closeNeedle = [
+      "function getConnectionCount() {",
+      "  if (!wss) return 0;",
+      "  let count = 0;",
+      "  wss.clients.forEach((client) => {",
+      "    if (client.readyState === 1) count++;",
+      "  });",
+      "  return count;",
+      "}",
+      "",
+      "module.exports = { initWebSocket, broadcast, getConnectionCount };",
+    ].join("\n");
+    if (!source.includes(closeNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the websocket export block for closeWebSocket.`,
+      );
+    }
+    source = source.replace(
+      closeNeedle,
+      [
+        "function getConnectionCount() {",
+        "  if (!wss) return 0;",
+        "  let count = 0;",
+        "  wss.clients.forEach((client) => {",
+        "    if (client.readyState === 1) count++;",
+        "  });",
+        "  return count;",
+        "}",
+        "",
+        "function closeWebSocket() {",
+        "  if (!wss) return;",
+        "  const server = wss;",
+        "  wss = null;",
+        "  server.clients.forEach((client) => {",
+        "    try { client.terminate(); } catch { /* ignore */ }",
+        "  });",
+        "  try { server.close(); } catch { /* ignore */ }",
+        "}",
+        "",
+        "module.exports = { initWebSocket, broadcast, getConnectionCount, closeWebSocket };",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -964,6 +1440,35 @@ function patchSessionsRoute(file) {
     );
   }
 
+  // CLOSEDLOOP token cost (FEA-1433): alongside row.cost, surface the models the
+  // token-cost engine could not price so the sessions list can flag them instead
+  // of rendering a misleading $0. Both list code paths (price-sort and the
+  // default order) share the same per-session cost assignment (modulo
+  // indentation), so replaceAll covers both. The breakdown is computed once and
+  // both the total and the unpriced model names are read from it. `unpriced_models`
+  // is a purely additive field on an internal sidecar response consumed only by
+  // the bundled client — no external contract migration is required.
+  if (!source.includes("CLOSEDLOOP FEA-1433 unpriced_models")) {
+    const costNeedle =
+      "row.cost = sessionTokens ? calculateCost(sessionTokens, rules).total_cost : 0;";
+    if (!source.includes(costNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the per-session calculateCost assignment (unpriced_models, FEA-1433).`,
+      );
+    }
+    source = source.replaceAll(
+      costNeedle,
+      [
+        "// CLOSEDLOOP FEA-1433 unpriced_models: price once, read total + unpriced from it.",
+        "          const __clCost = sessionTokens ? calculateCost(sessionTokens, rules) : null;",
+        "          row.cost = __clCost ? __clCost.total_cost : 0;",
+        "          row.unpriced_models = __clCost",
+        "            ? [...new Set(__clCost.breakdown.filter((b) => !b.priced).map((b) => b.model))]",
+        "            : [];",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -982,16 +1487,14 @@ function patchDbFile(file) {
     );
   }
 
-  const pricingBlock = /const DEFAULT_PRICING = \[[\s\S]*?\n\];\n\n\/\/ Top-up:/;
-  if (!pricingBlock.test(source)) {
-    throw new Error(
-      `Unable to patch ${file}: expected the DEFAULT_PRICING block.`,
-    );
-  }
-  source = source.replace(
-    pricingBlock,
-    `${renderDefaultPricingSource()}\n\n// Top-up:`,
-  );
+  // CLOSEDLOOP token cost (FEA-1431): we no longer override upstream's
+  // DEFAULT_PRICING seed. The hand-maintained host pricing table was the root
+  // cause of the cached-token overcharge bug; cost is now computed by the
+  // canonical token-cost engine (server/lib/cost-pricing.js) wrapping
+  // @pydantic/genai-prices. Upstream's own DEFAULT_PRICING remains in this file
+  // untouched — it is still exported via the module.exports anchor below and
+  // seeds the model_pricing table that the read-only catalog GET reads — but it
+  // no longer feeds any cost calculation.
 
   // CLOSEDLOOP Codex support (Addition #4): add a `harness` dimension so one
   // dashboard shows multiple harnesses. Additive + DEFAULT 'claude' so the
@@ -1018,6 +1521,140 @@ function patchDbFile(file) {
       "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),",
     ].join("\n");
     source = source.replace(stmtsNeedle, `\n${replacement}`);
+  }
+
+  // CLOSEDLOOP FEA-1434: add a `billing_mode` dimension so the dashboard can
+  // keep two ledgers (real metered API spend vs subscription-covered
+  // hypothetical). Additive + DEFAULT 'unknown' so legacy rows and the
+  // unchanged Claude/manual insert path stay valid; the sidecar importers and
+  // the Claude session route stamp the real mode via setSessionBillingMode.
+  // Read paths need no change (routes use SELECT s.* / SELECT *); the
+  // desktop-main sync service reads the column via its own explicit SELECT.
+  // Anchored on the `harness` migration output above (patchDbFile always runs
+  // on a freshly-copied upstream tree, so the harness patch has run first).
+  if (!source.includes("ADD COLUMN billing_mode")) {
+    const harnessIndexLine =
+      'db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_harness ON sessions(harness)");';
+    if (!source.includes(harnessIndexLine)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the harness migration output (billing_mode anchor).`,
+      );
+    }
+    const billingMigration = [
+      harnessIndexLine,
+      "try {",
+      '  db.prepare("SELECT billing_mode FROM sessions LIMIT 1").get();',
+      "} catch {",
+      "  db.prepare(\"ALTER TABLE sessions ADD COLUMN billing_mode TEXT NOT NULL DEFAULT 'unknown'\").run();",
+      "}",
+      'db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_billing_mode ON sessions(billing_mode)");',
+    ].join("\n");
+    source = source.replace(harnessIndexLine, billingMigration);
+
+    const setHarnessStmtLine =
+      "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),";
+    if (!source.includes(setHarnessStmtLine)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the setSessionHarness statement (billing_mode anchor).`,
+      );
+    }
+    const setBillingStmtLine =
+      "  setSessionBillingMode: db.prepare(\"UPDATE sessions SET billing_mode = ? WHERE id = ? AND COALESCE(billing_mode, '') != ?\"),";
+    source = source.replace(
+      setHarnessStmtLine,
+      `${setHarnessStmtLine}\n${setBillingStmtLine}`,
+    );
+  }
+
+  const sessionTotalsNeedle = [
+    "  sessionTokenTotals: db.prepare(`",
+    "    SELECT",
+    "      COALESCE(SUM(input_tokens), 0) as input_tokens,",
+    "      COALESCE(SUM(output_tokens), 0) as output_tokens,",
+    "      COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,",
+    "      COALESCE(SUM(cache_write_tokens), 0) as cache_write_tokens",
+    "    FROM token_usage",
+    "    WHERE session_id = ?",
+    "  `),",
+  ].join("\n");
+  const sessionTotalsReplacement = [
+    "  sessionTokenTotals: db.prepare(`",
+    "    SELECT",
+    "      COALESCE(SUM(input_tokens + baseline_input), 0) as input_tokens,",
+    "      COALESCE(SUM(output_tokens + baseline_output), 0) as output_tokens,",
+    "      COALESCE(SUM(cache_read_tokens + baseline_cache_read), 0) as cache_read_tokens,",
+    "      COALESCE(SUM(cache_write_tokens + baseline_cache_write), 0) as cache_write_tokens",
+    "    FROM token_usage",
+    "    WHERE session_id = ?",
+    "  `),",
+  ].join("\n");
+  if (source.includes(sessionTotalsNeedle)) {
+    source = source.replace(sessionTotalsNeedle, sessionTotalsReplacement);
+  } else if (!source.includes("COALESCE(SUM(input_tokens + baseline_input), 0) as input_tokens")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the sessionTokenTotals query (baseline session totals).`,
+    );
+  }
+
+  // CLOSEDLOOP FEA-1390: align the startup stale-session cleanup with the
+  // runtime sweep at server/index.js:291. Upstream hardcodes a 1-hour
+  // threshold and marks sessions 'completed' on boot, which reaps long
+  // Bash tools and awaiting-input pauses falsely. We make the threshold
+  // configurable via DASHBOARD_STALE_MINUTES (default 180, matching the
+  // runtime sweep), anchor on updated_at instead of started_at, and use
+  // 'abandoned' so we don't claim a session finished cleanly when we only
+  // lost contact with it.
+  const startupStaleNeedle = [
+    "// Startup cleanup: mark stale active sessions as completed.",
+    "// Legacy sessions (created before SessionEnd hook) will never receive a SessionEnd event,",
+    "// so they stay \"active\" forever. Complete any active session whose last event is older than",
+    "// 1 hour — the CLI process is certainly gone by then.",
+    "db.prepare(",
+    "  `",
+    "  UPDATE sessions SET",
+    "    status = 'completed',",
+    "    ended_at = COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+    "  WHERE status = 'active'",
+    "    AND started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')",
+    "    AND NOT EXISTS (",
+    "      SELECT 1 FROM events e",
+    "      WHERE e.session_id = sessions.id",
+    "        AND e.created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')",
+    "    )",
+    "`",
+    ").run();",
+  ].join("\n");
+  const startupStaleReplacement = [
+    "// CLOSEDLOOP FEA-1390: Startup cleanup aligned with the runtime sweep",
+    "// (server/index.js DASHBOARD_STALE_MINUTES, default 180). Uses 'abandoned'",
+    "// — not 'completed' — and anchors on updated_at so an active session that",
+    "// was paused on a long Bash tool / awaiting-input prompt is NOT silently",
+    "// flipped to a finished state on the next dashboard boot.",
+    "const _ccStaleMinutes = (() => {",
+    "  const raw = parseInt(process.env.DASHBOARD_STALE_MINUTES, 10);",
+    "  return Number.isFinite(raw) && raw > 0 ? raw : 180;",
+    "})();",
+    "db.prepare(",
+    "  `",
+    "  UPDATE sessions SET",
+    "    status = 'abandoned',",
+    "    ended_at = COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+    "  WHERE status = 'active'",
+    "    AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' minutes')",
+    "    AND NOT EXISTS (",
+    "      SELECT 1 FROM events e",
+    "      WHERE e.session_id = sessions.id",
+    "        AND e.created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' minutes')",
+    "    )",
+    "`",
+    ").run(_ccStaleMinutes, _ccStaleMinutes);",
+  ].join("\n");
+  if (source.includes(startupStaleNeedle)) {
+    source = source.replace(startupStaleNeedle, startupStaleReplacement);
+  } else if (!source.includes("CLOSEDLOOP FEA-1390")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the startup stale-session cleanup block (FEA-1390). Upstream may have changed the SQL.`,
+    );
   }
 
   // CLOSEDLOOP plan-extraction (FEA-1189): ensure the strategy §9.2 plans /
@@ -1094,37 +1731,446 @@ function patchDbFile(file) {
     );
   }
 
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): ensure the
+  // `pull_requests` table exists at startup, regardless of route load order.
+  // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.
+  if (!source.includes("ensurePullRequestSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (pull-request schema, FEA-1226).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/pull-request-store").ensurePullRequestSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[pull-requests] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
 function patchPricingRoute(file) {
   let source = readFileSync(file, "utf8");
 
-  if (!source.includes('String(row.model || "").toLowerCase()')) {
-    const matchNeedle = [
+  // CLOSEDLOOP token cost (FEA-1431): repoint the sidecar's cost math at the
+  // canonical token-cost engine wrapping @pydantic/genai-prices, and retire the
+  // hand-maintained pricing table that caused the cached-token overcharge bug.
+  // Three patches: (a) require the engine, (b) replace calculateCost to delegate
+  // to it, (c) remove the mutating PUT/DELETE endpoints (there is no longer a
+  // host-editable rule table to write to). GET /api/pricing stays read-only.
+
+  // (a) require the engine alongside the existing db require.
+  if (!source.includes('require("../lib/cost-pricing")')) {
+    const requireNeedle = 'const { stmts, db } = require("../db");';
+    if (!source.includes(requireNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db require anchor (cost engine, FEA-1431).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [
+        requireNeedle,
+        "// CLOSEDLOOP token cost (FEA-1431): all cost math flows through the",
+        "// canonical token-cost engine (genai-prices). The model_pricing table and",
+        "// its rule-matching are no longer used for any cost calculation.",
+        'const { computeTokenCost } = require("../lib/cost-pricing");',
+        "// CLOSEDLOOP token cost (FEA-1433): the pinned genai-prices version,",
+        "// injected at build time from the installed package. The package's exports",
+        "// map blocks require(\"@pydantic/genai-prices/package.json\") at runtime, so",
+        "// the build reads it directly and stamps the literal here. The read-only",
+        "// pricing catalog renders this as its single source of truth.",
+        `const GENAI_PRICES_VERSION = ${JSON.stringify(resolveGenaiPricesVersion())};`,
+      ].join("\n"),
+    );
+  }
+
+  // (b) replace the upstream rule-table calculateCost with an engine-delegating
+  // version. Keeps the 2-arg signature so callers (and the exported symbol)
+  // stay untouched; the pricingRules arg is intentionally ignored.
+  if (!source.includes("// CLOSEDLOOP FEA-1431 engine-delegating calculateCost")) {
+    const calcNeedle = [
+      "// Calculate cost for a set of token rows against pricing rules",
+      "function calculateCost(tokenRows, pricingRules) {",
+      "  let totalCost = 0;",
+      "  const breakdown = [];",
+      "",
+      "  // Sort by pattern length descending so specific patterns (e.g. claude-opus-4-5%)",
+      "  // match before catch-all patterns (e.g. claude-opus-4%)",
+      "  const sortedRules = [...pricingRules].sort(",
+      "    (a, b) => b.model_pattern.length - a.model_pattern.length",
+      "  );",
+      "",
       "  for (const row of tokenRows) {",
       "    const rule = sortedRules.find((p) => {",
       '      const pattern = p.model_pattern.replace(/%/g, ".*");',
       '      return new RegExp("^" + pattern + "$").test(row.model);',
       "    });",
+      "",
+      "    const rates = rule || {",
+      "      input_per_mtok: 0,",
+      "      output_per_mtok: 0,",
+      "      cache_read_per_mtok: 0,",
+      "      cache_write_per_mtok: 0,",
+      "    };",
+      "    const cost =",
+      "      (row.input_tokens / 1e6) * rates.input_per_mtok +",
+      "      (row.output_tokens / 1e6) * rates.output_per_mtok +",
+      "      (row.cache_read_tokens / 1e6) * rates.cache_read_per_mtok +",
+      "      (row.cache_write_tokens / 1e6) * rates.cache_write_per_mtok;",
+      "",
+      "    totalCost += cost;",
+      "    breakdown.push({",
+      "      model: row.model,",
+      "      input_tokens: row.input_tokens,",
+      "      output_tokens: row.output_tokens,",
+      "      cache_read_tokens: row.cache_read_tokens,",
+      "      cache_write_tokens: row.cache_write_tokens,",
+      "      cost: Math.round(cost * 10000) / 10000,",
+      "      matched_rule: rule?.model_pattern || null,",
+      "    });",
+      "  }",
+      "",
+      "  return { total_cost: Math.round(totalCost * 10000) / 10000, breakdown };",
+      "}",
     ].join("\n");
-    if (!source.includes(matchNeedle)) {
+    if (!source.includes(calcNeedle)) {
       throw new Error(
-        `Unable to patch ${file}: expected the pricing rule match block.`,
+        `Unable to patch ${file}: expected the upstream calculateCost body (cost engine, FEA-1431).`,
+      );
+    }
+    const calcReplacement = [
+      "// CLOSEDLOOP FEA-1431 engine-delegating calculateCost: every row is priced",
+      "// by the canonical token-cost engine (genai-prices), the single source of",
+      "// truth for rates. The `pricingRules` parameter is retained only for",
+      "// signature compatibility with the callers and the exported symbol — it is",
+      "// intentionally ignored (there is no hand-maintained rule table and nothing",
+      "// to override). Unpriced rows contribute `cost: null` to the breakdown",
+      "// (never a silent $0) and are skipped from the total. Costs are returned at",
+      "// full library precision — we do not round, clamp, or rewrite the number the",
+      "// library owns.",
+      "function calculateCost(tokenRows, _pricingRules) {",
+      "  let totalCost = 0;",
+      "  const breakdown = [];",
+      "",
+      "  for (const row of tokenRows) {",
+      "    const result = computeTokenCost({",
+      "      model: row.model,",
+      "      inputTokens: row.input_tokens,",
+      "      outputTokens: row.output_tokens,",
+      "      cacheReadTokens: row.cache_read_tokens,",
+      "      cacheWriteTokens: row.cache_write_tokens,",
+      "    });",
+      "    const priced = result.priced && result.costUsd != null;",
+      "    if (priced) {",
+      "      totalCost += result.costUsd;",
+      "    }",
+      "    breakdown.push({",
+      "      model: row.model,",
+      "      input_tokens: row.input_tokens,",
+      "      output_tokens: row.output_tokens,",
+      "      cache_read_tokens: row.cache_read_tokens,",
+      "      cache_write_tokens: row.cache_write_tokens,",
+      "      cost: priced ? result.costUsd : null,",
+      "      input_cost: priced ? result.inputCostUsd : null,",
+      "      output_cost: priced ? result.outputCostUsd : null,",
+      "      provider: result.provider,",
+      "      priced,",
+      "      unpriced_reason: priced ? null : result.reason,",
+      "      matched_rule: priced ? result.provider : null,",
+      "    });",
+      "  }",
+      "",
+      "  return { total_cost: totalCost, breakdown };",
+      "}",
+    ].join("\n");
+    source = source.replace(calcNeedle, calcReplacement);
+  }
+
+  // (c) remove the mutating PUT/DELETE pricing endpoints. genai-prices is the
+  // source of truth, so there is no host-editable rule table to write to. This
+  // is an internal sidecar route (consumed only by the bundled client, which
+  // ships as one unit) — no external migration is required.
+  if (source.includes('router.put("/"')) {
+    const mutatingNeedle = [
+      "// PUT /api/pricing - Create or update a pricing rule",
+      'router.put("/", (req, res) => {',
+      "  const {",
+      "    model_pattern,",
+      "    display_name,",
+      "    input_per_mtok,",
+      "    output_per_mtok,",
+      "    cache_read_per_mtok,",
+      "    cache_write_per_mtok,",
+      "  } = req.body;",
+      "  if (!model_pattern || !display_name) {",
+      "    return res.status(400).json({",
+      '      error: { code: "INVALID_INPUT", message: "model_pattern and display_name are required" },',
+      "    });",
+      "  }",
+      "",
+      "  stmts.upsertPricing.run(",
+      "    model_pattern,",
+      "    display_name,",
+      "    input_per_mtok ?? 0,",
+      "    output_per_mtok ?? 0,",
+      "    cache_read_per_mtok ?? 0,",
+      "    cache_write_per_mtok ?? 0",
+      "  );",
+      "",
+      "  const rule = stmts.getPricing.get(model_pattern);",
+      "  res.json({ pricing: rule });",
+      "});",
+      "",
+      "// DELETE /api/pricing/:pattern - Delete a pricing rule",
+      'router.delete("/:pattern", (req, res) => {',
+      "  const pattern = decodeURIComponent(req.params.pattern);",
+      "  const existing = stmts.getPricing.get(pattern);",
+      "  if (!existing) {",
+      "    return res",
+      "      .status(404)",
+      '      .json({ error: { code: "NOT_FOUND", message: "Pricing rule not found" } });',
+      "  }",
+      "  stmts.deletePricing.run(pattern);",
+      "  res.json({ ok: true });",
+      "});",
+      "",
+    ].join("\n");
+    if (!source.includes(mutatingNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the PUT/DELETE pricing endpoints to remove (cost engine, FEA-1431).`,
       );
     }
     source = source.replace(
-      matchNeedle,
+      mutatingNeedle,
       [
-        "  for (const row of tokenRows) {",
-        '    const modelId = String(row.model || "").toLowerCase();',
-        "    const rule = sortedRules.find((p) => {",
-        '      const pattern = String(p.model_pattern || "").toLowerCase().replace(/%/g, ".*");',
-        '      return new RegExp("^" + pattern + "$").test(modelId);',
-        "    });",
+        "// CLOSEDLOOP token cost (FEA-1431): the mutating PUT /api/pricing and",
+        "// DELETE /api/pricing/:pattern endpoints were removed. genai-prices is the",
+        "// single source of truth for rates, so there is no host-editable rule table",
+        "// to write to. GET /api/pricing below stays read-only.",
+        "",
       ].join("\n"),
     );
   }
+
+  // (d) the read-only GET /api/pricing keeps returning the model_pricing rows
+  // (still seeded by upstream for the listing) but now also stamps the pinned
+  // genai-prices version. The bundled client renders this as the source-of-truth
+  // catalog label. Additive field on an internal sidecar response — no migration.
+  if (!source.includes("// CLOSEDLOOP FEA-1433 engine-stamped pricing listing")) {
+    const getNeedle = [
+      '// GET /api/pricing - List all pricing rules',
+      'router.get("/", (_req, res) => {',
+      "  const rules = stmts.listPricing.all();",
+      "  res.json({ pricing: rules });",
+      "});",
+    ].join("\n");
+    if (!source.includes(getNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the GET /api/pricing listing handler (engine stamp, FEA-1433).`,
+      );
+    }
+    source = source.replace(
+      getNeedle,
+      [
+        "// GET /api/pricing - List pricing rows + the engine source-of-truth stamp",
+        "// CLOSEDLOOP FEA-1433 engine-stamped pricing listing",
+        'router.get("/", (_req, res) => {',
+        "  const rules = stmts.listPricing.all();",
+        "  res.json({",
+        "    pricing: rules,",
+        '    engine: { name: "@pydantic/genai-prices", version: GENAI_PRICES_VERSION },',
+        "  });",
+        "});",
+      ].join("\n"),
+    );
+  }
+
+  // (e) CLOSEDLOOP FEA-1434: split the all-sessions GET /api/pricing/cost into
+  // two ledgers. Bucket each (billing_mode, model) group's real cost so
+  // subscription-covered spend never inflates the headline total. The per-model
+  // `breakdown` and `daily_costs` are left exactly as upstream produced them; we
+  // only override total_cost (now metered + unknown) and add cost_by_ledger.
+  if (!source.includes("// CLOSEDLOOP FEA-1434 cost-endpoint ledger split")) {
+    // Require the ledger-accounting helpers alongside the cost engine that step
+    // (a) added. Both run in the same build, so the cost-engine require exists
+    // by the time this step runs.
+    const engineRequireNeedle =
+      'const { computeTokenCost } = require("../lib/cost-pricing");';
+    if (!source.includes(engineRequireNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the cost-engine require to attach the ledger helpers (two-ledger, FEA-1434).`,
+      );
+    }
+    source = source.replace(
+      engineRequireNeedle,
+      [
+        engineRequireNeedle,
+        "// CLOSEDLOOP FEA-1434: ledger-accounting helpers. Bucket each priced",
+        "// group by its session billing_mode and keep subscription-covered spend",
+        "// out of the headline cost total (metered + unknown only).",
+        "const {",
+        "  emptyLedgerTotals,",
+        "  addLedgerCost,",
+        "  headlineCost,",
+        "  normalizeBillingMode,",
+        '} = require("../lib/billing-mode");',
+      ].join("\n"),
+    );
+
+    const costBodyNeedle = [
+      "  const rules = stmts.listPricing.all();",
+      "  const result = calculateCost(allTokens, rules);",
+      "  const daily_costs = calculateDailyCosts(dailyTokens, rules);",
+      "  res.json({ ...result, daily_costs });",
+    ].join("\n");
+    if (!source.includes(costBodyNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the all-sessions /cost response body (two-ledger, FEA-1434).`,
+      );
+    }
+    source = source.replace(
+      costBodyNeedle,
+      [
+        "  const rules = stmts.listPricing.all();",
+        "  const result = calculateCost(allTokens, rules);",
+        "  const daily_costs = calculateDailyCosts(dailyTokens, rules);",
+        "  // CLOSEDLOOP FEA-1434 cost-endpoint ledger split: re-aggregate token",
+        "  // usage grouped by the session billing_mode (LEFT JOIN keeps orphan",
+        '  // rows in the "unknown" ledger instead of dropping them) and price each',
+        "  // group, then bucket. The headline total = metered + unknown;",
+        "  // subscription-covered spend is surfaced separately in cost_by_ledger",
+        "  // and is never summed into total_cost.",
+        "  const ledgerRows = db",
+        "    .prepare(",
+        '      "SELECT s.billing_mode AS billing_mode, tu.model AS model, SUM(tu.input_tokens + tu.baseline_input) as input_tokens, SUM(tu.output_tokens + tu.baseline_output) as output_tokens, SUM(tu.cache_read_tokens + tu.baseline_cache_read) as cache_read_tokens, SUM(tu.cache_write_tokens + tu.baseline_cache_write) as cache_write_tokens FROM token_usage tu LEFT JOIN sessions s ON s.id = tu.session_id GROUP BY s.billing_mode, tu.model"',
+        "    )",
+        "    .all();",
+        "  const ledgerTotals = emptyLedgerTotals();",
+        "  for (const row of ledgerRows) {",
+        "    const { total_cost } = calculateCost([row], rules);",
+        "    addLedgerCost(ledgerTotals, normalizeBillingMode(row.billing_mode), total_cost);",
+        "  }",
+        "  res.json({",
+        "    ...result,",
+        "    total_cost: headlineCost(ledgerTotals),",
+        "    cost_by_ledger: ledgerTotals,",
+        "    daily_costs,",
+        "  });",
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1434: split the analytics headline cost into two ledgers.
+// Upstream sums every token-usage row into one `total_cost`. We price each row
+// identically (genai-prices engine) but bucket it by the session's billing_mode
+// so subscription-covered spend (a hypothetical "would have cost") never
+// inflates the real headline total. Headline = metered + unknown; the full
+// per-ledger split is exposed as cost_by_ledger. Idempotent (early-return on an
+// already-patched tree); throws if an anchor is missing so a future upstream
+// refactor can't silently drop the split.
+function patchAnalyticsRoute(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("// CLOSEDLOOP FEA-1434 two-ledger headline")) {
+    return;
+  }
+
+  // (a) require the ledger-accounting helpers alongside the calculateCost import.
+  const requireNeedle = 'const { calculateCost } = require("./pricing");';
+  if (!source.includes(requireNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the calculateCost require anchor (two-ledger, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    requireNeedle,
+    [
+      requireNeedle,
+      "// CLOSEDLOOP FEA-1434: the two-ledger split. Each token-usage row is",
+      "// bucketed by its session's billing_mode so subscription-covered spend",
+      '// (a hypothetical "would have cost") never inflates the headline total.',
+      "const {",
+      "  emptyLedgerTotals,",
+      "  addLedgerCost,",
+      "  headlineCost,",
+      "  normalizeBillingMode,",
+      '} = require("../lib/billing-mode");',
+    ].join("\n"),
+  );
+
+  // (b) replace the headline cost loop. LEFT JOIN sessions so each row carries
+  // its billing_mode (orphan rows survive as ledger "unknown" rather than being
+  // dropped), bucket the per-row cost, and define the headline as metered +
+  // unknown (subscription excluded).
+  const loopNeedle = [
+    "  // Calculate total cost across all sessions",
+    "  const pricingRules = stmts.listPricing.all();",
+    '  const allTokenUsage = db.prepare("SELECT * FROM token_usage").all();',
+    "",
+    "  let totalCost = 0;",
+    "  for (const usage of allTokenUsage) {",
+    "    const { total_cost } = calculateCost([usage], pricingRules);",
+    "    totalCost += total_cost;",
+    "  }",
+  ].join("\n");
+  if (!source.includes(loopNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the headline cost loop (two-ledger, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    loopNeedle,
+    [
+      "  // CLOSEDLOOP FEA-1434 two-ledger headline: price every token-usage row",
+      "  // exactly as before (genai-prices engine), but bucket each row's cost by",
+      "  // the session's billing_mode. LEFT JOIN keeps orphan usage rows (no",
+      '  // matching session) in the "unknown" ledger instead of dropping them, so',
+      "  // the headline never silently shrinks. Headline total = metered + unknown",
+      "  // and EXCLUDES subscription-covered spend.",
+      "  const pricingRules = stmts.listPricing.all();",
+      "  const allTokenUsage = db",
+      "    .prepare(",
+      '      "SELECT tu.*, s.billing_mode AS billing_mode FROM token_usage tu LEFT JOIN sessions s ON s.id = tu.session_id"',
+      "    )",
+      "    .all();",
+      "",
+      "  const ledgerTotals = emptyLedgerTotals();",
+      "  for (const usage of allTokenUsage) {",
+      "    const { total_cost } = calculateCost([usage], pricingRules);",
+      "    addLedgerCost(",
+      "      ledgerTotals,",
+      "      normalizeBillingMode(usage.billing_mode),",
+      "      total_cost",
+      "    );",
+      "  }",
+      "  const totalCost = headlineCost(ledgerTotals);",
+    ].join("\n"),
+  );
+
+  // (c) expose the per-ledger breakdown alongside the headline total.
+  const responseNeedle = "    total_cost: totalCost,";
+  if (!source.includes(responseNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the total_cost response field (two-ledger, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    responseNeedle,
+    [responseNeedle, "    cost_by_ledger: ledgerTotals,"].join("\n"),
+  );
 
   writeFileSync(file, source, "utf8");
 }
@@ -1184,6 +2230,572 @@ function patchHooksRoute(file) {
   writeFileSync(file, source, "utf8");
 }
 
+// CLOSEDLOOP FEA-1434: stamp `billing_mode` on Claude sessions at creation
+// time. ensureSession() is the single point where a hook-driven Claude session
+// row is first inserted (the insert leaves harness defaulting to 'claude'), so
+// stamping right after the session_created broadcast guarantees the mode is set
+// before any token-usage events flow — mirroring the non-Claude importers,
+// which stamp via the same shared helper after setSessionHarness. Detection is
+// existence-only (no credential contents are read) and best-effort (the helper
+// swallows failures so a hook is never blocked). Idempotent: re-runnable on an
+// already-patched tree.
+function patchHooksBillingMode(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("stampSessionBillingMode")) {
+    return;
+  }
+
+  const requireNeedle = 'const { broadcast } = require("../websocket");';
+  if (!source.includes(requireNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the websocket require anchor (billing mode, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    requireNeedle,
+    [
+      requireNeedle,
+      'const { stampSessionBillingMode } = require("../agent-monitor-shared/billing-stamp");',
+    ].join("\n"),
+  );
+
+  const broadcastNeedle = '    broadcast("session_created", session);';
+  if (!source.includes(broadcastNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the session_created broadcast anchor (billing mode, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    broadcastNeedle,
+    [
+      broadcastNeedle,
+      "",
+      "    // CLOSEDLOOP FEA-1434: stamp the billing mode for this freshly-created",
+      "    // Claude session before any token-usage events flow. Existence-only",
+      "    // credential detection; best-effort (never blocks the hook).",
+      '    stampSessionBillingMode(stmts, "claude", sessionId);',
+    ].join("\n"),
+  );
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1363: Fix SQLite write contention under 22+ concurrent agents.
+// Three patches below address five compounding SQLite problems that cause the
+// agent monitor dashboard to corrupt when many agents fire hooks simultaneously.
+
+// Patch 1/3: Use BEGIN IMMEDIATE instead of DEFERRED in the compat-sqlite
+// transaction wrapper. DEFERRED lets two transactions both succeed at BEGIN,
+// then deadlock upgrading to a write lock. IMMEDIATE acquires upfront so
+// busy_timeout can serialize properly.
+function patchCompatSqliteBeginImmediate(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes('"BEGIN IMMEDIATE"')) return;
+  const needle = 'db.exec("BEGIN");';
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected db.exec("BEGIN") anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(needle, 'db.exec("BEGIN IMMEDIATE");');
+  writeFileSync(file, source, "utf8");
+}
+
+// Patch 2/3: Move transcript disk I/O outside the SQLite write transaction.
+// transcriptCache.extract() does synchronous file reads (50-200ms) while holding
+// the write lock, blocking all other hook events. This patch:
+//   a) Extracts processEventCore as an unwrapped function accepting pre-computed
+//      transcriptData
+//   b) Re-creates processEvent as db.transaction(processEventCore) for compat
+//   c) Moves transcript extraction to the POST handler call site, before the tx
+function patchHooksTranscriptOutsideTx(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("processEventCore")) return;
+
+  // (a) Unwrap processEvent into processEventCore
+  const sigNeedle = "const processEvent = db.transaction((hookType, data) => {";
+  if (!source.includes(sigNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected processEvent signature anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(
+    sigNeedle,
+    "function processEventCore(hookType, data, transcriptData) {",
+  );
+
+  // (b) Use pre-computed transcriptData instead of extracting inside the tx
+  const extractNeedle = [
+    "  if (data.transcript_path) {",
+    "    const result = transcriptCache.extract(data.transcript_path);",
+  ].join("\n");
+  if (!source.includes(extractNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected transcriptCache.extract anchor inside processEvent (FEA-1363).`,
+    );
+  }
+  source = source.replace(extractNeedle, [
+    "  if (transcriptData) {",
+    "    const result = transcriptData;",
+  ].join("\n"));
+
+  // (c) Close the unwrapped function + re-create transaction-wrapped version
+  const closeNeedle = [
+    '  broadcast("new_event", event);',
+    "  return event;",
+    "});",
+  ].join("\n");
+  if (!source.includes(closeNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected processEvent closing anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(closeNeedle, [
+    '  broadcast("new_event", event);',
+    "  return event;",
+    "}",
+    "const processEvent = db.transaction(processEventCore);",
+  ].join("\n"));
+
+  // (d) Pre-compute transcript data at the POST handler call site
+  const callNeedle = "  const result = processEvent(hook_type, data);";
+  if (!source.includes(callNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected processEvent call site anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(callNeedle, [
+    "  let transcriptData = null;",
+    "  if (data.transcript_path) {",
+    "    transcriptData = transcriptCache.extract(data.transcript_path);",
+    "  }",
+    "  const result = processEvent(hook_type, data, transcriptData);",
+  ].join("\n"));
+
+  writeFileSync(file, source, "utf8");
+}
+
+// Patch 3/3: Add write queue for batching + wrap watchdog in a transaction.
+//   a) Adds a setImmediate-based write queue that coalesces hook events arriving
+//      in the same event-loop tick into a single batched transaction, reducing
+//      lock contention ~20x under 22+ concurrent agents
+//   b) Wraps the watchdog's read-check-write cycle in a single transaction so
+//      a hook event committed between read and write can't cause stale decisions
+function patchHooksWriteQueueAndWatchdog(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("hookWriteQueue")) return;
+
+  // (a) Insert write queue infrastructure before the POST handler
+  const postNeedle = 'router.post("/event", (req, res) => {';
+  if (!source.includes(postNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected router.post("/event") anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(postNeedle, [
+    "// FEA-1363: Write queue coalesces concurrent hook events into batched transactions.",
+    "const hookWriteQueue = [];",
+    "let hookDrainScheduled = false;",
+    "let hookDrainRetries = 0;",
+    "const MAX_HOOK_DRAIN_RETRIES = 5;",
+    "",
+    "function enqueueHookEvent(hookType, data, transcriptData, planCapture) {",
+    "  hookWriteQueue.push({ hookType, data, transcriptData, planCapture });",
+    "  if (!hookDrainScheduled) {",
+    "    hookDrainScheduled = true;",
+    "    setImmediate(drainHookQueue);",
+    "  }",
+    "}",
+    "",
+    "function drainHookQueue() {",
+    "  hookDrainScheduled = false;",
+    "  const batch = hookWriteQueue.splice(0);",
+    "  if (batch.length === 0) return;",
+    "  const succeeded = new Set();",
+    "  try {",
+    "    db.transaction(() => {",
+    "      for (let i = 0; i < batch.length; i++) {",
+    "        db.exec('SAVEPOINT hook_event');",
+    "        try {",
+    "          processEventCore(batch[i].hookType, batch[i].data, batch[i].transcriptData);",
+    "          db.exec('RELEASE hook_event');",
+    "          succeeded.add(i);",
+    "        } catch (err) {",
+    "          db.exec('ROLLBACK TO hook_event');",
+    "          db.exec('RELEASE hook_event');",
+    '          console.warn("[hooks] batch event failed:", batch[i].hookType, err?.message || err);',
+    "        }",
+    "      }",
+    "    })();",
+    "    hookDrainRetries = 0;",
+    "  } catch (err) {",
+    "    hookDrainRetries++;",
+    "    if (hookDrainRetries > MAX_HOOK_DRAIN_RETRIES) {",
+    '      console.error("[hooks] batch transaction failed after " + MAX_HOOK_DRAIN_RETRIES + " retries, dropping " + batch.length + " events:", err?.message || err);',
+    "      hookDrainRetries = 0;",
+    "      return;",
+    "    }",
+    '    console.warn("[hooks] batch transaction failed (attempt " + hookDrainRetries + "/" + MAX_HOOK_DRAIN_RETRIES + "), requeuing:", err?.message || err);',
+    "    hookWriteQueue.unshift(...batch);",
+    "    if (!hookDrainScheduled) {",
+    "      hookDrainScheduled = true;",
+    "      setTimeout(drainHookQueue, Math.min(1000 * Math.pow(2, hookDrainRetries - 1), 30000));",
+    "    }",
+    "    return;",
+    "  }",
+    "  for (let i = 0; i < batch.length; i++) {",
+    "    if (!succeeded.has(i)) continue;",
+    "    const item = batch[i];",
+    "    if (item.planCapture) {",
+    "      try {",
+    "        const planResult = upsertPlanCapture(db, item.planCapture);",
+    "        if (planResult && !planResult.deduped) {",
+    '          broadcast("plan_captured", {',
+    "            plan_id: planResult.planId,",
+    "            version: planResult.version,",
+    "            session_id: item.planCapture.created_from_session_id,",
+    "          });",
+    "        }",
+    "      } catch (e) {",
+    '        console.warn("[plans] batch plan capture failed:", e && e.message);',
+    "      }",
+    "    }",
+    "    if (item.hookType === \"SubagentStop\" && item.data.session_id && item.data.transcript_path) {",
+    "      scanAndImportSubagents(dbModule, item.data.session_id, item.data.transcript_path)",
+    "        .then(({ created }) => {",
+    "          if (created > 0) {",
+    '            broadcast("new_event", {',
+    "              session_id: item.data.session_id,",
+    "              agent_id: null,",
+    '              event_type: "SubagentJsonlImported",',
+    "              tool_name: null,",
+    "              summary: `Imported ${created} subagent record(s) from JSONL`,",
+    "              created_at: new Date().toISOString(),",
+    "            });",
+    "          }",
+    "        })",
+    "        .catch(() => {});",
+    "    }",
+    "  }",
+    "}",
+    "",
+    postNeedle,
+  ].join("\n"));
+
+  // (b) Replace the synchronous processEvent flow in the POST handler with
+  //     eager validation + enqueue + immediate response
+  const syncFlowNeedle = [
+    "",
+    "  let transcriptData = null;",
+    "  if (data.transcript_path) {",
+    "    transcriptData = transcriptCache.extract(data.transcript_path);",
+    "  }",
+    "  const result = processEvent(hook_type, data, transcriptData);",
+    "  if (!result) {",
+    "    return res.status(400).json({",
+    '      error: { code: "MISSING_SESSION", message: "session_id is required in data" },',
+    "    });",
+    "  }",
+    "  try {",
+    "    const capture = extractPlanFromHookEvent(hook_type, data);",
+    "    if (capture) {",
+    "      const planResult = upsertPlanCapture(db, capture);",
+    "      if (planResult && !planResult.deduped) {",
+    '        broadcast("plan_captured", {',
+    "          plan_id: planResult.planId,",
+    "          version: planResult.version,",
+    "          session_id: capture.created_from_session_id,",
+    "        });",
+    "      }",
+    "    }",
+    "  } catch (e) {",
+    '    console.warn("[plans] hook capture failed:", e && e.message);',
+    "  }",
+    "",
+    "",
+    '  res.json({ ok: true, event: result });',
+  ].join("\n");
+  if (!source.includes(syncFlowNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected synchronous processEvent flow anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(syncFlowNeedle, [
+    "",
+    "  if (!data.session_id) {",
+    "    return res.status(400).json({",
+    '      error: { code: "MISSING_SESSION", message: "session_id is required in data" },',
+    "    });",
+    "  }",
+    "  let transcriptData = null;",
+    "  if (data.transcript_path) {",
+    "    transcriptData = transcriptCache.extract(data.transcript_path);",
+    "  }",
+    "  let planCapture = null;",
+    "  try {",
+    "    planCapture = extractPlanFromHookEvent(hook_type, data);",
+    "  } catch (e) {",
+    '    console.warn("[plans] hook capture failed:", e && e.message);',
+    "  }",
+    "  enqueueHookEvent(hook_type, data, transcriptData, planCapture);",
+    "  res.json({ ok: true });",
+  ].join("\n"));
+
+  // (c) Remove the post-response SubagentStop block (now handled in drainHookQueue)
+  const subagentStopNeedle = [
+    "",
+    "  // After SubagentStop, scan the session's subagent JSONL files and ingest any",
+    "  // tool calls that aren't yet in the events table. Subagent tool_use blocks",
+    "  // never fire hooks on the parent session — this scan is the only path that",
+    "  // attributes them to the subagent's agent_id.",
+    '  if (hook_type === "SubagentStop" && data.session_id && data.transcript_path) {',
+    "    scanAndImportSubagents(dbModule, data.session_id, data.transcript_path)",
+    "      .then(({ created }) => {",
+    "        if (created > 0) {",
+    "          // Nudge SessionDetail to refetch — the page already debounces",
+    "          // bursts of new_event into a single paginated reload.",
+    '          broadcast("new_event", {',
+    "            session_id: data.session_id,",
+    "            agent_id: null,",
+    '            event_type: "SubagentJsonlImported",',
+    "            tool_name: null,",
+    "            summary: `Imported ${created} subagent record(s) from JSONL`,",
+    "            created_at: new Date().toISOString(),",
+    "          });",
+    "        }",
+    "      })",
+    "      .catch(() => {",
+    "        // non-fatal — partial JSONL during a live run is expected",
+    "      });",
+    "  }",
+  ].join("\n");
+  if (!source.includes(subagentStopNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected SubagentStop post-response anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(subagentStopNeedle, "");
+
+  // (d) Wrap watchdog read-check-write in a transaction with broadcasts after commit
+  const watchdogNeedle = "function watchdogCheck() {";
+  if (!source.includes(watchdogNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected watchdogCheck function anchor (FEA-1363).`,
+    );
+  }
+  // Replace the entire watchdog function body
+  const watchdogEndNeedle = [
+    "  } catch (err) {",
+    "    // Watchdog is best-effort — log but never crash the server",
+    '    console.warn("[WATCHDOG] Error during check:", err?.message || err);',
+    "  }",
+    "}",
+  ].join("\n");
+  if (!source.includes(watchdogEndNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected watchdogCheck closing anchor (FEA-1363).`,
+    );
+  }
+  const watchdogFull = source.substring(
+    source.indexOf(watchdogNeedle),
+    source.indexOf(watchdogEndNeedle) + watchdogEndNeedle.length,
+  );
+  source = source.replace(watchdogFull, [
+    "function watchdogCheck() {",
+    "  try {",
+    '    const os = require("os");',
+    '    const path = require("path");',
+    '    const fs = require("fs");',
+    "    const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS).toISOString();",
+    "    const staleSessions = db",
+    "      .prepare(",
+    "        `SELECT s.id, s.status, s.cwd,",
+    "                (SELECT MAX(e.created_at) FROM events e WHERE e.session_id = s.id) as last_event,",
+    "                (SELECT e.data FROM events e WHERE e.session_id = s.id",
+    "                 AND e.event_type IN ('SessionStart','UserPromptSubmit','PreToolUse','Stop','Notification')",
+    "                 ORDER BY e.created_at DESC LIMIT 1) as last_data",
+    "         FROM sessions s",
+    "         WHERE s.status = 'active' AND s.updated_at < ?`",
+    "      )",
+    "      .all(cutoff);",
+    "",
+    "    // Phase 1: Extract transcripts outside the transaction (disk I/O)",
+    "    const sessionsWithErrors = [];",
+    "    for (const sess of staleSessions) {",
+    "      let tPath = null;",
+    "      if (sess.last_data) {",
+    "        try {",
+    "          tPath = JSON.parse(sess.last_data).transcript_path;",
+    "        } catch {}",
+    "      }",
+    "      if (!tPath && sess.cwd) {",
+    '        const slug = sess.cwd.replace(/[\\/\\.]/g, "-");',
+    '        const candidate = path.join(os.homedir(), ".claude", "projects", slug, `${sess.id}.jsonl`);',
+    "        if (fs.existsSync(candidate)) tPath = candidate;",
+    "      }",
+    "      if (!tPath) continue;",
+    "      const result = transcriptCache.extract(tPath);",
+    "      if (!result || !result.errors || result.errors.length === 0) continue;",
+    "      sessionsWithErrors.push({ sess, result });",
+    "    }",
+    "    if (sessionsWithErrors.length === 0) return;",
+    "",
+    "    // Phase 2: Atomic read-check-write inside a single transaction",
+    "    const pendingBroadcasts = [];",
+    "    db.transaction(() => {",
+    "      for (const { sess, result } of sessionsWithErrors) {",
+    "        const existingErrorCount = db",
+    "          .prepare(",
+    '            "SELECT COUNT(*) as cnt FROM events WHERE session_id = ? AND event_type = \'APIError\'"',
+    "          )",
+    "          .get(sess.id).cnt;",
+    "        const mainAgent = db",
+    '          .prepare("SELECT * FROM agents WHERE session_id = ? AND type = \'main\' LIMIT 1")',
+    "          .get(sess.id);",
+    "        const mainAgentId = mainAgent?.id ?? null;",
+    "",
+    "        if (existingErrorCount < result.errors.length) {",
+    "          const existingSummaries = new Set(",
+    "            db",
+    "              .prepare(`SELECT summary FROM events WHERE session_id = ? AND event_type = 'APIError'`)",
+    "              .all(sess.id)",
+    "              .map((r) => r.summary)",
+    "          );",
+    "",
+    "          let newErrorRecorded = false;",
+    "          for (const apiErr of result.errors) {",
+    "            const summary = `${apiErr.type}: ${apiErr.message}`;",
+    "            if (existingSummaries.has(summary)) continue;",
+    "            stmts.insertEvent.run(",
+    "              sess.id,",
+    "              mainAgentId,",
+    '              "APIError",',
+    "              null,",
+    "              summary,",
+    "              JSON.stringify(apiErr)",
+    "            );",
+    '            pendingBroadcasts.push(["new_event", {',
+    "              session_id: sess.id,",
+    "              agent_id: mainAgentId,",
+    '              event_type: "APIError",',
+    "              tool_name: null,",
+    "              summary,",
+    "              created_at: apiErr.timestamp || new Date().toISOString(),",
+    "            }]);",
+    "            newErrorRecorded = true;",
+    "          }",
+    "",
+    "          if (newErrorRecorded) {",
+    "            const curSession = stmts.getSession.get(sess.id);",
+    '            if (curSession && curSession.status === "active") {',
+    '              stmts.updateSession.run(null, "error", null, null, sess.id);',
+    '              pendingBroadcasts.push(["session_updated", stmts.getSession.get(sess.id)]);',
+    "            }",
+    '            if (mainAgent && mainAgent.status !== "completed" && mainAgent.status !== "error") {',
+    '              stmts.updateAgent.run(null, "error", null, null, null, null, mainAgentId);',
+    "              if (mainAgentId) {",
+    "                stmts.clearAgentAwaitingInput.run(mainAgentId);",
+    '                pendingBroadcasts.push(["agent_updated", stmts.getAgent.get(mainAgentId)]);',
+    "              }",
+    "            }",
+    "          }",
+    "        }",
+    "      }",
+    "    })();",
+    "",
+    "    // Phase 3: Broadcast after commit",
+    "    for (const [event, data] of pendingBroadcasts) {",
+    "      broadcast(event, data);",
+    "    }",
+    "  } catch (err) {",
+    '    console.warn("[WATCHDOG] Error during check:", err?.message || err);',
+    "  }",
+    "}",
+  ].join("\n"));
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1407: sandbox scoping — skip hook events whose cwd falls
+// outside the configured sandbox directory. Injects an isSessionInSandbox
+// helper and a guard in the POST /event handler before the session_id check.
+function patchHooksSandboxFilter(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("FEA-1407 sandbox scoping")) return;
+
+  // (a) Inject the isSessionInSandbox helper before the POST handler.
+  const postAnchor = "// FEA-1363: Write queue coalesces concurrent hook events into batched transactions.";
+  if (!source.includes(postAnchor)) {
+    throw new Error(
+      `Unable to patch ${file}: expected FEA-1363 write queue comment anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(postAnchor, [
+    "// FEA-1407 sandbox scoping — reject hook events outside the configured sandbox.",
+    IS_SESSION_IN_SANDBOX_CJS,
+    "",
+    postAnchor,
+  ].join("\n"));
+
+  // (b) Inject sandbox guard in the POST handler before the session_id check.
+  const sessionIdCheck = [
+    '  if (!data.session_id) {',
+    '    return res.status(400).json({',
+    '      error: { code: "MISSING_SESSION", message: "session_id is required in data" },',
+    '    });',
+    '  }',
+  ].join("\n");
+  if (!source.includes(sessionIdCheck)) {
+    throw new Error(
+      `Unable to patch ${file}: expected session_id guard anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(sessionIdCheck, [
+    "  // FEA-1407 sandbox scoping: skip events outside the configured sandbox.",
+    "  if (data.cwd && !isSessionInSandbox(data.cwd, process.env.SANDBOX_BASE_DIRECTORY)) {",
+    "    return res.json({ ok: true });",
+    "  }",
+    sessionIdCheck,
+  ].join("\n"));
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1334: expose cold-start ingest progress so the desktop
+// renderer can show a floating "catching up on agent history" card on every
+// launch. The ingest orchestrator writes into the ingest-progress singleton;
+// this read-only endpoint snapshots it. Idempotent string-anchor patch.
+function patchImportRoute(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes('router.get("/progress"')) return;
+
+  const needle = "module.exports = router;";
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the import-route module.exports anchor (FEA-1334 progress endpoint).`,
+    );
+  }
+  source = source.replace(
+    needle,
+    [
+      "// CLOSEDLOOP FEA-1334: read-only snapshot of cold-start ingest progress",
+      "// for the desktop floating progress card. The ingest orchestrator writes",
+      "// into the ingest-progress singleton; this endpoint only reads it.",
+      'router.get("/progress", (_req, res) => {',
+      "  try {",
+      '    const progress = require("../agent-monitor-shared/ingest-progress");',
+      "    res.json(progress.snapshot());",
+      "  } catch (err) {",
+      "    res.status(500).json({ error: String((err && err.message) || err) });",
+      "  }",
+      "});",
+      "",
+      needle,
+    ].join("\n"),
+  );
+  writeFileSync(file, source, "utf8");
+}
+
 // CLOSEDLOOP plan-extraction (FEA-1189): wire plan capture into the single
 // shared import sink so Claude (session.toolUses) AND Codex (session.plans)
 // plans are persisted on the import/watch path — the primary path, since hooks
@@ -1228,6 +2840,346 @@ function patchImportHistory(file) {
     "  } catch (e) { void e; /* plan extraction is best-effort; never blocks import */ }",
   ].join("\n");
   source = source.replace(needle, inject);
+
+  // CLOSEDLOOP FEA-1334: give importAllSessions optional progress hooks so the
+  // first-run Claude legacy import drives the desktop ingest progress bar.
+  // Other callers (CLI mode, the /api/import rescan route) omit `opts` and are
+  // unaffected.
+  if (!source.includes("FEA-1334 progress hooks")) {
+    const headNeedle = [
+      "async function importAllSessions(dbModule) {",
+      "  if (!fs.existsSync(PROJECTS_DIR)) return { imported: 0, skipped: 0, errors: 0 };",
+      "",
+      "  const projectDirs = fs",
+      "    .readdirSync(PROJECTS_DIR, { withFileTypes: true })",
+      "    .filter((d) => d.isDirectory())",
+      "    .map((d) => d.name);",
+    ].join("\n");
+    if (!source.includes(headNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the importAllSessions head (FEA-1334 progress hooks).`,
+      );
+    }
+    source = source.replace(
+      headNeedle,
+      [
+        "async function importAllSessions(dbModule, opts = {}) {",
+        "  // FEA-1334 progress hooks — optional; the importer is unchanged when omitted.",
+        '  const _onBegin = opts && typeof opts.onBegin === "function" ? opts.onBegin : null;',
+        '  const _onProgress = opts && typeof opts.onProgress === "function" ? opts.onProgress : null;',
+        "  const _signal = opts && opts.signal ? opts.signal : null;",
+        "  if (!fs.existsSync(PROJECTS_DIR)) {",
+        "    if (_onBegin) _onBegin(0);",
+        "    return { imported: 0, skipped: 0, errors: 0 };",
+        "  }",
+        "",
+        "  const projectDirs = fs",
+        "    .readdirSync(PROJECTS_DIR, { withFileTypes: true })",
+        "    .filter((d) => d.isDirectory())",
+        "    .map((d) => d.name);",
+        "",
+        "  if (_onBegin) {",
+        "    let _total = 0;",
+        "    for (const _d of projectDirs) {",
+        "      try {",
+        "        _total += fs",
+        "          .readdirSync(path.join(PROJECTS_DIR, _d))",
+        '          .filter((f) => f.endsWith(".jsonl")).length;',
+        "      } catch (e) { void e; }",
+        "    }",
+        "    _onBegin(_total);",
+        "  }",
+      ].join("\n"),
+    );
+
+    const loopNeedle = [
+      "    const batch = [];",
+      "    for (const file of files) {",
+      "      try {",
+      "        const session = await parseSessionFile(path.join(projPath, file));",
+    ].join("\n");
+    if (!source.includes(loopNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the importAllSessions file loop (FEA-1334 progress hooks).`,
+      );
+    }
+    source = source.replace(
+      loopNeedle,
+      [
+        "    const batch = [];",
+        "    for (const file of files) {",
+        "      if (_signal && _signal.aborted) break;",
+        "      if (_onProgress) _onProgress();",
+        "      try {",
+        "        const session = await parseSessionFile(path.join(projPath, file));",
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+/**
+ * CLOSEDLOOP token reconciliation fix: replace the subagent-only token guard
+ * in importSession's existing-session branch with an unconditional call to
+ * writeSessionTokens. Without this, parsers that extract fresh token data
+ * on every re-import (OpenCode, Copilot, Cursor, Codex) never update a
+ * session's token_usage row after the initial import — the upstream code
+ * only reconciled tokens when parsedSubagents existed with non-zero tokens.
+ */
+function patchImportHistoryTokenReconcile(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP token reconciliation")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle = [
+    "    // Reconcile token usage. The earlier importer dropped subagent tokens",
+    "    // entirely, so any session with subagent JSONLs has under-counted totals.",
+    "    // replaceTokenUsage's baseline-shift logic guarantees this can never",
+    "    // reduce a session's totals — at worst it's a no-op.",
+    "    if (",
+    "      session.parsedSubagents &&",
+    "      session.parsedSubagents.some(",
+    "        (s) =>",
+    "          s.tokensByModel &&",
+    "          Object.values(s.tokensByModel).some(",
+    "            (t) => (t.input || 0) + (t.output || 0) + (t.cacheRead || 0) + (t.cacheWrite || 0) > 0",
+    "          )",
+    "      )",
+    "    ) {",
+    "      const written = writeSessionTokens(",
+    "        dbModule,",
+    "        session.sessionId,",
+    "        combineSessionTokens(session)",
+    "      );",
+    "      if (written > 0) backfilled = true;",
+    "    }",
+  ].join("\n");
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the subagent-only token guard (CLOSEDLOOP token reconciliation).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP token reconciliation — unconditionally write tokens for",
+    "    // every re-import so parsers that extract fresh token data (OpenCode,",
+    "    // Copilot, Cursor, Codex) can update totals when a session is",
+    "    // re-imported. The upstream code only reconciled when subagents had",
+    "    // non-zero tokens, which meant sessions without subagents (most",
+    "    // non-Claude sessions) never had their token_usage refreshed.",
+    "    // replaceTokenUsage's baseline-shift logic guarantees this can never",
+    "    // reduce a session's totals — at worst it's a no-op.",
+    "    {",
+    "      const written = writeSessionTokens(",
+    "        dbModule,",
+    "        session.sessionId,",
+    "        combineSessionTokens(session)",
+    "      );",
+    "      if (written > 0) backfilled = true;",
+    "    }",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+  writeFileSync(file, source, "utf8");
+}
+
+/**
+ * CLOSEDLOOP meta.imported fix: for legacy sessions imported before the
+ * `imported` metadata flag existed, stamp the flag instead of returning
+ * early with `{ skipped: true }` so event backfill and token reconciliation
+ * can proceed during re-import. The high-water-mark dedup protects against
+ * duplicate events and the baseline-shifting upsert protects against
+ * double-counted tokens.
+ */
+function patchImportHistoryMetaImported(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP meta.imported fix")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle =
+    '    if (!meta.imported) return { skipped: true };';
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the meta.imported early return (CLOSEDLOOP meta.imported fix).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP meta.imported fix: legacy session imported before the",
+    '    // `imported` metadata flag existed — stamp it and continue so event',
+    "    // backfill and token reconciliation can proceed. The high-water-mark",
+    "    // dedup protects against duplicate events and the baseline-shifting",
+    "    // upsert protects against double-counted tokens.",
+    "    if (!meta.imported) {",
+    "      meta.imported = true;",
+    "    }",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+  writeFileSync(file, source, "utf8");
+}
+
+/**
+ * CLOSEDLOOP metadata refresh parity: widen the existing-session refresh gate
+ * in importSession() so re-imports update derived metadata even when message
+ * counts stay stable. Without this, non-Claude sessions can keep stale
+ * permission mode, thinking-block counts, usage extras, or turn metrics
+ * forever unless user/assistant counts also happen to change.
+ */
+function patchImportHistoryMetadataRefresh(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP metadata refresh parity")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle = [
+    "    // Refresh sessions.ended_at and the message-count metadata so the dashboard",
+    "    // shows the latest window when a long-running session is re-imported. We",
+    "    // only move ended_at forward — never backward — and only when the JSONL's",
+    "    // latest activity is genuinely past whatever the DB currently records.",
+    "    const metaChanged =",
+    "      meta.user_messages !== session.userMessages ||",
+    "      meta.assistant_messages !== session.assistantMessages ||",
+    "      (!meta.entrypoint && (session.entrypoint || session.turnDurations?.length > 0));",
+  ].join("\n");
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the narrow metadata refresh gate (CLOSEDLOOP metadata refresh parity).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP metadata refresh parity: re-imports must refresh the",
+    "    // derived metadata we already know how to compute, even when message",
+    "    // counts do not change. Otherwise non-Claude sessions can keep stale",
+    "    // permission mode, thinking-block counts, usage extras, and turn",
+    "    // latency metrics forever after the first import.",
+    "    const nextEntryPoint = session.entrypoint || meta.entrypoint || null;",
+    "    const nextPermissionMode = session.permissionMode || meta.permission_mode || null;",
+    "    const nextThinkingBlocks = Math.max(meta.thinking_blocks || 0, session.thinkingBlockCount || 0);",
+    "    const nextUsageExtras = session.usageExtras || meta.usage_extras || null;",
+    "    const nextTurnCount = session.turnDurations ? session.turnDurations.length : meta.turn_count || 0;",
+    "    const nextTotalTurnDurationMs = session.turnDurations",
+    "      ? session.turnDurations.reduce((s, t) => s + t.durationMs, 0)",
+    "      : meta.total_turn_duration_ms || 0;",
+    "    const metaChanged =",
+    "      meta.user_messages !== session.userMessages ||",
+    "      meta.assistant_messages !== session.assistantMessages ||",
+    "      meta.entrypoint !== nextEntryPoint ||",
+    "      (meta.permission_mode || null) !== nextPermissionMode ||",
+    "      (meta.thinking_blocks || 0) !== nextThinkingBlocks ||",
+    "      JSON.stringify(meta.usage_extras || null) !== JSON.stringify(nextUsageExtras) ||",
+    "      (meta.turn_count || 0) !== nextTurnCount ||",
+    "      (meta.total_turn_duration_ms || 0) !== nextTotalTurnDurationMs;",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP engineer GitHub activity capture (FEA-1226): two idempotent
+// patches to import-history.js — (1) expose the source JSONL path on the
+// normalized session object so the PR extractor can re-read it for
+// command-gating (the normalized object drops tool_result output); (2) extract
+// PRs in importSession, right after the FEA-1189 plan block. Runs after
+// patchImportHistory so the plan block is in place to anchor on.
+function patchImportHistoryForPullRequests(file) {
+  let source = readFileSync(file, "utf8");
+
+  // (1) parseSessionFile return — add sourceLogPath: filePath.
+  if (!source.includes("sourceLogPath: filePath")) {
+    const needle = "  return {\n    sessionId,\n    name: sessionName,";
+    if (!source.includes(needle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the parseSessionFile return head (sourceLogPath, FEA-1226).`,
+      );
+    }
+    source = source.replace(
+      needle,
+      "  return {\n    sessionId,\n    sourceLogPath: filePath,\n    name: sessionName,",
+    );
+  }
+
+  // (2) importSession — extract PRs after the FEA-1189 plan block.
+  if (!source.includes("FEA-1226 pull-request extraction")) {
+    const anchor =
+      "  } catch (e) { void e; /* plan extraction is best-effort; never blocks import */ }";
+    if (!source.includes(anchor)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the FEA-1189 plan block tail (PR extraction, FEA-1226).`,
+      );
+    }
+    const inject = [
+      anchor,
+      "  // FEA-1226 pull-request extraction — capture `gh pr create` PR URLs",
+      "  // from the session's raw JSONL into the pull_requests table. Runs once",
+      "  // per importSession; best-effort, never blocks import. Per-error",
+      "  // console.warn (not silent `void e`) so a regression in the require",
+      "  // chain or upsert path surfaces in main.log instead of vanishing — the",
+      "  // original silent swallow hid the FEA-1226 backfill gap for days.",
+      "  try {",
+      '    const { extractPullRequestsFromSession } = require("../server/lib/pr-extractor");',
+      '    const { upsertPullRequest } = require("../server/lib/pull-request-store");',
+      "    let __prFirstUpsertErr = null;",
+      "    for (const __pr of extractPullRequestsFromSession(session)) {",
+      "      try {",
+      "        upsertPullRequest(dbModule.db, __pr);",
+      "      } catch (e) {",
+      "        if (!__prFirstUpsertErr) __prFirstUpsertErr = e;",
+      "      }",
+      "    }",
+      "    if (__prFirstUpsertErr) {",
+      '      console.warn("[pull-requests] upsert failed for session", session && session.sessionId, "—", __prFirstUpsertErr && __prFirstUpsertErr.message);',
+      "    }",
+      "  } catch (e) {",
+      '    console.warn("[pull-requests] extract failed for session", session && session.sessionId, "—", e && e.message);',
+      "  }",
+    ].join("\n");
+    source = source.replace(anchor, inject);
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1407: sandbox scoping — skip sessions whose cwd falls outside
+// the configured sandbox directory. Injects an isSessionInSandbox helper and a
+// guard at the top of importSession, before any DB interaction.
+function patchImportHistorySandboxFilter(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("FEA-1407 sandbox scoping")) return;
+
+  // (a) Inject the isSessionInSandbox helper at the top of the file, after
+  // the existing requires section. Anchor on the PROJECTS_DIR const which is
+  // always present near the top. Upstream (pinned 840c518d) derives it via the
+  // claude-home helper rather than the older inline os.homedir() form.
+  const requireAnchor = "const PROJECTS_DIR = getProjectsDir();";
+  if (!source.includes(requireAnchor)) {
+    throw new Error(
+      `Unable to patch ${file}: expected PROJECTS_DIR anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(requireAnchor, [
+    requireAnchor,
+    "",
+    "// FEA-1407 sandbox scoping — reject sessions outside the configured sandbox.",
+    IS_SESSION_IN_SANDBOX_CJS,
+  ].join("\n"));
+
+  // (b) Inject sandbox guard at the top of importSession, before the plan
+  // extraction block.
+  const importSessionHead =
+    "function importSession(dbModule, session) {\n  const { db, stmts } = dbModule;";
+  if (!source.includes(importSessionHead)) {
+    throw new Error(
+      `Unable to patch ${file}: expected importSession head anchor (FEA-1407 sandbox scoping).`,
+    );
+  }
+  source = source.replace(importSessionHead, [
+    "function importSession(dbModule, session) {",
+    "  // FEA-1407 sandbox scoping: skip sessions outside the configured sandbox.",
+    "  if (!isSessionInSandbox(session.cwd, process.env.SANDBOX_BASE_DIRECTORY)) {",
+    '    return { skipped: true, reason: "sandbox" };',
+    "  }",
+    "  const { db, stmts } = dbModule;",
+  ].join("\n"));
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -1300,6 +3252,14 @@ function patchClientSource() {
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
     path.join(sourceClientDir, "src", "lib", "closedloop-host-flags.ts"),
   );
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): drop the Pull
+  // Requests page into the pinned client before Vite build. The route is
+  // declared in scripts/agent-monitor-embed/App.tsx; the Sidebar nav entry is
+  // added below via the declarative edits array.
+  cpSync(
+    path.join(prModulesDir, "client", "PullRequests.tsx"),
+    path.join(sourceClientDir, "src", "pages", "PullRequests.tsx"),
+  );
   // CLOSEDLOOP pack-observability (FEA-1224): drop the four pack/skill/tool/
   // sub-agent pages into the pinned client before Vite build. Routes + NavLink
   // entries are added below via the declarative edits array.
@@ -1318,12 +3278,20 @@ function patchClientSource() {
       path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
     );
   }
+  cpSync(
+    path.join(packModulesDir, "client", "PackInstallModalUtils.ts"),
+    path.join(sourceClientDir, "src", "pages", "PackInstallModalUtils.ts"),
+  );
   // CLOSEDLOOP embed integration: replace selected upstream client files with
   // repo-owned overlays. Extend CLIENT_FULL_FILE_OVERRIDES for future host
   // patches that should fully override an upstream file at build time.
   for (const override of CLIENT_FULL_FILE_OVERRIDES) {
     cpSync(override.from, path.join(sourceClientDir, override.to));
   }
+  const snippetBypassFiles = new Set([
+    path.join("src", "components", "StatusBadge.tsx"),
+    path.join("src", "pages", "Sessions.tsx"),
+  ]);
   const legacyPlansNavLink = [
     "        })}",
     '        <NavLink',
@@ -1378,6 +3346,16 @@ function patchClientSource() {
       guard: "harness?: string | null",
       find: "  cost?: number;",
       replace: "  cost?: number;\n  harness?: string | null;",
+    },
+    {
+      // CLOSEDLOOP FEA-1434: the sessions API returns billing_mode (SELECT *),
+      // consumed by the Sessions overlay's <BillingBadge>. Anchor on the
+      // harness line the previous edit just added (this edit must stay ordered
+      // after it). Additive optional field — schema version unchanged.
+      rel: "src/lib/types.ts",
+      guard: "billing_mode?: string | null",
+      find: "  harness?: string | null;",
+      replace: "  harness?: string | null;\n  billing_mode?: string | null;",
     },
     {
       rel: "src/lib/api.ts",
@@ -1608,9 +3586,29 @@ function patchClientSource() {
         "] as const;",
       ].join("\n"),
     },
+    // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): one ungated
+    // top-level nav entry (Pull Requests). Runs after the FEA-1224 pack edits
+    // so the `Package` lucide import + the `/packs` nav row are present to
+    // anchor on.
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "  GitPullRequest,",
+      find: '  Package,\n} from "lucide-react";',
+      replace: '  Package,\n  GitPullRequest,\n} from "lucide-react";',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: 'to: "/pull-requests"',
+      find: '  { to: "/packs", icon: Package, key: "Packs" },',
+      replace: [
+        '  { to: "/packs", icon: Package, key: "Packs" },',
+        '  { to: "/pull-requests", icon: GitPullRequest, key: "Pull Requests" },',
+      ].join("\n"),
+    },
   ];
 
   for (const e of edits) {
+    if (snippetBypassFiles.has(e.rel)) continue;
     const file = path.join(sourceClientDir, e.rel);
     let src = readFileSync(file, "utf8");
     if (src.includes(e.guard)) continue; // already patched (idempotent)
@@ -1697,6 +3695,19 @@ function assertGeneratedTree() {
       "Generated server/db.js is missing the `harness` column migration (Codex Patch #4).",
     );
   }
+  // CLOSEDLOOP FEA-1434 hard-gate: the billing_mode column migration + its
+  // prepared statement must survive a future upstream bump, or the two-ledger
+  // accounting silently loses its per-session billing dimension.
+  if (!dbSource.includes("ADD COLUMN billing_mode")) {
+    throw new Error(
+      "Generated server/db.js is missing the `billing_mode` column migration (FEA-1434).",
+    );
+  }
+  if (!dbSource.includes("setSessionBillingMode:")) {
+    throw new Error(
+      "Generated server/db.js is missing the setSessionBillingMode prepared statement (FEA-1434).",
+    );
+  }
   for (const { label, watcherFn, importFn } of MULTI_HARNESS_SPECS) {
     for (const fn of [watcherFn, importFn]) {
       if (serverIndex.includes(fn)) continue;
@@ -1704,6 +3715,37 @@ function assertGeneratedTree() {
         `Generated server/index.js is missing the ${label} watcher/import wiring (${fn}).`,
       );
     }
+  }
+
+  // CLOSEDLOOP FEA-1334 hard-gates: a future upstream bump that breaks an
+  // anchor must fail the build, not silently drop the ingest orchestrator or
+  // the progress endpoint that powers the desktop floating progress card.
+  if (!serverIndex.includes("ingestAllHarnesses")) {
+    throw new Error(
+      "Generated server/index.js is missing the FEA-1334 ingest orchestrator wiring (ingestAllHarnesses).",
+    );
+  }
+  if (!serverIndex.includes('key: "claude"')) {
+    throw new Error(
+      "Generated server/index.js is missing the FEA-1334 Claude orchestrator harness.",
+    );
+  }
+  if (serverIndex.includes("legacy sessions from ~/.claude/")) {
+    throw new Error(
+      "Generated server/index.js still has the standalone Claude import block — FEA-1334 expects it removed (the orchestrator now runs it).",
+    );
+  }
+  const fea1334ImportHistory = readFileSync(generatedImportHistory, "utf8");
+  if (!fea1334ImportHistory.includes("FEA-1334 progress hooks")) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the FEA-1334 importAllSessions progress hooks.",
+    );
+  }
+  const importRouteSource = readFileSync(generatedImportRoute, "utf8");
+  if (!importRouteSource.includes('router.get("/progress"')) {
+    throw new Error(
+      "Generated server/routes/import.js is missing the FEA-1334 /api/import/progress endpoint.",
+    );
   }
   for (const { modules } of MULTI_HARNESS_SPECS) {
     for (const m of modules) {
@@ -1725,6 +3767,14 @@ function assertGeneratedTree() {
   if (!sessionsSource.includes("req.query.harness")) {
     throw new Error(
       "Generated server/routes/sessions.js is missing the server-side harness filter.",
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1433): the sessions list must surface
+  // unpriced_models so the UI never shows a misleading $0 for models the engine
+  // could not price. A future upstream bump that breaks the anchor must fail loud.
+  if (!sessionsSource.includes("row.unpriced_models = __clCost")) {
+    throw new Error(
+      "Generated server/routes/sessions.js is missing the unpriced_models surfacing (FEA-1433).",
     );
   }
 
@@ -1799,6 +3849,214 @@ function assertGeneratedTree() {
   ) {
     throw new Error(
       "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
+    );
+  }
+  // CLOSEDLOOP FEA-1434: the Claude session-create path must stamp billing_mode
+  // before usage events flow. A future upstream bump that breaks the anchor
+  // must fail the build, not silently leave Claude sessions at 'unknown'.
+  if (!hooksRouteSource.includes("stampSessionBillingMode")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the billing-mode stamp (FEA-1434).",
+    );
+  }
+
+  // CLOSEDLOOP FEA-1363: SQLite write contention fix hard-gates. A future
+  // upstream bump that breaks an anchor must fail the build, not silently
+  // revert to the contention-prone code paths.
+  const compatSqliteSource = readFileSync(generatedCompatSqlite, "utf8");
+  if (!compatSqliteSource.includes('"BEGIN IMMEDIATE"')) {
+    throw new Error(
+      "Generated server/compat-sqlite.js is missing BEGIN IMMEDIATE (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("processEventCore")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing processEventCore extraction (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("hookWriteQueue")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the write queue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("drainHookQueue")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing drainHookQueue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("SAVEPOINT hook_event")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing per-event savepoints in drainHookQueue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("MAX_HOOK_DRAIN_RETRIES")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing retry backoff limit in drainHookQueue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("pendingBroadcasts")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing watchdog transaction wrapping (FEA-1363).",
+    );
+  }
+
+  // CLOSEDLOOP FEA-1407: sandbox scoping hard-gates. A future upstream bump
+  // that breaks an anchor must fail the build, not silently drop sandbox filtering.
+  if (!hooksRouteSource.includes("FEA-1407 sandbox scoping")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the sandbox scoping filter (FEA-1407).",
+    );
+  }
+  if (!importHistorySource.includes("FEA-1407 sandbox scoping")) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the sandbox scoping filter (FEA-1407).",
+    );
+  }
+
+  // CLOSEDLOOP engineer GitHub activity capture hard-gates (FEA-1226): a future
+  // upstream bump that breaks an anchor must fail the build, not silently drop
+  // PR capture.
+  for (const m of PR_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (PR capture, FEA-1226).`,
+      );
+    }
+  }
+  if (
+    !existsSync(
+      path.join(generatedRootDir, "server", "routes", "pull-requests.js"),
+    )
+  ) {
+    throw new Error(
+      "Generated server/routes/pull-requests.js missing (PR capture, FEA-1226).",
+    );
+  }
+  if (!dbSource.includes("ensurePullRequestSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the pull-request schema init (FEA-1226).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/pull-requests")') ||
+    !serverIndex.includes('app.use("/api/pull-requests", pullRequestsRouter)')
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the /api/pull-requests route wiring (FEA-1226).",
+    );
+  }
+  if (
+    !importHistorySource.includes("FEA-1226 pull-request extraction") ||
+    !importHistorySource.includes("sourceLogPath: filePath")
+  ) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the PR-capture sink or sourceLogPath (FEA-1226).",
+    );
+  }
+  if (!serverIndex.includes("runClaudePrBackfill")) {
+    throw new Error(
+      "Generated server/index.js is missing the ~/.claude/projects PR backfill (FEA-1226).",
+    );
+  }
+  {
+    const prSidebarSource = readFileSync(
+      path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
+      "utf8",
+    );
+    if (!prSidebarSource.includes('to: "/pull-requests"')) {
+      throw new Error(
+        "Patched client Sidebar.tsx is missing the /pull-requests nav entry (FEA-1226).",
+      );
+    }
+  }
+
+  // CLOSEDLOOP token cost hard-gates (FEA-1431): a future upstream bump that
+  // breaks an anchor must fail the build, not silently revert to the
+  // hand-maintained pricing table (the cached-token overcharge bug) or drop the
+  // canonical token-cost engine.
+  for (const m of COST_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (token cost engine, FEA-1431).`,
+      );
+    }
+  }
+  // CLOSEDLOOP FEA-1434 hard-gate: the billing-mode engine must materialize, or
+  // the sidecar importers' require("../lib/billing-mode") breaks at runtime.
+  for (const m of BILLING_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (billing-mode engine, FEA-1434).`,
+      );
+    }
+  }
+  const pricingRouteSource = readFileSync(generatedPricingRoute, "utf8");
+  if (!pricingRouteSource.includes('require("../lib/cost-pricing")')) {
+    throw new Error(
+      "Generated server/routes/pricing.js is missing the cost-engine require (FEA-1431).",
+    );
+  }
+  if (
+    !pricingRouteSource.includes(
+      "// CLOSEDLOOP FEA-1431 engine-delegating calculateCost",
+    )
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js still uses the upstream rule-table calculateCost — the engine delegation patch did not apply (FEA-1431).",
+    );
+  }
+  if (pricingRouteSource.includes("rates.cache_read_per_mtok")) {
+    throw new Error(
+      "Generated server/routes/pricing.js still contains the upstream per-mtok cost formula — the overcharge-prone code was not removed (FEA-1431).",
+    );
+  }
+  if (
+    pricingRouteSource.includes('router.put("/"') ||
+    pricingRouteSource.includes('router.delete("/:pattern"')
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js still exposes the mutating PUT/DELETE pricing endpoints — they must be removed (FEA-1431).",
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1433): GET /api/pricing must stamp the pinned
+  // genai-prices version so the read-only catalog can label its source of truth.
+  if (
+    !pricingRouteSource.includes("// CLOSEDLOOP FEA-1433 engine-stamped pricing listing") ||
+    !pricingRouteSource.includes("GENAI_PRICES_VERSION")
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js is missing the genai-prices version stamp on GET /api/pricing (FEA-1433).",
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1434): GET /api/pricing/cost must split spend
+  // into ledgers and expose cost_by_ledger, with the headline keyed off
+  // headlineCost (metered + unknown) — never a raw sum that leaks subscription.
+  if (
+    !pricingRouteSource.includes("// CLOSEDLOOP FEA-1434 cost-endpoint ledger split") ||
+    !pricingRouteSource.includes("cost_by_ledger") ||
+    !pricingRouteSource.includes("headlineCost(ledgerTotals)") ||
+    !pricingRouteSource.includes('require("../lib/billing-mode")')
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js is missing the two-ledger cost split on GET /api/pricing/cost (FEA-1434).",
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1434): the analytics headline total must also be
+  // bucketed by billing_mode so subscription spend never inflates it.
+  const analyticsRouteSource = readFileSync(generatedAnalyticsRoute, "utf8");
+  if (
+    !analyticsRouteSource.includes("// CLOSEDLOOP FEA-1434 two-ledger headline") ||
+    !analyticsRouteSource.includes("cost_by_ledger") ||
+    !analyticsRouteSource.includes("headlineCost(ledgerTotals)") ||
+    !analyticsRouteSource.includes('require("../lib/billing-mode")')
+  ) {
+    throw new Error(
+      "Generated server/routes/analytics.js is missing the two-ledger headline split (FEA-1434).",
+    );
+  }
+  if (analyticsRouteSource.includes('db.prepare("SELECT * FROM token_usage")')) {
+    throw new Error(
+      "Generated server/routes/analytics.js still uses the un-joined token_usage scan — the billing_mode LEFT JOIN patch did not apply (FEA-1434).",
     );
   }
 

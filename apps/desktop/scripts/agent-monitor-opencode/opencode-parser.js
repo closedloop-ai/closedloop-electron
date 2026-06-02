@@ -11,6 +11,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { getOpenCodeDbPath } = require("./opencode-home");
 const {
   extractErrorMessage,
+  pushTurnDuration,
   safeJson,
   toIso,
 } = require("../agent-monitor-shared/parser-utils");
@@ -72,9 +73,11 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -100,9 +103,12 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
 
     if (role === "user" || role === "human") {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     } else if (role === "assistant" || role === "ai" || role === "model") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
+      pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+      pendingTurnStartedAt = null;
     }
 
     const errorMessage = extractErrorMessage(data.error);
@@ -159,7 +165,7 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
 
   return {
     sessionId: `opencode-${sessionRow.id}`,
-    name: `${projectName} (opencode)`,
+    name: projectName,
     cwd,
     model,
     version: sessionRow.version || null,
@@ -176,7 +182,7 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
     compactions: [],
     apiErrors,
     fileModifiedAt: Number(sessionRow.time_updated || 0) || null,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "opencode",
     permissionMode: sessionRow.permission || null,
     thinkingBlockCount,

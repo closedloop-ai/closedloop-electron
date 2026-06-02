@@ -316,3 +316,37 @@ test("setOnboardingPopupDismissedPermanent persists across new SettingsStore ins
   const reopened = new SettingsStore({ cwd: tmpDir, name: storeName });
   assert.equal(reopened.getOnboardingPopupDismissedPermanent(), true);
 });
+
+// --- FEA-1333: dashboardWelcomeSeen flag ---
+
+test("dashboardWelcomeSeen defaults to false for existing installs", () => {
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "settings-dashboard-welcome-default-"),
+  );
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-dashboard-welcome-default";
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({ sandboxBaseDirectory: "/Users/test/Source", onboardingCompleted: true }),
+  );
+
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+
+  assert.equal(store.getDashboardWelcomeSeen(), false);
+  assert.equal(store.getAll().dashboardWelcomeSeen, false);
+});
+
+test("setDashboardWelcomeSeen persists across new SettingsStore instances", () => {
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "settings-dashboard-welcome-persist-"),
+  );
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-dashboard-welcome-persist";
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  store.setDashboardWelcomeSeen(true);
+
+  const reopened = new SettingsStore({ cwd: tmpDir, name: storeName });
+  assert.equal(reopened.getDashboardWelcomeSeen(), true);
+});

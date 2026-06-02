@@ -1,0 +1,80 @@
+{
+  "_comment": "Golden master for FEA-1226 parser tests. Each key is a fixture file; the array is the exact set of GitActivityEvents the parser MUST produce from it (order-independent). `id` and `observedAt` are omitted — they are derived. Field names (harness, externalSessionId, headSha) mirror symphony-alpha's AgentSession/PullRequestDetail/BranchDetail. Files not listed (or listed empty) must produce ZERO events. See README.md for the signature-type matrix.",
+  "claude-code-session.jsonl": [
+    {
+      "type": "pr-link",
+      "prUrl": "https://github.com/loopco/desktop/pull/4821",
+      "prNumber": 4821,
+      "repoFullName": "loopco/desktop",
+      "branchName": "feat/widget-polish",
+      "headSha": null,
+      "harness": "claude-code",
+      "externalSessionId": "fixture-cc-001"
+    },
+    {
+      "type": "pr-link",
+      "prUrl": "https://github.com/loopco/api/pull/77",
+      "prNumber": 77,
+      "repoFullName": "loopco/api",
+      "branchName": "fix/login-bug",
+      "headSha": null,
+      "harness": "claude-code",
+      "externalSessionId": "fixture-cc-001"
+    }
+  ],
+  "codex-session.jsonl": [
+    {
+      "type": "pr-link",
+      "prUrl": "https://github.com/loopco/desktop/pull/512",
+      "prNumber": 512,
+      "repoFullName": "loopco/desktop",
+      "branchName": "feat/sync-engine",
+      "headSha": null,
+      "harness": "codex",
+      "externalSessionId": "fixture-codex-001"
+    },
+    {
+      "type": "pr-link",
+      "prUrl": "https://github.com/loopco/api/pull/88",
+      "prNumber": 88,
+      "repoFullName": "loopco/api",
+      "branchName": "fix/rate-limit",
+      "headSha": null,
+      "harness": "codex",
+      "externalSessionId": "fixture-codex-001"
+    }
+  ],
+  "loop-pr-link.jsonl": [
+    {
+      "type": "pr-link",
+      "prUrl": "https://github.com/loopco/desktop/pull/4821",
+      "prNumber": 4821,
+      "repoFullName": "loopco/desktop",
+      "branchName": null,
+      "headSha": null,
+      "harness": "closedloop-loop",
+      "externalSessionId": "fixture-loop-001"
+    },
+    {
+      "type": "pr-link",
+      "prUrl": "https://github.com/loopco/api/pull/88",
+      "prNumber": 88,
+      "repoFullName": "loopco/api",
+      "branchName": null,
+      "headSha": null,
+      "harness": "closedloop-loop",
+      "externalSessionId": "fixture-loop-001"
+    },
+    {
+      "type": "pr-link",
+      "prUrl": "https://github.com/loopco/desktop/pull/512",
+      "prNumber": 512,
+      "repoFullName": "loopco/desktop",
+      "branchName": null,
+      "headSha": null,
+      "harness": "closedloop-loop",
+      "externalSessionId": "fixture-loop-002"
+    }
+  ],
+  "negatives.jsonl": []
+}

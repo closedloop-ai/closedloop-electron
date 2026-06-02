@@ -119,24 +119,62 @@ function isHarnessInstalled(harness) {
   }
 }
 
+function joinIndependentCleanupCommands(commands) {
+  const failureVar = "__closedloop_uninstall_failed";
+  return [
+    `${failureVar}=0`,
+    ...commands.map((command) => `if ! ( ${command} ); then ${failureVar}=1; fi`),
+    `exit $${failureVar}`,
+  ].join("; ");
+}
+
 /**
- * For `single_install` packs (gstack), pick the install command that covers
- * the most installed CLIs.
+ * For `single_install` packs (gstack), pick the command to run for install
+ * or uninstall. Install and uninstall use different join strategies because
+ * the underlying commands have different semantic relationships:
  *
- * Heuristic: if both claude and codex are installed AND the seed lists both
- * harnesses, prefer the `codex` install command — by convention these
- * commands are written as supersets of the `claude` command for packs in
- * this category (gstack's `./setup && ./setup --host codex` is the
- * canonical example). Fall back to whichever single command exists for
- * the harness that IS installed.
+ *   INSTALL — pick the SUPERSET command. By convention for single_install
+ *   packs, the codex install command is a superset of the claude install
+ *   command (gstack's `./setup && ./setup --host codex` runs the claude
+ *   setup AND the codex one). Running the superset alone installs for all
+ *   detected CLIs.
  *
- * Returns { command, registerHarnesses } — the command to run + which
- * harness rows the post-install scanner should expect to materialize.
+ *   UNINSTALL — run all uninstall commands across listed harnesses
+ *   independently, but aggregate failures. The claude and codex uninstall
+ *   commands are DISJOINT cleanups
+ *   (claude: rm ~/.claude/skills/gstack; codex: rm ~/.codex/skills/gstack*),
+ *   neither is a superset of the other. Running only one leaves the other
+ *   harness's artifacts on disk. We still avoid `&&` so each step is
+ *   independent — a missing artifact in one harness doesn't skip cleanup in
+ *   the next — but any non-zero step still makes the overall uninstall fail.
+ *   Uninstall runs for ALL listed harnesses (not just CLIs currently on
+ *   PATH) because on-disk artifacts may outlive the CLI install.
+ *
+ * Returns { command, registerHarnesses }.
  */
 function pickSingleInstallCommand(entry, action) {
   const cmdMap =
     action === "uninstall" ? entry.uninstall_commands : entry.install_commands;
   const harnesses = Array.isArray(entry.harnesses) ? entry.harnesses : [];
+
+  if (action === "uninstall") {
+    // Run ALL listed harnesses' uninstall commands. Keep each cleanup
+    // independent, but surface any failure in the aggregate exit status.
+    // Run regardless of which CLIs are currently on PATH — we're cleaning
+    // up artifacts, not managing live CLIs.
+    const cmds = harnesses
+      .map((h) => cmdMap && cmdMap[h])
+      .filter(Boolean);
+    if (cmds.length === 0) {
+      return { command: null, registerHarnesses: [] };
+    }
+    return {
+      command: joinIndependentCleanupCommands(cmds),
+      registerHarnesses: harnesses,
+    };
+  }
+
+  // Install path — only consider harnesses whose CLI is actually present.
   const installed = harnesses.filter(isHarnessInstalled);
   if (installed.length === 0) {
     return { command: null, registerHarnesses: [] };
@@ -258,12 +296,18 @@ function streamRun(db, opts) {
     command = picked.command;
     resolvedHarnesses = picked.registerHarnesses;
     if (!command) {
+      const noCommandMessage =
+        action === "uninstall"
+          ? `pack '${pack_id}' is single_install but no uninstall commands are configured for any listed harness.`
+          : `pack '${pack_id}' is single_install but no supported CLI is on PATH. ` +
+            `Install Claude Code or Codex first, then try again.`;
       sse(res, "error", {
-        message:
-          `pack '${pack_id}' is single_install but no supported CLI is on PATH. ` +
-          `Install Claude Code or Codex first, then try again.`,
+        message: noCommandMessage,
       });
-      sse(res, "complete", { exit_code: -1, reason: "no_cli_detected" });
+      sse(res, "complete", {
+        exit_code: -1,
+        reason: action === "uninstall" ? "no_command" : "no_cli_detected",
+      });
       res.end();
       return;
     }
@@ -435,6 +479,7 @@ module.exports = {
     stripAnsi,
     tailBytes,
     isHarnessInstalled,
+    joinIndependentCleanupCommands,
     pickSingleInstallCommand,
   },
 };

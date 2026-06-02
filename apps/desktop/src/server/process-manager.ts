@@ -167,13 +167,21 @@ export class ProcessManager {
     return { pid: child.pid };
   }
 
-  async exec(command: string, args: string[] = [], cwd?: string): Promise<ExecResult> {
+  async exec(
+    command: string,
+    args: string[] = [],
+    cwd?: string,
+    options: { timeoutMs?: number } = {}
+  ): Promise<ExecResult> {
     this.assertOperationPath(cwd);
 
     try {
       const { stdout, stderr } = await execFileAsync(command, args, {
         cwd,
-        encoding: "utf-8"
+        encoding: "utf-8",
+        ...(options.timeoutMs === undefined
+          ? {}
+          : { timeout: options.timeoutMs })
       });
       return { stdout, stderr, exitCode: 0 };
     } catch (error) {

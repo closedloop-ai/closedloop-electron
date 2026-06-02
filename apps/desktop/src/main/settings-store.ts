@@ -3,10 +3,17 @@ import Store from "electron-store";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   type AlwaysAllowRule,
+  type ApiKeyProvenance,
   type DesktopSettings,
   type RiskTier,
   type SavedConfig
 } from "../shared/contracts.js";
+import {
+  FEATURE_FLAGS,
+  FLAG_KEYS,
+  type FlagKey,
+  getFlagDefinition,
+} from "../shared/feature-flags.js";
 import { normalizeAndValidateOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
 
 type BinaryPaths = {
@@ -35,6 +42,37 @@ type SavedConfigOriginsPatch = Pick<
 >;
 
 const DEFAULT_MANAGED_ONBOARDING_CONFIG_NAME = "Default";
+
+/**
+ * Determines whether the Settings panel should show the managed-key revival
+ * limitation hint (AC-010 / D5).
+ *
+ * Returns true when:
+ * - provenance is not DESKTOP_MANAGED (i.e. the key cannot revive timed-out loops)
+ * - AND the hint has never been dismissed (dismissedAt is null)
+ *   OR the last dismissal was while provenance was DESKTOP_MANAGED (regression
+ *   detected — user rotated back to USER_CREATED after pairing).
+ *
+ * Pure function — exported for unit testing without Electron IPC mocking.
+ */
+export function shouldShowManagedKeyHint(
+  provenance: ApiKeyProvenance | null,
+  dismissedAt: string | null,
+  lastSeenProvenance: "DESKTOP_MANAGED" | "USER_CREATED" | null,
+): boolean {
+  if (provenance === "DESKTOP_MANAGED") {
+    // Key supports revival — never show the hint.
+    return false;
+  }
+  if (dismissedAt === null) {
+    // Never dismissed — show.
+    return true;
+  }
+  // Dismissed before, but check if provenance regressed from DESKTOP_MANAGED:
+  // if lastSeenProvenance was DESKTOP_MANAGED when dismissed, the user has since
+  // rotated back to USER_CREATED — re-show the hint.
+  return lastSeenProvenance === "DESKTOP_MANAGED";
+}
 const UUID_V4_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -159,33 +197,80 @@ export class SettingsStore {
     );
   }
 
+  getDashboardWelcomeSeen(): boolean {
+    return this.store.get(
+      "dashboardWelcomeSeen",
+      DEFAULT_DESKTOP_SETTINGS.dashboardWelcomeSeen,
+    );
+  }
+
+  // --- Generic flag accessors (registry-driven) ---
+
+  /**
+   * Returns the effective value of a feature flag.
+   * Precedence: env override > user-set value > registry default.
+   */
+  getFlag(key: FlagKey): boolean {
+    const def = getFlagDefinition(key);
+    if (def.envOverride) {
+      const envVal = process.env[def.envOverride];
+      if (envVal === "1" || envVal === "true") return true;
+      if (envVal === "0" || envVal === "false") return false;
+    }
+    return this.store.get(key as keyof DesktopSettings, def.default) as boolean;
+  }
+
+  setFlag(key: FlagKey, value: boolean): void {
+    getFlagDefinition(key); // validate key exists
+    this.store.set(key as keyof DesktopSettings, value);
+  }
+
+  /** Returns the source of the effective value: env override, user-set, or registry default. */
+  getFlagSource(key: FlagKey): "env" | "user" | "default" {
+    const def = getFlagDefinition(key);
+    if (def.envOverride) {
+      const envVal = process.env[def.envOverride];
+      if (envVal === "1" || envVal === "true" || envVal === "0" || envVal === "false") {
+        return "env";
+      }
+    }
+    const raw = this.store.store as unknown as Record<string, unknown>;
+    if (key in raw) return "user";
+    return "default";
+  }
+
+  /** Returns flag values and sources for all registered flags. */
+  getAllFlags(): Array<{ key: FlagKey; value: boolean; source: "env" | "user" | "default" }> {
+    return FEATURE_FLAGS.map((f) => ({
+      key: f.key as FlagKey,
+      value: this.getFlag(f.key as FlagKey),
+      source: this.getFlagSource(f.key as FlagKey),
+    }));
+  }
+
+  // --- Legacy flag getters (thin wrappers for zero call-site churn) ---
   getCloudCommandsPaused(): boolean {
-    return this.store.get("cloudCommandsPaused", DEFAULT_DESKTOP_SETTINGS.cloudCommandsPaused);
+    return this.getFlag("cloudCommandsPaused");
+  }
+
+  getUpdateAndRestartEnabled(): boolean {
+    return this.getFlag("updateAndRestartEnabled");
   }
 
   getCloudConnectionEnabled(): boolean {
-    return this.store.get("cloudConnectionEnabled", DEFAULT_DESKTOP_SETTINGS.cloudConnectionEnabled);
+    return this.getFlag("cloudConnectionEnabled");
   }
 
   getAgentMonitorEnabled(): boolean {
-    return this.store.get(
-      "agentMonitorEnabled",
-      DEFAULT_DESKTOP_SETTINGS.agentMonitorEnabled,
-    );
+    return this.getFlag("agentMonitorEnabled");
   }
 
   getPlanExtractionEnabled(): boolean {
-    return this.store.get(
-      "planExtractionEnabled",
-      DEFAULT_DESKTOP_SETTINGS.planExtractionEnabled,
-    );
+    return this.getFlag("planExtractionEnabled");
   }
 
   getCommandSigningEnforcementEnabled(): boolean {
-    return this.store.get(
-      "commandSigningEnforcementEnabled",
-      DEFAULT_DESKTOP_SETTINGS.commandSigningEnforcementEnabled,
-    );
+    return this.getFlag("commandSigningEnforcementEnabled");
   }
 
   getDefaultApprovalTier(): RiskTier {
@@ -204,27 +289,32 @@ export class SettingsStore {
     this.store.set("onboardingPopupDismissedPermanent", onboardingPopupDismissedPermanent);
   }
 
+  setDashboardWelcomeSeen(dashboardWelcomeSeen: boolean): void {
+    this.store.set("dashboardWelcomeSeen", dashboardWelcomeSeen);
+  }
+
   setCloudCommandsPaused(cloudCommandsPaused: boolean): void {
-    this.store.set("cloudCommandsPaused", cloudCommandsPaused);
+    this.setFlag("cloudCommandsPaused", cloudCommandsPaused);
+  }
+
+  setUpdateAndRestartEnabled(updateAndRestartEnabled: boolean): void {
+    this.setFlag("updateAndRestartEnabled", updateAndRestartEnabled);
   }
 
   setCloudConnectionEnabled(cloudConnectionEnabled: boolean): void {
-    this.store.set("cloudConnectionEnabled", cloudConnectionEnabled);
+    this.setFlag("cloudConnectionEnabled", cloudConnectionEnabled);
   }
 
   setAgentMonitorEnabled(agentMonitorEnabled: boolean): void {
-    this.store.set("agentMonitorEnabled", agentMonitorEnabled);
+    this.setFlag("agentMonitorEnabled", agentMonitorEnabled);
   }
 
   setPlanExtractionEnabled(planExtractionEnabled: boolean): void {
-    this.store.set("planExtractionEnabled", planExtractionEnabled);
+    this.setFlag("planExtractionEnabled", planExtractionEnabled);
   }
 
   setCommandSigningEnforcementEnabled(commandSigningEnforcementEnabled: boolean): void {
-    this.store.set(
-      "commandSigningEnforcementEnabled",
-      commandSigningEnforcementEnabled,
-    );
+    this.setFlag("commandSigningEnforcementEnabled", commandSigningEnforcementEnabled);
   }
 
   setDefaultApprovalTier(defaultApprovalTier: RiskTier): void {
@@ -560,23 +650,12 @@ export class SettingsStore {
         partial.onboardingPopupDismissedPermanent,
       );
     }
-    if (typeof partial.cloudCommandsPaused === "boolean") {
-      this.store.set("cloudCommandsPaused", partial.cloudCommandsPaused);
-    }
-    if (typeof partial.cloudConnectionEnabled === "boolean") {
-      this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
-    }
-    if (typeof partial.agentMonitorEnabled === "boolean") {
-      this.store.set("agentMonitorEnabled", partial.agentMonitorEnabled);
-    }
-    if (typeof partial.planExtractionEnabled === "boolean") {
-      this.store.set("planExtractionEnabled", partial.planExtractionEnabled);
-    }
-    if (typeof partial.commandSigningEnforcementEnabled === "boolean") {
-      this.store.set(
-        "commandSigningEnforcementEnabled",
-        partial.commandSigningEnforcementEnabled,
-      );
+    // Handle all registered feature flags generically.
+    for (const key of FLAG_KEYS) {
+      const val = (partial as Record<string, unknown>)[key];
+      if (typeof val === "boolean") {
+        this.setFlag(key as FlagKey, val);
+      }
     }
     if (typeof partial.verboseLogging === "boolean") {
       this.store.set("verboseLogging", partial.verboseLogging);
@@ -600,6 +679,24 @@ export class SettingsStore {
       this.store.set("defaultApprovalTier", partial.defaultApprovalTier);
     }
     return this.getAll();
+  }
+
+  // --- Managed-key hint getters/setters (D5 / AC-010) ---
+
+  getManagedKeyHintDismissedAt(): string | null {
+    return this.store.get("managedKeyHintDismissedAt", null);
+  }
+
+  setManagedKeyHintDismissedAt(value: string | null): void {
+    this.store.set("managedKeyHintDismissedAt", value);
+  }
+
+  getManagedKeyHintLastSeenProvenance(): "DESKTOP_MANAGED" | "USER_CREATED" | null {
+    return this.store.get("managedKeyHintLastSeenProvenance", null);
+  }
+
+  setManagedKeyHintLastSeenProvenance(value: "DESKTOP_MANAGED" | "USER_CREATED" | null): void {
+    this.store.set("managedKeyHintLastSeenProvenance", value);
   }
 
   private migrateSavedConfigManagedFields(): void {

@@ -4896,7 +4896,7 @@ test("claude-cli ENOENT with no foundAt: error is Not found, remediation mention
   const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
-    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string; debug?: { foundAt?: string[] } }>;
   };
 
   const check = body.checks.find((c) => c.id === "claude-cli");

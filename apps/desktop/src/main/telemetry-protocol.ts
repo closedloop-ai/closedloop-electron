@@ -58,7 +58,8 @@ export type TelemetryCategory =
   | "loop.perf.tool"
   | "loop.perf.skill"
   | "loop.perf.spawn"
-  | "loop.perf.parse_failure";
+  | "loop.perf.parse_failure"
+  | "loop.heartbeat.terminal_finalization_suppressed";
 
 export interface TelemetryTraceContext {
   computeTargetId?: string;
@@ -206,6 +207,8 @@ export interface LoopPerfIterationEvent {
   event: "iteration";
   runId: string;
   iteration: number;
+  /** Newer producer versions only; omitted for legacy records. */
+  command?: string;
   startedAt: string;
   endedAt: string;
   durationS: number;
@@ -218,6 +221,8 @@ export interface LoopPerfPipelineStepEvent {
   event: "pipeline_step";
   runId: string;
   iteration: number;
+  /** Newer producer versions only; omitted for legacy records. */
+  command?: string;
   step: number;
   stepName: string;
   startedAt: string;

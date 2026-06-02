@@ -12,6 +12,7 @@
  *   - uploadArtifacts: HTTP error response handling
  *   - postLoopEventBounded: AbortController-based timeout abort
  *   - gatewayLog entries for success, failure, and network error paths
+ *   - postLoopHeartbeat: X-Session-Token header presence/absence (AC-005)
  */
 
 import assert from "node:assert/strict";
@@ -21,6 +22,7 @@ import {
   getCloudLoopStatus,
   postLoopEvent,
   postLoopEventBounded,
+  postLoopHeartbeat,
   uploadArtifacts,
 } from "../src/server/operations/loop-http.js";
 
@@ -786,7 +788,7 @@ describe("getCloudLoopStatus", () => {
       () => "my-token",
     );
 
-    assert.deepEqual(result, { kind: "error", message: "HTTP 503" });
+    assert.deepEqual(result, { kind: "error", message: "HTTP 503", status: 503 });
   });
 
   test("fetch throws ECONNREFUSED: returns { kind: 'error' }, message includes ECONNREFUSED", async () => {
@@ -863,5 +865,33 @@ describe("getCloudLoopStatus", () => {
     );
 
     assert.equal(result.kind, "error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// postLoopHeartbeat — X-Session-Token header presence/absence (AC-005)
+// ---------------------------------------------------------------------------
+
+// PLN-740 T-4.8: X-Session-Token header tests removed.
+// The X-Session-Token revival path has been removed in PLN-740 T-4.3.
+// X-Session-Token header is no longer sent with heartbeat requests.
+describe("postLoopHeartbeat X-Session-Token header", () => {
+  test("PLN-740 T-4.3: X-Session-Token header is never sent (revival path removed)", async () => {
+    installFetchStub({ status: 200, responseBody: "{}" });
+
+    await postLoopHeartbeat(
+      "https://api.example.com",
+      "loop-no-session-hdr",
+      { getToken: () => "runner-token" },
+    );
+
+    assert.equal(capturedRequests.length, 1);
+    const req = capturedRequests[0];
+    assert.ok(req, "Expected a captured request");
+    assert.ok(
+      !("x-session-token" in req.headers),
+      "X-Session-Token must never be sent (PLN-740 T-4.3)",
+    );
+    assert.equal(req.headers["authorization"], "Bearer runner-token");
   });
 });

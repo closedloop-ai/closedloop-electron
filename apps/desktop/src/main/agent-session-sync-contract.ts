@@ -1,3 +1,5 @@
+import type { BillingMode } from "../shared/billing-mode.js";
+
 export const AGENT_SESSION_SYNC_SCHEMA_VERSION = 1 as const;
 
 export type AgentSessionSyncMode = "backfill" | "incremental";
@@ -60,6 +62,15 @@ export type SyncedAgentSession = {
   name?: string | null;
   status: string;
   harness?: string | null;
+  /**
+   * CLOSEDLOOP FEA-1434: per-session billing mode (real metered API spend vs
+   * subscription-covered). Session-level (not per-token-usage row): billing is
+   * a property of the spawned subprocess/credential, not of an individual model
+   * line. Optional + additive — the schema version is unchanged, so this is not
+   * a breaking contract change. Older desktop builds simply omit the field; the
+   * cloud relay treats an absent value as "unknown".
+   */
+  billingMode?: BillingMode | null;
   cwd?: string | null;
   model?: string | null;
   startedAt: string;

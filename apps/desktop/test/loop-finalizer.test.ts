@@ -536,6 +536,43 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING with COMPLETED snapshot pres
   assert.equal(fetchCalls.filter((c) => c.body.includes('"type":"error"')).length, 0);
 });
 
+test("finalizeLoopFromRuntime finalizes COMPLETED job as successful completion, not error", async () => {
+  // Simulates the case where symphony-status resolved via JSONL inspection and
+  // wrote status: "COMPLETED" into the job store before finalization ran.
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+
+  const jobStore = createStore("finalizer-completed-status");
+  const job = createBaseJob({ claudeWorkDir, status: "COMPLETED" });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getToken: () => "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "COMPLETED");
+  assert.ok(persisted.completedEventPostedAt);
+  assert.ok(persisted.finalStatusPersistedAt);
+
+  // Must post a completed event, not an error event.
+  assert.ok(
+    fetchCalls.some((c) => c.body.includes('"type":"completed"')),
+    "expected a completed event to be posted",
+  );
+  assert.equal(
+    fetchCalls.filter((c) => c.body.includes('"type":"error"')).length,
+    0,
+    "must not post an error event for a COMPLETED job",
+  );
+});
+
 test("finalizeLoopFromRuntime boot-recovery error event includes diagnostics payload", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });

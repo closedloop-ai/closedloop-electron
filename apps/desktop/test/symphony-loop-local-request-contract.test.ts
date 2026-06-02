@@ -239,4 +239,52 @@ describe("parseSymphonyLoopRequestBody", () => {
         err.message.includes("branchName"),
     );
   });
+
+  // PLN-740 T-4.4: cloudSessionToken is tolerated-but-ignored. The field is
+  // still stripped from rawBody for security but not propagated to the return value.
+  test("PLN-740 T-4.4: cloudSessionToken is tolerated-but-ignored (stripped from rawBody)", () => {
+    const parsed = parseSymphonyLoopRequestBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000010",
+      command: LoopCommand.Plan,
+      closedLoopAuthToken: "token",
+      artifacts: [],
+      repo: { fullName: "org/repo", branch: "main" },
+      cloudSessionToken: "  session-tok-abc123  ",
+    });
+
+    // cloudSessionToken is no longer propagated to the return type.
+    assert.equal(
+      (parsed as unknown as Record<string, unknown>).cloudSessionToken,
+      undefined,
+      "cloudSessionToken must be stripped from the parsed body (PLN-740 T-4.4)",
+    );
+  });
+
+  test("absent cloud session token: parsed body has no cloudSessionToken field", () => {
+    const absent = parseSymphonyLoopRequestBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000011",
+      command: LoopCommand.Plan,
+      closedLoopAuthToken: "token",
+      artifacts: [],
+      repo: { fullName: "org/repo", branch: "main" },
+    });
+    assert.equal((absent as unknown as Record<string, unknown>).cloudSessionToken, undefined);
+  });
+
+  test("rejects an oversized cloud session token (validation still runs for security)", () => {
+    assert.throws(
+      () =>
+        parseSymphonyLoopRequestBody({
+          loopId: "aaaaaaaa-0000-0000-0000-000000000013",
+          command: LoopCommand.Plan,
+          closedLoopAuthToken: "token",
+          artifacts: [],
+          repo: { fullName: "org/repo", branch: "main" },
+          cloudSessionToken: "x".repeat(4097),
+        }),
+      (err) =>
+        err instanceof SymphonyLoopRequestValidationError &&
+        err.message.includes("cloudSessionToken is malformed"),
+    );
+  });
 });
