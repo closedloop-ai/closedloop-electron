@@ -9,7 +9,13 @@ import {
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_METHOD,
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH,
+  BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
 } from "../shared/contracts.js";
+import {
+  type ActiveCommandKeyTargetContext,
+  browserCommandKeyTargetContextMatches,
+  parseBrowserCommandKeyCommandTargetContext,
+} from "./command-key-target-context.js";
 
 export type BrowserCommandKeyApprovalRequestMatch =
   | "match"
@@ -55,6 +61,8 @@ type CommandEventPayload = Pick<
 
 export type BrowserCommandKeyApprovalRequestHandlerOptions = {
   notifyPendingKeys: (fingerprint: string) => Promise<void> | void;
+  getActiveTargetContext?: () => ActiveCommandKeyTargetContext | undefined;
+  onLegacyContextlessApproval?: (fingerprint: string) => void;
   sendCommandAck: (event: CommandAckPayload) => void;
   sendCommandEvent: (event: CommandEventPayload) => void;
   onChanged?: () => void;
@@ -100,6 +108,46 @@ export function handleBrowserCommandKeyApprovalRequestCommand(
       reason: parsed.reason,
     });
     return;
+  }
+
+  const commandTargetContext = parseBrowserCommandKeyCommandTargetContext(
+    command.body,
+  );
+  if (commandTargetContext.kind === "invalid") {
+    options.log?.(
+      "warn",
+      `Rejected browser command key approval request ${command.commandId}: ${BROWSER_COMMAND_KEY_APPROVAL_REQUEST_INVALID_REASON}`,
+    );
+    options.sendCommandAck({
+      commandId: command.commandId,
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_APPROVAL_REQUEST_INVALID_REASON,
+    });
+    return;
+  }
+  if (
+    commandTargetContext.kind === "present" &&
+    !browserCommandKeyTargetContextMatches({
+      commandContext: commandTargetContext,
+      activeContext: options.getActiveTargetContext?.(),
+    })
+  ) {
+    options.log?.(
+      "warn",
+      `Rejected browser command key approval request ${command.commandId}: ${BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON}`,
+    );
+    options.sendCommandAck({
+      commandId: command.commandId,
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
+    });
+    return;
+  }
+
+  if (commandTargetContext.kind === "absent") {
+    options.onLegacyContextlessApproval?.(parsed.fingerprint);
   }
 
   options.sendCommandAck({

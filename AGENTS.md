@@ -59,6 +59,11 @@ Gateway route handlers live under `apps/desktop/src/server/operations/`.
 - When parsing Git CLI path output, account for Git C-quoted paths and format-specific separators instead of using JSON parsing or unqualified string splits. Add focused coverage for non-ASCII filenames, quoted filenames containing separator text, and binary add/delete metadata when the route returns file status or diff shape.
 - Git diff and numstat output does not cover every status class, especially untracked files. When a gateway response exposes file stats for mixed tracked and untracked local changes, either supplement the missing untracked metadata or explicitly document zero-value semantics, and add route-level coverage for the chosen behavior.
 
+## Browser Command Keys
+Browser command-key authorization and reconciliation must fail closed for target-scoped org trust. If an active target context exists and remote key classification is skipped, invalid, mismatched, or legacy-only instead of fully scoped, prune or clear org-sourced local key trust rather than leaving approvals from a prior target usable; cover skip paths that keep non-org keys but remove stale org keys.
+
+When browser command-key lifecycle code replaces the active target context, clear target-bound transient approval markers such as remembered legacy contextless fingerprints before later manual approval decisions can observe the new context. Add coverage for target switches carrying stale approval state.
+
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
 
