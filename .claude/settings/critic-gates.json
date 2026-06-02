@@ -1,45 +1,57 @@
 {
   "version": 1,
   "defaults": {
-    "baseCritics": [
-      "security-privacy",
-      "test-strategist",
-      "typescript-expert"
-    ],
+    "baseCritics": ["security-privacy", "test-strategist", "typescript-expert"],
     "reviewBudget": 8
   },
   "moduleCritics": [
     {
-      "patterns": ["gateway", "router", "cors", "http", "ndjson", "sse", "streaming", "server"],
-      "critics": ["gateway-core-architect", "gateway-operations-architect"]
+      "patterns": ["auth", "authentication", "session", "token", "login", "challenge"],
+      "critics": ["security-privacy", "gateway-auth-architect"]
     },
     {
-      "patterns": ["operation", "symphony", "codex", "terminal", "deploy", "learnings", "run-viewer", "ticket"],
-      "critics": ["gateway-operations-architect", "process-management-expert"]
+      "patterns": ["authorization", "sandbox", "policy", "origin", "ssrf", "outbound", "approval"],
+      "critics": ["security-privacy", "authorization-architect"]
     },
     {
-      "patterns": ["socket", "cloud", "realtime", "command", "queue", "replay", "sequence", "presence"],
-      "critics": ["cloud-connection-specialist", "cloud-command-executor-specialist"]
+      "patterns": ["command", "signing", "key", "admin-key", "managed-key"],
+      "critics": ["security-privacy", "command-signing-expert"]
     },
     {
-      "patterns": ["auth", "authentication", "authorization", "approval", "sandbox", "security", "origin", "safeStorage", "token"],
-      "critics": ["security-privacy", "electron-specialist"]
+      "patterns": ["gateway", "operations", "router", "routes", "api", "endpoint", "rest"],
+      "critics": ["gateway-operations-architect"]
     },
     {
-      "patterns": ["electron", "ipc", "preload", "tray", "window", "browserwindow", "update", "auto-update"],
-      "critics": ["electron-specialist"]
+      "patterns": ["relay", "websocket", "socket", "cloud-relay", "loops-api"],
+      "critics": ["cloud-relay-architect", "realtime-architect"]
     },
     {
-      "patterns": ["git", "branch", "commit", "push", "pull", "pr", "worktree", "diff"],
-      "critics": ["git-operations-expert"]
+      "patterns": ["realtime", "watcher", "stream", "tailer", "postmessage", "iframe"],
+      "critics": ["realtime-architect"]
     },
     {
-      "patterns": ["process", "spawn", "pid", "kill", "child_process", "terminal"],
-      "critics": ["process-management-expert"]
+      "patterns": ["database", "db", "sql", "sqlite", "schema", "migration", "store", "persistence"],
+      "critics": ["database-architect"]
     },
     {
-      "patterns": ["store", "persist", "settings", "activity", "log", "approval-store", "electron-store"],
-      "critics": ["persistence-expert"]
+      "patterns": ["telemetry", "analytics", "observability", "logging", "metrics", "cost", "token-usage"],
+      "critics": ["observability-architect", "analytics-integration-expert"]
+    },
+    {
+      "patterns": ["build", "vite", "tsc", "electron-builder", "packaging", "asar", "agent-monitor-build"],
+      "critics": ["electron-build-architect"]
+    },
+    {
+      "patterns": ["ci", "release", "deploy", "github-actions", "auto-update", "version-bump", "supply-chain"],
+      "critics": ["ci-release-architect"]
+    },
+    {
+      "patterns": ["frontend", "renderer", "react", "tailwind", "dashboard", "ui", "sidecar-overlay"],
+      "critics": ["frontend-architect"]
+    },
+    {
+      "patterns": ["cache", "caching", "plugin-cache", "catchup-cache"],
+      "critics": ["caching-strategist"]
     }
   ],
   "parityCritics": {},
