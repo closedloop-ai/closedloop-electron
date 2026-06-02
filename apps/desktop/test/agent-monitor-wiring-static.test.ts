@@ -119,11 +119,13 @@ test("pnpm-managed agent-monitor source packages are declared and wired into bui
     desktopPkg.scripts["build:agent-monitor"],
     "node scripts/build-agent-monitor.mjs",
   );
-  assert.match(desktopPkg.scripts.build ?? "", /pnpm build:agent-monitor/);
-  assert.match(
-    desktopPkg.scripts.start ?? "",
-    /pnpm build:agent-monitor/,
-  );
+  // FEA-1497 (Phase 0 main-merge onto the in-process agent-DB branch): PR #264
+  // moved the renderer to a first-party Vite build and decoupled
+  // `build:agent-monitor` from the default `build`/`start` scripts (it remains
+  // invoked by the dedicated script + the pretest hooks). The legacy assertions
+  // that `build`/`start` embed `pnpm build:agent-monitor` are intentionally
+  // dropped here; the vendor build pipeline + deps are removed wholesale in
+  // Phase 3E (vendor teardown).
   assert.equal(
     desktopPkg.dependencies["agent-dashboard"],
     "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
@@ -529,7 +531,12 @@ test("shutdown sequence stops the sidecar before the server", () => {
   assert.ok(amIdx > 0 && srvIdx > 0 && amIdx < srvIdx, "agentMonitor.stop must precede server.stop");
 });
 
-test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it on the setting", () => {
+// FEA-1497 (Phase 0): PR #264 removed the monolithic index.html iframe embed
+// (#claudeDashFrame + the closedloop:navigate postMessage bridge). The agent UI
+// is now a first-party React renderer and the sidecar iframe is deleted at the
+// Phase 1 cutover, so this vendor-iframe wiring guard is obsolete. Skipped until
+// the Phase 1 first-party renderer adds its own navigation/visibility guard.
+test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it on the setting", { skip: "superseded by PR #264 first-party renderer; re-guarded in Phase 1 (FEA-1497)" }, () => {
   // Agent nav items live in the left sidebar; hidden when the sidecar is off.
   assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
   assert.match(indexHtml, /agent-disabled/);
@@ -1016,8 +1023,10 @@ test("FEA-1334 ingest orchestrator + progress card are wired into the build", ()
   // makes a cross-origin fetch to the sidecar.
   assert.match(preloadSource, /getAgentMonitorIngestProgress/);
   assert.match(appSource, /desktop:get-agent-monitor-ingest-progress/);
-  assert.match(indexHtml, /id="ingestBanner"/);
-  assert.match(indexHtml, /getAgentMonitorIngestProgress/);
+  // FEA-1497 (Phase 0): the floating ingest-progress card moved out of the
+  // deleted monolithic index.html into the first-party React renderer. Its IPC
+  // contract (preload + app, asserted above) is unchanged; the index.html
+  // banner-markup assertions are dropped pending the Phase 1 renderer re-guard.
 });
 
 test("Codex harness filter now uses server-backed pagination and rebuilds on snippet edits", () => {

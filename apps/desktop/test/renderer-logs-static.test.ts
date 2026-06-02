@@ -9,7 +9,13 @@ function readRenderer(): string {
   return fs.readFileSync(rendererPath, "utf8");
 }
 
-describe("renderer Diagnostics and update banner wiring", () => {
+// FEA-1497 (Phase 0): PR #264 replaced the monolithic index.html shell (which
+// hosted the Diagnostics log viewer, the packaged update banner, and the
+// security-settings copy) with a first-party React renderer. These static
+// string guards target the deleted inline-JS implementation; the equivalent
+// behaviour now lives in React components (e.g. LogsPanel/SettingsPanel) and is
+// re-guarded in Phase 1. Skipped until then.
+describe("renderer Diagnostics and update banner wiring", { skip: "superseded by PR #264 React renderer; re-guarded in Phase 1 (FEA-1497)" }, () => {
   test("Diagnostics uses incremental rendering controls instead of whole-list HTML replacement", () => {
     const html = readRenderer();
 

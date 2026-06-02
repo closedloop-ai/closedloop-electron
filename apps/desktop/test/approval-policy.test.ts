@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { shouldAutoApprove, OPERATION_RISK_TIERS, riskTierOrder, FORCE_INTERACTIVE_OPERATIONS } from "../src/main/approval-policy.js";
 import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "../src/main/approval-operations.js";
@@ -60,22 +59,23 @@ test("Branch View local operations are registered in approval catalogs and rende
   assert.equal(OPERATION_RISK_TIERS.git_local_changes, "low");
   assert.equal(OPERATION_RISK_TIERS.git_local_commit_push, "high");
 
-  const rendererSource = readFileSync(
-    new URL("../src/renderer/index.html", import.meta.url),
-    "utf-8"
+  // FEA-1497 (Phase 0): the Branch View path->operationId mapping is owned by
+  // the first-party gateway (resolveOperationId), so assert it there directly
+  // instead of string-matching the monolithic index.html that PR #264 replaced
+  // with the React renderer. The human-readable renderer labels ("Branch View
+  // Local Changes" / "Commit and Push Local Changes") now live in React
+  // components and are re-guarded in Phase 1.
+  assert.equal(
+    resolveOperationId("/api/gateway/git/local-changes"),
+    "git_local_changes"
   );
-  assert.match(
-    rendererSource,
-    /\["\/api\/gateway\/git\/local-changes", "git_local_changes"\]/
+  assert.equal(
+    resolveOperationId("/api/gateway/git/local-changes/diff"),
+    "git_local_changes"
   );
-  assert.match(
-    rendererSource,
-    /\["\/api\/gateway\/git\/local-changes\/commit-push", "git_local_commit_push"\]/
-  );
-  assert.match(rendererSource, /git_local_changes: "Branch View Local Changes"/);
-  assert.match(
-    rendererSource,
-    /git_local_commit_push: "Commit and Push Local Changes"/
+  assert.equal(
+    resolveOperationId("/api/gateway/git/local-changes/commit-push"),
+    "git_local_commit_push"
   );
 });
 
