@@ -82,6 +82,8 @@ export interface DesktopApi {
   openAgentMonitor: () => Promise<unknown>;
   getAgentMonitorHooksEnabled: () => Promise<boolean>;
   setAgentMonitorHooksEnabled: (enabled: boolean) => Promise<AgentMonitorHookResult>;
+  getAgentMonitorCodexHooksOptIn: () => Promise<boolean>;
+  setAgentMonitorCodexHooksOptIn: (optIn: boolean) => Promise<AgentMonitorHookResult>;
   /** @deprecated Replaced by in-process SQLite database */
   getAgentMonitorData?: (query: string) => Promise<unknown>;
   /** Database IPC channels */

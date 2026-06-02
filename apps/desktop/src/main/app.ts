@@ -97,7 +97,9 @@ import { CostReconciliationService } from "./cost-reconciliation-service.js";
 import { ClaudeCodeAnalyticsService } from "./claude-code-analytics-service.js";
 import {
   isAgentMonitorHooksEnabled,
+  isAgentMonitorCodexHooksOptIn,
   setAgentMonitorHooksEnabled,
+  setAgentMonitorCodexHooksOptIn,
   syncAgentMonitorHooksOnBoot,
 } from "./agent-monitor-hooks.js";
 import { DesktopGatewayServer } from "../server/server.js";
@@ -2727,6 +2729,25 @@ export class DesktopApplication {
           };
         }
         return setAgentMonitorHooksEnabled(enabled === true);
+      },
+    );
+    // FEA-1444 (carried into FEA-1497): opt-in Codex hook ingestion. Gated on
+    // the master Agent Dashboard toggle; the in-process listener stamps
+    // harness='codex' from the __provider hint the codex handler injects.
+    ipcMain.handle("desktop:get-agent-monitor-codex-hooks-opt-in", () =>
+      this.isAgentMonitorEnabled() && isAgentMonitorCodexHooksOptIn(),
+    );
+    ipcMain.handle(
+      "desktop:set-agent-monitor-codex-hooks-opt-in",
+      (_event, optIn: boolean) => {
+        if (!this.isAgentMonitorEnabled()) {
+          return {
+            ok: false,
+            enabled: false,
+            error: "Agent Dashboard is disabled in Settings.",
+          };
+        }
+        return setAgentMonitorCodexHooksOptIn(optIn === true);
       },
     );
     ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());

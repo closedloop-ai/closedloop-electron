@@ -616,6 +616,14 @@ function materializeRuntimeTree() {
     path.join(generatedRootDir, "scripts"),
     { recursive: true },
   );
+  // FEA-1444 (carried into FEA-1497): the Codex wrapper hook handler ships
+  // in-repo (not vendored from upstream agent-dashboard) and is copied into the
+  // generated scripts/ tree so installCodexHooks resolves the SAME scriptsDir
+  // as the upstream Claude handler, for both dev and packaged builds.
+  cpSync(
+    path.join(codexModulesDir, "codex-hook-handler.js"),
+    path.join(generatedRootDir, "scripts", "codex-hook-handler.js"),
+  );
   // The plans HTTP route lives in the generated server/routes (server/ was
   // copied above); import-history.js (just copied with scripts/) is patched to
   // persist captured plans on the shared import sink — both harnesses, history,
@@ -3653,6 +3661,7 @@ function assertGeneratedTree() {
     generatedClientIndex,
     path.join(generatedRootDir, "scripts", "install-hooks.js"),
     path.join(generatedRootDir, "scripts", "hook-handler.js"),
+    path.join(generatedRootDir, "scripts", "codex-hook-handler.js"),
     generatedUninstallHooks,
   ]) {
     if (!existsSync(required)) {

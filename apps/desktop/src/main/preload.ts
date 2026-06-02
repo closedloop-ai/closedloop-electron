@@ -153,6 +153,15 @@ const desktopApi = {
       "desktop:set-agent-monitor-hooks-enabled",
       enabled,
     ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>,
+  getAgentMonitorCodexHooksOptIn: () =>
+    ipcRenderer.invoke(
+      "desktop:get-agent-monitor-codex-hooks-opt-in",
+    ) as Promise<boolean>,
+  setAgentMonitorCodexHooksOptIn: (optIn: boolean) =>
+    ipcRenderer.invoke(
+      "desktop:set-agent-monitor-codex-hooks-opt-in",
+      optIn,
+    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>,
   getAllFlags: () =>
     ipcRenderer.invoke("desktop:get-all-flags") as Promise<unknown>,
   onFlagsChanged: (callback: () => void) => {
