@@ -1,13 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
-import type { EventRow, HookEventPayload, EventCountByType } from "./types.js";
+import type { EventRow, EventCountByType } from "./types.js";
 
+// Read-only event store; event writes are owned by `lifecycle.ts`.
 export function createEventStore(db: DatabaseSync) {
-  const insertStmt = db.prepare(`
-    INSERT INTO events (id, session_id, agent_id, event_type, tool_name, summary, data, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
   const getBySessionStmt = db.prepare(
     "SELECT * FROM events WHERE session_id = ? ORDER BY created_at ASC",
   );
@@ -58,31 +53,6 @@ export function createEventStore(db: DatabaseSync) {
   }
 
   return {
-    insert(payload: HookEventPayload): EventRow {
-      const id = randomUUID();
-      const now = new Date().toISOString();
-      insertStmt.run(
-        id,
-        payload.sessionId ?? null,
-        payload.agentId ?? null,
-        payload.eventType ?? "unknown",
-        payload.toolName ?? null,
-        payload.summary ?? null,
-        payload.data ?? null,
-        now,
-      );
-      return {
-        id,
-        sessionId: payload.sessionId ?? "",
-        agentId: payload.agentId ?? null,
-        eventType: payload.eventType ?? "unknown",
-        toolName: payload.toolName ?? null,
-        summary: payload.summary ?? null,
-        data: payload.data ?? null,
-        createdAt: now,
-      };
-    },
-
     getBySession(sessionId: string): EventRow[] {
       return rowsToList(getBySessionStmt.all(sessionId) as Record<string, unknown>[]);
     },

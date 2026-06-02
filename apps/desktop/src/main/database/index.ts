@@ -5,13 +5,23 @@ import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from "./schema.js";
 import { createSessionStore } from "./sessions.js";
 import { createAgentStore } from "./agents.js";
 import { createEventStore } from "./events.js";
+import { createTokenUsageStore } from "./token-usage.js";
 import { createDashboardQueries } from "./dashboard.js";
 import type { DashboardSummary } from "./types.js";
 
 export interface AgentDatabase {
+  /**
+   * The underlying single shared connection. All in-process access — hook
+   * writes (lifecycle), IPC reads, the cloud relay, and cost reconciliation —
+   * goes through this one connection. node:sqlite `DatabaseSync` is synchronous
+   * and the main process is single-threaded, so a single connection eliminates
+   * cross-connection contention by construction (FEA-1497 Phase 1).
+   */
+  connection: DatabaseSync;
   sessions: ReturnType<typeof createSessionStore>;
   agents: ReturnType<typeof createAgentStore>;
   events: ReturnType<typeof createEventStore>;
+  tokenUsage: ReturnType<typeof createTokenUsageStore>;
   dashboard: ReturnType<typeof createDashboardQueries>;
   getSummary: () => DashboardSummary;
   run: (sql: string, ...params: unknown[]) => void;
@@ -40,17 +50,23 @@ export function openAgentDatabase(dbPath: string): AgentDatabase {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
+  // Defensive: even though all access is single-connection + synchronous, a
+  // busy_timeout guards against any future second handle (e.g. a worker thread).
+  db.exec("PRAGMA busy_timeout=5000");
   runMigrations(db);
 
   const sessions = createSessionStore(db);
   const agents = createAgentStore(db);
   const events = createEventStore(db);
+  const tokenUsage = createTokenUsageStore(db);
   const dashboard = createDashboardQueries(db);
 
   return {
+    connection: db,
     sessions,
     agents,
     events,
+    tokenUsage,
     dashboard,
     getSummary: () => dashboard.getSummary(),
     run: (sql: string, ...params: unknown[]) => {

@@ -4,7 +4,7 @@ import type { DashboardSummary, TokenAnalytics, AnalyticsData, WorkflowQueryData
 export function createDashboardQueries(db: DatabaseSync) {
   const totalSessionsStmt = db.prepare("SELECT COUNT(*) as count FROM sessions");
   const activeSessionsStmt = db.prepare(
-    "SELECT COUNT(*) as count FROM sessions WHERE status NOT IN ('completed', 'failed', 'stopped')",
+    "SELECT COUNT(*) as count FROM sessions WHERE status NOT IN ('completed', 'abandoned', 'error')",
   );
   const totalAgentsStmt = db.prepare("SELECT COUNT(*) as count FROM agents");
   const totalEventsStmt = db.prepare("SELECT COUNT(*) as count FROM events");

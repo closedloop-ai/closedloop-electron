@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 /**
  * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
@@ -82,5 +82,38 @@ CREATE INDEX IF NOT EXISTS idx_events_tool_created ON events(created_at, tool_na
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_agents_type ON agents(type);
 CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id) WHERE parent_agent_id IS NOT NULL;
+`,
+
+  // Version 3 → 4 (FEA-1497 Phase 1): make token_usage the in-process write target.
+  // Reshape token_usage to a (session_id, model) upsert target carrying the
+  // *effective* reconciled totals in the standard columns plus internal
+  // write-time raw_* accumulators (last transcript-segment cumulative) used only
+  // to detect compaction-driven token resets. Readers (dashboard + cloud relay)
+  // read the standard columns directly with NO baseline arithmetic. The table was
+  // never INSERTed prior to v4 and this branch is unreleased, so the reshape is a
+  // safe drop+recreate. Also add sessions.billing_mode (stamped at ingest from the
+  // shared billing-mode detector) so the relay can read it from the in-process DB.
+  `
+DROP TABLE IF EXISTS token_usage;
+
+CREATE TABLE token_usage (
+  session_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  raw_input INTEGER NOT NULL DEFAULT 0,
+  raw_output INTEGER NOT NULL DEFAULT 0,
+  raw_cache_read INTEGER NOT NULL DEFAULT 0,
+  raw_cache_write INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT,
+  PRIMARY KEY (session_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
+
+ALTER TABLE sessions ADD COLUMN billing_mode TEXT;
 `,
 ];

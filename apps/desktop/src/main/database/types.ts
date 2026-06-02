@@ -10,6 +10,7 @@ export interface SessionRow {
   awaitingInputSince: string | null;
   metadata: string | null;
   harness: string | null;
+  billingMode: string | null;
 }
 
 export interface AgentRow {
@@ -47,24 +48,6 @@ export interface TokenUsageRow {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-}
-
-export interface HookEventPayload {
-  sessionId?: string;
-  agentId?: string;
-  eventType?: string;
-  toolName?: string;
-  summary?: string;
-  data?: string;
-  status?: string;
-  name?: string;
-  model?: string;
-  cwd?: string;
-  task?: string;
-  type?: string;
-  subagentType?: string;
-  parentAgentId?: string;
-  metadata?: Record<string, unknown>;
 }
 
 export interface DashboardSummary {

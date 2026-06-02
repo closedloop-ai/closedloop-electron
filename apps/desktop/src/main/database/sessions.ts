@@ -1,24 +1,16 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { SessionRow, SessionWithAgents, HookEventPayload } from "./types.js";
+import type { SessionRow, SessionWithAgents } from "./types.js";
+
+// Terminal session statuses (vendor + canonical AgentSession vocabulary). A
+// session not in this set is treated as active. Writes are owned by
+// `lifecycle.ts`; this store is read-only.
+const TERMINAL_STATUSES = "('completed', 'abandoned', 'error')";
 
 export function createSessionStore(db: DatabaseSync) {
-  const insertStmt = db.prepare(`
-    INSERT INTO sessions (id, name, status, cwd, model, started_at, updated_at, metadata, harness)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const updateStatusStmt = db.prepare(`
-    UPDATE sessions SET status = ?, updated_at = ?, ended_at = ? WHERE id = ?
-  `);
-
-  const updateStmt = db.prepare(`
-    UPDATE sessions SET name = ?, model = ?, cwd = ?, updated_at = ?, metadata = ? WHERE id = ?
-  `);
-
   const getByIdStmt = db.prepare("SELECT * FROM sessions WHERE id = ?");
   const getAllStmt = db.prepare("SELECT * FROM sessions ORDER BY started_at DESC");
   const getActiveStmt = db.prepare(
-    "SELECT * FROM sessions WHERE status NOT IN ('completed', 'failed', 'stopped') ORDER BY started_at DESC",
+    `SELECT * FROM sessions WHERE status NOT IN ${TERMINAL_STATUSES} ORDER BY started_at DESC`,
   );
 
   const getAllWithDetailsStmt = db.prepare(`
@@ -43,6 +35,7 @@ export function createSessionStore(db: DatabaseSync) {
       awaitingInputSince: (raw.awaiting_input_since as string) ?? null,
       metadata: (raw.metadata as string) ?? null,
       harness: (raw.harness as string) ?? null,
+      billingMode: (raw.billing_mode as string) ?? null,
     };
   }
 
@@ -51,45 +44,6 @@ export function createSessionStore(db: DatabaseSync) {
   }
 
   return {
-    upsert(payload: HookEventPayload): SessionRow {
-      if (!payload.sessionId) throw new Error("sessionId is required");
-
-      const existing = toRow(getByIdStmt.get(payload.sessionId) as Record<string, unknown> | undefined);
-      const now = new Date().toISOString();
-
-      if (existing) {
-        if (payload.status) {
-          const endedAt = ["completed", "failed", "stopped"].includes(payload.status) ? now : null;
-          updateStatusStmt.run(payload.status, now, endedAt, payload.sessionId);
-        }
-        if (payload.name || payload.model || payload.cwd || payload.metadata) {
-          updateStmt.run(
-            payload.name ?? existing.name,
-            payload.model ?? existing.model,
-            payload.cwd ?? existing.cwd,
-            now,
-            payload.metadata ? JSON.stringify(payload.metadata) : existing.metadata,
-            payload.sessionId,
-          );
-        }
-        return toRow(getByIdStmt.get(payload.sessionId) as Record<string, unknown>)!;
-      }
-
-      insertStmt.run(
-        payload.sessionId,
-        payload.name ?? null,
-        payload.status ?? "running",
-        payload.cwd ?? null,
-        payload.model ?? null,
-        now,
-        now,
-        payload.metadata ? JSON.stringify(payload.metadata) : null,
-        null,
-      );
-
-      return toRow(getByIdStmt.get(payload.sessionId) as Record<string, unknown>)!;
-    },
-
     getById(id: string): SessionRow | undefined {
       return toRow(getByIdStmt.get(id) as Record<string, unknown> | undefined);
     },
