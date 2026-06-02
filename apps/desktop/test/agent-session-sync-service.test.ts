@@ -20,115 +20,12 @@ import {
   SESSION_PAYLOAD_BYTE_CAP,
 } from "../src/main/agent-session-sync-service.js";
 import { DesktopAgentSessionsAckReason } from "../src/main/cloud-protocol.js";
+import {
+  createAgentMonitorTestDatabase as createServiceTestDatabase,
+  flushAgentSessionSync,
+  insertTestSessionRow as insertSessionRow,
+} from "./helpers/agent-session-sync-test-utils.js";
 import { computeTokenCost } from "../src/shared/token-cost.js";
-
-function createServiceTestDatabase(rootDir: string): DatabaseSync {
-  const userDataDir = path.join(rootDir, "user-data");
-  mkdirSync(path.join(userDataDir, "agent-monitor"), { recursive: true });
-  const db = new DatabaseSync(
-    path.join(userDataDir, "agent-monitor", "dashboard.db"),
-  );
-  db.exec(`
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      status TEXT NOT NULL,
-      cwd TEXT,
-      model TEXT,
-      started_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      ended_at TEXT,
-      awaiting_input_since TEXT,
-      metadata TEXT,
-      harness TEXT NOT NULL,
-      billing_mode TEXT NOT NULL DEFAULT 'unknown'
-    );
-    CREATE TABLE agents (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      type TEXT NOT NULL,
-      subagent_type TEXT,
-      status TEXT NOT NULL,
-      task TEXT,
-      current_tool TEXT,
-      started_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      ended_at TEXT,
-      awaiting_input_since TEXT,
-      parent_agent_id TEXT,
-      metadata TEXT
-    );
-    CREATE TABLE events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      agent_id TEXT,
-      event_type TEXT NOT NULL,
-      tool_name TEXT,
-      summary TEXT,
-      data TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE token_usage (
-      session_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      input_tokens INTEGER NOT NULL DEFAULT 0,
-      output_tokens INTEGER NOT NULL DEFAULT 0,
-      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-      baseline_input INTEGER NOT NULL DEFAULT 0,
-      baseline_output INTEGER NOT NULL DEFAULT 0,
-      baseline_cache_read INTEGER NOT NULL DEFAULT 0,
-      baseline_cache_write INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE model_pricing (
-      model_pattern TEXT PRIMARY KEY,
-      input_per_mtok REAL NOT NULL DEFAULT 0,
-      output_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_read_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_write_per_mtok REAL NOT NULL DEFAULT 0
-    );
-  `);
-  return db;
-}
-
-function insertSessionRow(
-  db: DatabaseSync,
-  session: {
-    id: string;
-    startedAt: string;
-    updatedAt: string;
-    status?: string;
-    harness?: string;
-    cwd?: string | null;
-  },
-): void {
-  db.prepare(`
-    INSERT INTO sessions (
-      id, name, status, cwd, model, started_at, updated_at, ended_at,
-      awaiting_input_since, metadata, harness
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    session.id,
-    session.id,
-    session.status ?? "active",
-    session.cwd ?? "/home/user/Work",
-    null,
-    session.startedAt,
-    session.updatedAt,
-    null,
-    null,
-    null,
-    session.harness ?? "claude",
-  );
-}
-
-async function flushAgentSessionSync(): Promise<void> {
-  await Promise.resolve();
-  await new Promise<void>((resolve) => {
-    setImmediate(resolve);
-  });
-}
 
 test("agent-session sync loads normalized session payloads with attribution and cost", () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-"));
