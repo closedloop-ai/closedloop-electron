@@ -93,6 +93,18 @@ export class CommandKeyReconciler {
       );
 
       if (classification.reconciliationMode === "skip") {
+        if (classification.diagnostics.activeComputeTargetId) {
+          const reconciliation = this.options.reconcileOrganizationKeys([], {
+            removeStale: true,
+          });
+          if (reconciliation.removed.length > 0) {
+            this.options.log(
+              "info",
+              `Pruned ${reconciliation.removed.length} stale org command key(s) after skipped scoped reconciliation (${reason})`,
+            );
+            this.options.onChanged();
+          }
+        }
         return;
       }
 

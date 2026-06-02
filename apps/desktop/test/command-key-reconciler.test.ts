@@ -101,19 +101,28 @@ test("CommandKeyReconciler promote_only mode promotes without destructive remova
   assert.deepEqual(notifiedFingerprints, [["cl:legacyfingerpr123"]]);
 });
 
-test("CommandKeyReconciler skip mode avoids mutation and notification", async () => {
+test("CommandKeyReconciler skip mode avoids mutation and notification without active target context", async () => {
   let reconcileCount = 0;
   let notifyCount = 0;
   const reconciler = new CommandKeyReconciler({
     hasApiKey: () => true,
-    fetchOrganizationKeyClassification: async (reason) =>
-      makeClassification({
+    fetchOrganizationKeyClassification: async (reason) => ({
+      kind: "legacy_broad",
+      reconciliationMode: "skip",
+      relevantKeys: [],
+      notificationKeys: [],
+      ignoredKeys: [makeOrgKey("cl:legacyfingerpr123")],
+      diagnostics: {
         reason,
-        kind: "legacy_broad",
-        reconciliationMode: "skip",
-        relevantKeys: [],
-        notificationKeys: [],
-      }),
+        fetchedCount: 1,
+        relevantCount: 0,
+        ignoredCount: 1,
+        legacyCount: 1,
+        invalidContextCount: 0,
+        mismatchedContextCount: 0,
+        activeGatewayPresent: false,
+      },
+    }),
     reconcileOrganizationKeys: () => {
       reconcileCount += 1;
       return { removed: [], promoted: [] };
@@ -129,6 +138,59 @@ test("CommandKeyReconciler skip mode avoids mutation and notification", async ()
 
   assert.equal(reconcileCount, 0);
   assert.equal(notifyCount, 0);
+});
+
+test("CommandKeyReconciler prunes stale org keys when scoped reconciliation is skipped", async () => {
+  const logs: string[] = [];
+  let changedCount = 0;
+  const removeStaleOptions: Array<boolean | undefined> = [];
+  const reconciler = new CommandKeyReconciler({
+    hasApiKey: () => true,
+    fetchOrganizationKeyClassification: async (reason) =>
+      makeClassification({
+        reason,
+        kind: "invalid_only",
+        reconciliationMode: "skip",
+        relevantKeys: [],
+        diagnostics: {
+          reason,
+          fetchedCount: 1,
+          relevantCount: 0,
+          ignoredCount: 1,
+          legacyCount: 0,
+          invalidContextCount: 1,
+          mismatchedContextCount: 0,
+          activeComputeTargetId: "11111111-1111-4111-8111-111111111111",
+          activeGatewayPresent: true,
+        },
+      }),
+    reconcileOrganizationKeys: (registeredKeys, options) => {
+      assert.deepEqual([...registeredKeys], []);
+      removeStaleOptions.push(options?.removeStale);
+      return {
+        removed: [
+          {
+            fingerprint: "cl:staleorgfinger12",
+            publicKeyBase64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            ownerName: "Prior Target User",
+            authorizedAt: "2026-05-09T00:00:00.000Z",
+            source: "org",
+          },
+        ],
+        promoted: [],
+      };
+    },
+    onChanged: () => {
+      changedCount += 1;
+    },
+    log: (_level, message) => logs.push(message),
+  });
+
+  await reconciler.reconcileNow("hello_ack");
+
+  assert.deepEqual(removeStaleOptions, [true]);
+  assert.equal(changedCount, 1);
+  assert.match(logs.join("\n"), /Pruned 1 stale org command key/);
 });
 
 test("CommandKeyReconciler skips destructive mutation when API key is missing", async () => {
