@@ -84,6 +84,31 @@ test("profile reset clears stale target context and legacy contextless approvals
   );
 });
 
+test("target context replacement clears remembered legacy contextless approvals", () => {
+  let gatewayId: string | undefined = GATEWAY_ID;
+  const lifecycle = new BrowserCommandKeyAppLifecycle({
+    getActiveGatewayId: () => gatewayId,
+  });
+  const legacyKey = makeKey("cl:legacyapproval123");
+
+  lifecycle.setActiveTargetContext(TARGET_ID);
+  lifecycle.rememberLegacyContextlessApproval("cl:legacyapproval123");
+  gatewayId = NEXT_GATEWAY_ID;
+  lifecycle.setActiveTargetContext(NEXT_TARGET_ID);
+
+  assert.deepEqual(lifecycle.getActiveTargetContext(), {
+    computeTargetId: NEXT_TARGET_ID,
+    gatewayId: NEXT_GATEWAY_ID,
+  });
+  assert.equal(
+    lifecycle.selectOrganizationCommandKeyForManualApproval({
+      keys: [legacyKey],
+      fingerprint: "cl:legacyapproval123",
+    }),
+    null,
+  );
+});
+
 test("manual approval selection uses contextless legacy marker only until it is consumed", () => {
   const lifecycle = new BrowserCommandKeyAppLifecycle({
     getActiveGatewayId: () => GATEWAY_ID,

@@ -56,9 +56,10 @@ test("CommandKeyReconciler full mode prunes from relevant public-key fingerprint
   assert.match(logs.join("\n"), /removed 1 stale org key/);
 });
 
-test("CommandKeyReconciler promote_only mode promotes without destructive removal", async () => {
+test("CommandKeyReconciler mixed scoped mode promotes and prunes stale org keys", async () => {
   let changedCount = 0;
   const removeStaleOptions: Array<boolean | undefined> = [];
+  const removedFingerprints: string[] = [];
   const notifiedFingerprints: string[][] = [];
   const reconciler = new CommandKeyReconciler({
     hasApiKey: () => true,
@@ -72,8 +73,18 @@ test("CommandKeyReconciler promote_only mode promotes without destructive remova
       }),
     reconcileOrganizationKeys: (_registeredKeys, options) => {
       removeStaleOptions.push(options?.removeStale);
+      const removed = [
+        {
+          fingerprint: "cl:staleorgfinger12",
+          publicKeyBase64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          ownerName: "Stale Org User",
+          authorizedAt: "2026-05-09T00:00:00.000Z",
+          source: "org" as const,
+        },
+      ];
+      removedFingerprints.push(...removed.map((key) => key.fingerprint));
       return {
-        removed: [],
+        removed,
         promoted: [
           {
             fingerprint: "cl:legacyfingerpr123",
@@ -96,7 +107,8 @@ test("CommandKeyReconciler promote_only mode promotes without destructive remova
 
   await reconciler.reconcileNow("hello_ack");
 
-  assert.deepEqual(removeStaleOptions, [false]);
+  assert.deepEqual(removeStaleOptions, [true]);
+  assert.deepEqual(removedFingerprints, ["cl:staleorgfinger12"]);
   assert.equal(changedCount, 1);
   assert.deepEqual(notifiedFingerprints, [["cl:legacyfingerpr123"]]);
 });

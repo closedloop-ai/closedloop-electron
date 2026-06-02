@@ -37,6 +37,7 @@ export class BrowserCommandKeyAppLifecycle {
 
   setActiveTargetContext(computeTargetId: string): ActiveCommandKeyTargetContext {
     const gatewayId = this.options.getActiveGatewayId();
+    this.legacyContextlessApprovalFingerprints.clear();
     this.activeTargetContext = {
       computeTargetId,
       ...(gatewayId ? { gatewayId } : {}),

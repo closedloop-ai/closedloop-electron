@@ -62,6 +62,8 @@ Gateway route handlers live under `apps/desktop/src/server/operations/`.
 ## Browser Command Keys
 Browser command-key authorization and reconciliation must fail closed for target-scoped org trust. If an active target context exists and remote key classification is skipped, invalid, mismatched, or legacy-only instead of fully scoped, prune or clear org-sourced local key trust rather than leaving approvals from a prior target usable; cover skip paths that keep non-org keys but remove stale org keys.
 
+When browser command-key lifecycle code replaces the active target context, clear target-bound transient approval markers such as remembered legacy contextless fingerprints before later manual approval decisions can observe the new context. Add coverage for target switches carrying stale approval state.
+
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
 

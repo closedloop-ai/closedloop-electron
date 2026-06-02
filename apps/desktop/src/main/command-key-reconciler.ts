@@ -114,7 +114,9 @@ export class CommandKeyReconciler {
           ...(key.id ? { sourceUserPublicKeyId: key.id } : {}),
         })),
         {
-          removeStale: classification.reconciliationMode === "full",
+          removeStale:
+            classification.reconciliationMode === "full" ||
+            Boolean(classification.diagnostics.activeComputeTargetId),
         },
       );
       const changed =
