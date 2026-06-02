@@ -439,8 +439,14 @@ export function createLifecycle(db: DatabaseSync, deps: LifecycleDeps) {
      * the fail-silent hook handler.
      */
     processEvent(hookType: string, data: HookData, harness: string): boolean {
+      // `session_id` arrives as `unknown` through the listener's zod envelope
+      // (`data` is validated only as a string-keyed record), so its declared
+      // `string` type is not enforced at runtime. Guard the actual type before
+      // it becomes a SQLite primary-key binding: a non-string (e.g. an object)
+      // would otherwise be stringified to "[object Object]" and stored as a
+      // junk primary key. (CLAUDE.md: runtime-validate persisted payloads.)
       const sessionId = data.session_id;
-      if (!sessionId) {
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
         return false;
       }
       // Read the transcript (file IO) BEFORE opening the write transaction.

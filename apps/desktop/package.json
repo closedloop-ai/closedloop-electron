@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.108",
+  "version": "0.15.109",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -18,7 +18,8 @@
     "dashboard:reset": "node scripts/reset-dashboard-db.mjs",
     "dashboard:reset-packs": "node scripts/reset-dashboard-db.mjs --packs-only",
     "stage:package": "node scripts/stage-packaging-app.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && pnpm typecheck:renderer",
+    "typecheck:renderer": "tsc -p tsconfig.renderer.json --noEmit",
     "lint": "eslint src/",
     "test": "tsx --test test/*.test.ts && node --test \"scripts/agent-monitor-packs/__tests__/*.test.js\" \"scripts/agent-monitor-pull-requests/__tests__/*.test.js\"",
     "pretest:contract": "pnpm build:agent-monitor",
@@ -34,8 +35,8 @@
     "test:audit:ui": "playwright test --config test-e2e/agent-monitor/playwright.audit.config.ts",
     "preaudit:report": "pnpm build:agent-monitor",
     "audit:report": "node test-e2e/agent-monitor/inventory/run-report.mjs",
-    "package": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs",
-    "release": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
+    "package": "pnpm clean:package && pnpm build && pnpm build:agent-monitor && pnpm stage:package && node scripts/run-electron-builder.mjs",
+    "release": "pnpm clean:package && pnpm build && pnpm build:agent-monitor && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },
   "dependencies": {
     "@closedloop-ai/design-system": "file:vendor/design-system",
@@ -64,6 +65,8 @@
     "@tailwindcss/vite": "^4.3.0",
     "@types/busboy": "^1.5.4",
     "@types/node": "^22.13.8",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
     "@vitejs/plugin-react": "4.3.4",

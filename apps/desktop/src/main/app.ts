@@ -76,6 +76,7 @@ import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentHookListener } from "./agent-monitor-listener.js";
 import { openAgentDatabase } from "./database/index.js";
+import { coerceDbId } from "./database/ipc-validation.js";
 import { createLifecycle } from "./database/lifecycle.js";
 import { detectBillingMode } from "./billing-mode-detector.js";
 import { migrateVendorDashboardDb } from "./agent-monitor-db-migration.js";
@@ -3629,27 +3630,32 @@ export class DesktopApplication {
       return this.agentDatabase.sessions.getAll();
     });
 
-    ipcMain.handle("desktop:db:get-session", (_event, id: string) => {
+    ipcMain.handle("desktop:db:get-session", (_event, id: unknown) => {
       if (!this.isAgentMonitorEnabled()) return undefined;
-      return this.agentDatabase.sessions.getById(id);
+      const sessionId = coerceDbId(id);
+      if (sessionId === null) return undefined;
+      return this.agentDatabase.sessions.getById(sessionId);
     });
 
-    ipcMain.handle("desktop:db:get-agents", (_event, sessionId: string) => {
+    ipcMain.handle("desktop:db:get-agents", (_event, sessionId: unknown) => {
       if (!this.isAgentMonitorEnabled()) return [];
-      return this.agentDatabase.agents.getBySession(sessionId);
+      const id = coerceDbId(sessionId);
+      if (id === null) return [];
+      return this.agentDatabase.agents.getBySession(id);
     });
 
     ipcMain.handle(
       "desktop:db:get-events",
-      (_event, sessionId: string, agentId?: string) => {
+      (_event, sessionId: unknown, agentId?: unknown) => {
         if (!this.isAgentMonitorEnabled()) return [];
-        if (agentId) {
-          return this.agentDatabase.events.getBySessionAndAgent(
-            sessionId,
-            agentId,
-          );
+        const sid = coerceDbId(sessionId);
+        if (sid === null) return [];
+        // A missing or malformed agentId falls back to the session-wide query.
+        const aid = coerceDbId(agentId);
+        if (aid !== null) {
+          return this.agentDatabase.events.getBySessionAndAgent(sid, aid);
         }
-        return this.agentDatabase.events.getBySession(sessionId);
+        return this.agentDatabase.events.getBySession(sid);
       },
     );
 
@@ -3670,9 +3676,11 @@ export class DesktopApplication {
       return this.agentDatabase.events.getAll();
     });
 
-    ipcMain.handle("desktop:db:get-events-with-session", (_event, sessionId: string) => {
+    ipcMain.handle("desktop:db:get-events-with-session", (_event, sessionId: unknown) => {
       if (!this.isAgentMonitorEnabled()) return [];
-      return this.agentDatabase.events.getWithSession(sessionId);
+      const id = coerceDbId(sessionId);
+      if (id === null) return [];
+      return this.agentDatabase.events.getWithSession(id);
     });
 
     ipcMain.handle("desktop:db:get-event-count-by-type", () => {
@@ -3687,9 +3695,11 @@ export class DesktopApplication {
       return this.agentDatabase.dashboard.getTokenAnalytics();
     });
 
-    ipcMain.handle("desktop:db:get-agent-hierarchy", (_event, sessionId: string) => {
+    ipcMain.handle("desktop:db:get-agent-hierarchy", (_event, sessionId: unknown) => {
       if (!this.isAgentMonitorEnabled()) return [];
-      return this.agentDatabase.agents.getBySessionWithChildren(sessionId, this.agentDatabase.events);
+      const id = coerceDbId(sessionId);
+      if (id === null) return [];
+      return this.agentDatabase.agents.getBySessionWithChildren(id, this.agentDatabase.events);
     });
 
     ipcMain.handle("desktop:db:get-analytics", () => {

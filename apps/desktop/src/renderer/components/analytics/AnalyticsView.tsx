@@ -7,7 +7,7 @@ import { ActivityHeatmap } from "@closedloop-ai/design-system/components/ui/prim
 import { SegmentedBar } from "@closedloop-ai/design-system/components/ui/primitives/segmented-bar";
 import { Coins, ArrowDownToLine, ArrowUpFromLine, DatabaseZap } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
-import type { AnalyticsData } from "../../main/database/types";
+import type { AnalyticsData } from "../../../main/database/types";
 
 const PALETTE = [
   "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",

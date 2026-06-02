@@ -2,7 +2,7 @@ import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitive
 import { MonitorDot, Bot, Zap, Layers } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import { SessionsView } from "../sessions/SessionsView";
-import type { DashboardSummary, AnalyticsData } from "../../main/database/types";
+import type { DashboardSummary, AnalyticsData } from "../../../main/database/types";
 
 export function DashboardPage() {
   const { data: summary, error } = useQueryCache<DashboardSummary>(

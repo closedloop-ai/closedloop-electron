@@ -80,16 +80,29 @@ export class DesktopWindow {
   private async loadContent(): Promise<void> {
     registerAppProtocol();
 
-    if (app.isPackaged) {
-      await this.browserWindow!.loadURL(`app://renderer/index.html`);
-      return;
+    // The privileged renderer window carries the full `desktopApi` preload
+    // bridge (approvals, settings, logs, DB reads, binary-path mutations). The
+    // Vite dev server (http://localhost:5173) is only ever loaded into it when a
+    // developer explicitly opts in via CL_RENDERER_DEV_SERVER=1 — otherwise any
+    // local process that binds :5173 first could serve renderer JS into the
+    // privileged window. The default path (including every packaged build) is
+    // the custom `app://` protocol, which also skips a pointless failed loadURL
+    // on the common dev workflow where no Vite server is running.
+    const devServerUrl =
+      !app.isPackaged && process.env.CL_RENDERER_DEV_SERVER === "1"
+        ? process.env.CL_RENDERER_DEV_SERVER_URL || "http://localhost:5173"
+        : null;
+
+    if (devServerUrl) {
+      try {
+        await this.browserWindow!.loadURL(devServerUrl);
+        return;
+      } catch {
+        // Dev server unreachable — fall through to the packaged renderer.
+      }
     }
 
-    try {
-      await this.browserWindow!.loadURL("http://localhost:5173");
-    } catch {
-      await this.browserWindow!.loadURL(`app://renderer/index.html`);
-    }
+    await this.browserWindow!.loadURL(`app://renderer/index.html`);
   }
 
   getWindow(): BrowserWindow | null {

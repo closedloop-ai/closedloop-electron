@@ -7,7 +7,7 @@ import { AgentCollaborationNetwork } from "@closedloop-ai/design-system/componen
 import { RankedBar } from "@closedloop-ai/design-system/components/ui/primitives/ranked-bar";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
 import { Monitor, Bot, GitFork, Target, Layers, Timer } from "lucide-react";
-import type { WorkflowQueryData } from "../../main/database/types";
+import type { WorkflowQueryData } from "../../../main/database/types";
 
 function formatDuration(sec: number): string {
   if (sec < 60) return `${Math.round(sec)}s`;

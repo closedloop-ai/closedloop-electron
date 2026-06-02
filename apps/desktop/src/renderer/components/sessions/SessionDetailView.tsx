@@ -7,7 +7,7 @@ import type {
   SessionWithAgents,
   AgentHierarchyNode,
   EventRow,
-} from "../../main/database/types";
+} from "../../../main/database/types";
 
 const EVENT_TIMELINE_CAP = 200;
 

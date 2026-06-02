@@ -5,9 +5,9 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "default": "./dist/index.js"
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "default": "./dist/index.mjs"
     },
     "./lib/fonts": {
       "types": "./dist/lib/fonts.d.ts",
@@ -40,8 +40,8 @@
       "default": "./dist/components/ui/*.mjs"
     }
   },
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "peerDependencies": {
     "next-themes": "^0.4.0",

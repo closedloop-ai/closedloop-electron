@@ -3,7 +3,7 @@ import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
 import { Zap, Wrench, AlertCircle, Layers } from "lucide-react";
-import type { EventRow } from "../../main/database/types";
+import type { EventRow } from "../../../main/database/types";
 
 const EVENT_TYPE_TONES: Record<string, string> = {
   tool_use: "bg-blue-500/10 text-blue-600",
