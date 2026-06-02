@@ -46,6 +46,14 @@ import { CloudSocketService } from "./cloud-socket.js";
 import { CommandSignatureVerifier } from "./command-signature-verifier.js";
 import { CommandKeyReconciler } from "./command-key-reconciler.js";
 import {
+  BrowserCommandKeyAppLifecycle,
+  resetBrowserCommandKeyProfileState,
+} from "./command-key-app-lifecycle.js";
+import {
+  type ActiveCommandKeyTargetContext,
+  type CommandKeyReconciliationReason,
+} from "./command-key-target-context.js";
+import {
   classifyBrowserCommandKeyApprovalRequestCommand,
   handleBrowserCommandKeyApprovalRequestCommand as handleReservedBrowserCommandKeyApprovalRequest,
 } from "./browser-command-key-approval-request.js";
@@ -317,6 +325,7 @@ export class DesktopApplication {
   private cloudConnectionEnabled: boolean;
   private serverCommandSigningSupported = false;
   private serverAgentSessionSyncSupported = false;
+  private readonly commandKeyLifecycle: BrowserCommandKeyAppLifecycle;
   private updateCheckTimer: NodeJS.Timeout | null = null;
   private packagedUpdateState: PackagedUpdateState =
     createInitialPackagedUpdateState();
@@ -354,6 +363,10 @@ export class DesktopApplication {
     this.commandSignatureVerifier = new CommandSignatureVerifier({
       authorizedKeys: this.authorizedCommandKeys,
     });
+    this.commandKeyLifecycle = new BrowserCommandKeyAppLifecycle({
+      getActiveGatewayId: () => this.getActiveGatewayId(),
+      log: (message) => gatewayLog.info("command-keys", message),
+    });
     this.pendingCommandKeyNotifier = new PendingCommandKeyNotifier({
       getPendingKeys: () => this.getPendingCommandSigningKeysForNotification(),
       createNotification: (options) => new Notification(options),
@@ -370,10 +383,13 @@ export class DesktopApplication {
     });
     this.commandKeyReconciler = new CommandKeyReconciler({
       hasApiKey: () => Boolean(this.apiKeyStore.getApiKey()),
-      fetchOrganizationKeys: () =>
-        this.fetchAvailableCommandSigningKeys({ requireApiKey: true }),
-      reconcileOrganizationKeys: (fingerprints) =>
-        this.authorizedCommandKeys.reconcileOrganizationKeys(fingerprints),
+      fetchOrganizationKeyClassification: (reason) =>
+        this.fetchOrganizationCommandKeyClassification(reason),
+      reconcileOrganizationKeys: (fingerprints, options) =>
+        this.authorizedCommandKeys.reconcileOrganizationKeys(
+          fingerprints,
+          options,
+        ),
       notifyPendingKeys: (organizationKeys) =>
         this.notifyPendingCommandSigningKeysForOrganizationKeys(
           organizationKeys,
@@ -548,6 +564,7 @@ export class DesktopApplication {
       onDisconnect: (reason) => {
         this.serverCommandSigningSupported = false;
         this.serverAgentSessionSyncSupported = false;
+        this.clearActiveCommandKeyTargetContext("disconnect");
         this.commandKeyReconciler.stop();
         this.agentSessionSync.refresh();
         this.notifyCommandKeysChanged();
@@ -558,6 +575,11 @@ export class DesktopApplication {
           event.serverCapabilities?.computeTargetSigning === true;
         this.serverAgentSessionSyncSupported =
           event.serverCapabilities?.agentSessionSync === true;
+        if (this.serverCommandSigningSupported) {
+          this.setActiveCommandKeyTargetContext(event.computeTargetId);
+        } else {
+          this.clearActiveCommandKeyTargetContext("hello_ack_unsupported");
+        }
         gatewayLog.info(
           "command-signing",
           `Server support from hello ack: computeTargetId=${event.computeTargetId}, computeTargetSigning=${event.serverCapabilities?.computeTargetSigning === true}`,
@@ -1444,12 +1466,27 @@ export class DesktopApplication {
       ?.webContents.send("desktop:command-keys-changed");
   }
 
+  private getActiveCommandKeyTargetContext():
+    | ActiveCommandKeyTargetContext
+    | undefined {
+    return this.commandKeyLifecycle.getActiveTargetContext();
+  }
+
+  private setActiveCommandKeyTargetContext(computeTargetId: string): void {
+    this.commandKeyLifecycle.setActiveTargetContext(computeTargetId);
+  }
+
+  private clearActiveCommandKeyTargetContext(reason: string): void {
+    this.commandKeyLifecycle.clearTargetContext(reason);
+  }
+
   private handleBrowserCommandKeyRevocationCommand(
     command: DesktopCommandEvent,
   ): void {
     handleReservedBrowserCommandKeyRevocation(command, {
       removeAuthorizedKey: (fingerprint) =>
         this.authorizedCommandKeys.remove(fingerprint),
+      getActiveTargetContext: () => this.getActiveCommandKeyTargetContext(),
       sendCommandAck: (event) => this.cloudSocket.sendCommandAck(event),
       sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
       onChanged: () => this.notifyCommandKeysChanged(),
@@ -1463,6 +1500,10 @@ export class DesktopApplication {
     handleReservedBrowserCommandKeyApprovalRequest(command, {
       notifyPendingKeys: (fingerprint) =>
         this.notifyPendingCommandSigningKeyByFingerprint(fingerprint),
+      getActiveTargetContext: () => this.getActiveCommandKeyTargetContext(),
+      onLegacyContextlessApproval: (fingerprint) => {
+        this.commandKeyLifecycle.rememberLegacyContextlessApproval(fingerprint);
+      },
       sendCommandAck: (event) => this.cloudSocket.sendCommandAck(event),
       sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
       onChanged: () => this.notifyCommandKeysChanged(),
@@ -1855,6 +1896,7 @@ export class DesktopApplication {
     this.bootRecovery[Symbol.dispose]();
     await this.bootRecovery.quiesce(1_000);
     this.queueStatsTelemetryDebounce.cancel();
+    this.clearActiveCommandKeyTargetContext("shutdown");
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
     this.agentDatabase.close();
@@ -1902,6 +1944,7 @@ export class DesktopApplication {
 
   private async fetchAvailableCommandSigningKeys(options?: {
     requireApiKey?: boolean;
+    targetContext?: ActiveCommandKeyTargetContext;
   }): Promise<OrganizationCommandPublicKey[]> {
     const apiKey = this.apiKeyStore.getApiKey();
     if (!apiKey) {
@@ -1918,6 +1961,18 @@ export class DesktopApplication {
       signDesktopRequest: (request) => this.signDesktopRequest(request),
       onDesktopPopUnavailable: (surface, reason) =>
         this.reportDesktopPopUnavailable(surface, reason),
+      computeTargetId: options?.targetContext?.computeTargetId,
+      gatewayId: options?.targetContext?.gatewayId,
+    });
+  }
+
+  private async fetchOrganizationCommandKeyClassification(
+    reason: CommandKeyReconciliationReason,
+  ) {
+    return this.commandKeyLifecycle.fetchOrganizationKeyClassification({
+      reason,
+      fetchAvailableCommandSigningKeys: (options) =>
+        this.fetchAvailableCommandSigningKeys(options),
     });
   }
 
@@ -1952,7 +2007,9 @@ export class DesktopApplication {
     let available: OrganizationCommandPublicKey[] = [];
     let availableError: string | undefined;
     try {
-      available = await this.fetchAvailableCommandSigningKeys();
+      const classification =
+        await this.fetchOrganizationCommandKeyClassification("manual");
+      available = classification.notificationKeys;
     } catch (error) {
       availableError =
         error instanceof Error ? error.message : "Failed to list public keys";
@@ -2026,8 +2083,14 @@ export class DesktopApplication {
     if (!trimmedFingerprint) {
       throw new Error("fingerprint is required");
     }
-    const keys = await this.fetchAvailableCommandSigningKeys();
-    const key = keys.find((entry) => entry.fingerprint === trimmedFingerprint);
+    const activeContext = this.getActiveCommandKeyTargetContext();
+    const keys = await this.fetchAvailableCommandSigningKeys({
+      targetContext: activeContext,
+    });
+    const key = this.commandKeyLifecycle.selectOrganizationCommandKeyForManualApproval({
+      keys,
+      fingerprint: trimmedFingerprint,
+    });
     if (!key) {
       throw new Error("Command signing key not found");
     }
@@ -2039,6 +2102,7 @@ export class DesktopApplication {
       source: "org",
       ...(key.id ? { sourceUserPublicKeyId: key.id } : {}),
     });
+    this.commandKeyLifecycle.consumeLegacyContextlessApproval(key.fingerprint);
     this.pendingCommandKeyNotifier.dismiss(key.fingerprint);
     const state = await this.listCommandSigningKeys();
     this.notifyCommandKeysChanged();
@@ -2053,6 +2117,7 @@ export class DesktopApplication {
       throw new Error("fingerprint is required");
     }
     this.authorizedCommandKeys.reject(trimmedFingerprint);
+    this.commandKeyLifecycle.consumeLegacyContextlessApproval(trimmedFingerprint);
     this.pendingCommandKeyNotifier.dismiss(trimmedFingerprint);
     const state = await this.listCommandSigningKeys();
     this.notifyCommandKeysChanged();
@@ -2098,6 +2163,7 @@ export class DesktopApplication {
 
     this.commandExecutor.setConnected(false);
     this.serverCommandSigningSupported = false;
+    this.clearActiveCommandKeyTargetContext(`cloud_status_${status.state}`);
     this.commandKeyReconciler.stop();
 
     if (status.state === "degraded") {
@@ -2144,6 +2210,7 @@ export class DesktopApplication {
       this.cloudSocket.stop();
       this.serverCommandSigningSupported = false;
       this.serverAgentSessionSyncSupported = false;
+      this.clearActiveCommandKeyTargetContext("cloud_connection_disabled");
       this.commandKeyReconciler.stop();
       this.cloudStatus = {
         state: "degraded",
@@ -2169,6 +2236,7 @@ export class DesktopApplication {
     }
     this.serverCommandSigningSupported = false;
     this.serverAgentSessionSyncSupported = false;
+    this.clearActiveCommandKeyTargetContext("cloud_socket_restart");
     this.commandKeyReconciler.stop();
     this.agentSessionSync.refresh();
     this.cloudSocket.restart();
@@ -3467,6 +3535,11 @@ export class DesktopApplication {
         this.settingsStore.setRelayOrigin(DEFAULT_DESKTOP_SETTINGS.relayOrigin);
         this.settingsStore.setApiOrigin(DEFAULT_DESKTOP_SETTINGS.apiOrigin);
         this.settingsStore.setWebAppOrigin(DEFAULT_DESKTOP_SETTINGS.webAppOrigin);
+        resetBrowserCommandKeyProfileState({
+          lifecycle: this.commandKeyLifecycle,
+          stopReconciliation: () => this.commandKeyReconciler.stop(),
+          reason: "active_config_deleted",
+        });
         this.cloudSocket.stop();
         this.serverCommandSigningSupported = false;
         this.serverAgentSessionSyncSupported = false;

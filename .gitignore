@@ -5,7 +5,13 @@ dist
 .idea
 .vscode
 .claude/
-.closedloop-ai/
+# Ignore everything under .closedloop-ai/ EXCEPT the bootstrap plugin's
+# durable outputs (per plugins/bootstrap/README.md):
+#   - bootstrap-metadata.json  (tracks generated agents for --update mode)
+#   - settings/                (critic-gates.json — critic selection for /code)
+.closedloop-ai/*
+!.closedloop-ai/bootstrap-metadata.json
+!.closedloop-ai/settings/
 .closedloop/
 .closedloop-ai/code-review/*
 apps/desktop/src/shared/build-info.ts

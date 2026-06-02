@@ -14,7 +14,12 @@ import {
   BROWSER_COMMAND_KEY_REVOKE_METHOD,
   BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
   BROWSER_COMMAND_KEY_REVOKE_PATH,
+  BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
 } from "../src/shared/contracts.js";
+
+const TARGET_ID = "11111111-1111-4111-8111-111111111111";
+const OTHER_TARGET_ID = "22222222-2222-4222-8222-222222222222";
+const GATEWAY_ID = "33333333-3333-4333-8333-333333333333";
 
 test("browser command key revocation uses API protocol literals", () => {
   assert.equal(BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID, "browser_key_revoke");
@@ -90,6 +95,112 @@ test("reserved browser command key revocation removes exact fingerprint and emit
     removed: true,
   });
   assert.equal(changedCount, 1);
+});
+
+test("reserved browser command key revocation accepts matching target context", () => {
+  const acks: Array<Pick<DesktopCommandAckEvent, "commandId" | "accepted" | "state" | "reason">> = [];
+  const removedFingerprints: string[] = [];
+
+  handleBrowserCommandKeyRevocationCommand(
+    makeRevokeCommand({
+      body: {
+        fingerprint: "cl:abcdefghijklmnopqrstuv",
+        computeTargetId: TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      },
+    }),
+    {
+      getActiveTargetContext: () => ({
+        computeTargetId: TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      }),
+      removeAuthorizedKey: (fingerprint) => {
+        removedFingerprints.push(fingerprint);
+        return true;
+      },
+      sendCommandAck: (event) => acks.push(event),
+      sendCommandEvent: () => {},
+    },
+  );
+
+  assert.deepEqual(removedFingerprints, ["cl:abcdefghijklmnopqrstuv"]);
+  assert.deepEqual(acks, [
+    {
+      commandId: "revoke-command",
+      accepted: true,
+      state: "accepted",
+    },
+  ]);
+});
+
+test("revocation with mismatched target context fails before mutation", () => {
+  const acks: Array<Pick<DesktopCommandAckEvent, "commandId" | "accepted" | "state" | "reason">> = [];
+  let removeCount = 0;
+
+  handleBrowserCommandKeyRevocationCommand(
+    makeRevokeCommand({
+      body: {
+        fingerprint: "cl:abcdefghijklmnopqrstuv",
+        computeTargetId: OTHER_TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      },
+    }),
+    {
+      getActiveTargetContext: () => ({
+        computeTargetId: TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      }),
+      removeAuthorizedKey: () => {
+        removeCount += 1;
+        return true;
+      },
+      sendCommandAck: (event) => acks.push(event),
+      sendCommandEvent: () => {},
+    },
+  );
+
+  assert.equal(removeCount, 0);
+  assert.deepEqual(acks, [
+    {
+      commandId: "revoke-command",
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
+    },
+  ]);
+});
+
+test("revocation with present-invalid target context fails before mutation", () => {
+  const acks: Array<Pick<DesktopCommandAckEvent, "commandId" | "accepted" | "state" | "reason">> = [];
+  let removeCount = 0;
+
+  handleBrowserCommandKeyRevocationCommand(
+    makeRevokeCommand({
+      body: {
+        fingerprint: "cl:abcdefghijklmnopqrstuv",
+        computeTargetId: TARGET_ID,
+        gatewayId: null,
+      },
+    }),
+    {
+      removeAuthorizedKey: () => {
+        removeCount += 1;
+        return true;
+      },
+      sendCommandAck: (event) => acks.push(event),
+      sendCommandEvent: () => {},
+    },
+  );
+
+  assert.equal(removeCount, 0);
+  assert.deepEqual(acks, [
+    {
+      commandId: "revoke-command",
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_REVOKE_INVALID_REASON,
+    },
+  ]);
 });
 
 test("malformed browser command key revocation fails without mutation", () => {
