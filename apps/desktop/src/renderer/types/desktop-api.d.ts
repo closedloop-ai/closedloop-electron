@@ -1,3 +1,17 @@
+import type {
+  SessionRow,
+  AgentRow,
+  EventRow,
+  EventWithSession,
+  EventCountByType,
+  SessionWithAgents,
+  DashboardSummary,
+  TokenAnalytics,
+  AnalyticsData,
+  WorkflowQueryData,
+  AgentHierarchyNode,
+} from "../../main/database/types";
+
 export interface AgentMonitorUrl {
   url: string | null;
   ready: boolean;
@@ -86,22 +100,24 @@ export interface DesktopApi {
   setAgentMonitorCodexHooksOptIn: (optIn: boolean) => Promise<AgentMonitorHookResult>;
   /** @deprecated Replaced by in-process SQLite database */
   getAgentMonitorData?: (query: string) => Promise<unknown>;
-  /** Database IPC channels */
+  /** Database IPC channels (typed against the in-process repository shapes). */
   db: {
-    getSessions: () => Promise<unknown>;
-    getSession: (id: string) => Promise<unknown>;
-    getAgents: (sessionId: string) => Promise<unknown>;
-    getEvents: (sessionId: string, agentId?: string) => Promise<unknown>;
-    getDashboardSummary: () => Promise<unknown>;
-    getSessionsWithDetails: () => Promise<unknown>;
-    getEventFeed: () => Promise<unknown>;
-    getEventsWithSession: (sessionId: string) => Promise<unknown>;
-    getEventCountByType: () => Promise<unknown>;
-    getTokenAnalytics: () => Promise<unknown>;
-    getAgentHierarchy: (sessionId: string) => Promise<unknown>;
-    getAnalytics: () => Promise<unknown>;
-    getWorkflowData: () => Promise<unknown>;
+    getSessions: () => Promise<SessionRow[]>;
+    getSession: (id: string) => Promise<SessionRow | undefined>;
+    getAgents: (sessionId: string) => Promise<AgentRow[]>;
+    getEvents: (sessionId: string, agentId?: string) => Promise<EventRow[]>;
+    getDashboardSummary: () => Promise<DashboardSummary>;
+    getSessionsWithDetails: () => Promise<SessionWithAgents[]>;
+    getEventFeed: () => Promise<EventWithSession[]>;
+    getEventsWithSession: (sessionId: string) => Promise<EventWithSession[]>;
+    getEventCountByType: () => Promise<EventCountByType[]>;
+    getTokenAnalytics: () => Promise<TokenAnalytics>;
+    getAgentHierarchy: (sessionId: string) => Promise<AgentHierarchyNode[]>;
+    getAnalytics: () => Promise<AnalyticsData>;
+    getWorkflowData: () => Promise<WorkflowQueryData>;
   };
+  /** Live DB-change push subscription; returns an unsubscribe fn. */
+  onDbChanged: (callback: (payload: { sessionId?: string }) => void) => () => void;
 }
 
 declare global {

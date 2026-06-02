@@ -1,4 +1,17 @@
 import type { ManagedKeyHintState } from "../shared/contracts.js";
+import type {
+  SessionRow,
+  AgentRow,
+  EventRow,
+  EventWithSession,
+  EventCountByType,
+  SessionWithAgents,
+  DashboardSummary,
+  TokenAnalytics,
+  AnalyticsData,
+  WorkflowQueryData,
+  AgentHierarchyNode,
+} from "./database/types.js";
 import { contextBridge, ipcRenderer } from "electron";
 
 const desktopApi = {
@@ -207,19 +220,31 @@ const desktopApi = {
   dismissManagedKeyHint: () =>
     ipcRenderer.invoke("desktop:dismiss-managed-key-hint") as Promise<{ success: boolean }>,
   db: {
-    getSessions: () => ipcRenderer.invoke("desktop:db:get-sessions") as Promise<unknown>,
-    getSession: (id: string) => ipcRenderer.invoke("desktop:db:get-session", id) as Promise<unknown>,
-    getAgents: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agents", sessionId) as Promise<unknown>,
-    getEvents: (sessionId: string, agentId?: string) => ipcRenderer.invoke("desktop:db:get-events", sessionId, agentId) as Promise<unknown>,
-    getDashboardSummary: () => ipcRenderer.invoke("desktop:db:get-dashboard-summary") as Promise<unknown>,
-    getSessionsWithDetails: () => ipcRenderer.invoke("desktop:db:get-sessions-with-details") as Promise<unknown>,
-    getEventFeed: () => ipcRenderer.invoke("desktop:db:get-event-feed") as Promise<unknown>,
-    getEventsWithSession: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-events-with-session", sessionId) as Promise<unknown>,
-    getEventCountByType: () => ipcRenderer.invoke("desktop:db:get-event-count-by-type") as Promise<unknown>,
-    getTokenAnalytics: () => ipcRenderer.invoke("desktop:db:get-token-analytics") as Promise<unknown>,
-    getAgentHierarchy: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agent-hierarchy", sessionId) as Promise<unknown>,
-    getAnalytics: () => ipcRenderer.invoke("desktop:db:get-analytics") as Promise<unknown>,
-    getWorkflowData: () => ipcRenderer.invoke("desktop:db:get-workflow-data") as Promise<unknown>,
+    getSessions: () => ipcRenderer.invoke("desktop:db:get-sessions") as Promise<SessionRow[]>,
+    getSession: (id: string) => ipcRenderer.invoke("desktop:db:get-session", id) as Promise<SessionRow | undefined>,
+    getAgents: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agents", sessionId) as Promise<AgentRow[]>,
+    getEvents: (sessionId: string, agentId?: string) => ipcRenderer.invoke("desktop:db:get-events", sessionId, agentId) as Promise<EventRow[]>,
+    getDashboardSummary: () => ipcRenderer.invoke("desktop:db:get-dashboard-summary") as Promise<DashboardSummary>,
+    getSessionsWithDetails: () => ipcRenderer.invoke("desktop:db:get-sessions-with-details") as Promise<SessionWithAgents[]>,
+    getEventFeed: () => ipcRenderer.invoke("desktop:db:get-event-feed") as Promise<EventWithSession[]>,
+    getEventsWithSession: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-events-with-session", sessionId) as Promise<EventWithSession[]>,
+    getEventCountByType: () => ipcRenderer.invoke("desktop:db:get-event-count-by-type") as Promise<EventCountByType[]>,
+    getTokenAnalytics: () => ipcRenderer.invoke("desktop:db:get-token-analytics") as Promise<TokenAnalytics>,
+    getAgentHierarchy: (sessionId: string) => ipcRenderer.invoke("desktop:db:get-agent-hierarchy", sessionId) as Promise<AgentHierarchyNode[]>,
+    getAnalytics: () => ipcRenderer.invoke("desktop:db:get-analytics") as Promise<AnalyticsData>,
+    getWorkflowData: () => ipcRenderer.invoke("desktop:db:get-workflow-data") as Promise<WorkflowQueryData>,
+  },
+  /**
+   * Subscribe to in-process DB-change pushes (live updates). The main process
+   * calls webContents.send('desktop:db:changed', { sessionId }) after each
+   * processed hook event; we re-dispatch a window CustomEvent the renderer's
+   * query cache listens for to refresh instantly instead of waiting for the
+   * next poll.
+   */
+  onDbChanged: (callback: (payload: { sessionId?: string }) => void) => {
+    const handler = (_event: unknown, payload: { sessionId?: string }) => callback(payload);
+    ipcRenderer.on("desktop:db:changed", handler);
+    return () => ipcRenderer.removeListener("desktop:db:changed", handler);
   },
 };
 

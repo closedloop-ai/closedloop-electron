@@ -60,7 +60,24 @@ export function useQueryCache<T>(
 
     load();
     const interval = setInterval(load, pollMs);
-    return () => { mounted = false; clearInterval(interval); };
+
+    // Live updates: the main process pushes desktop:db:changed after each
+    // processed hook event. For DB-backed keys, drop the cached value and
+    // reload immediately so a new session/event appears without waiting for
+    // the next poll tick.
+    let unsubscribe: (() => void) | undefined;
+    if (key.startsWith("db:") && typeof window !== "undefined" && window.desktopApi?.onDbChanged) {
+      unsubscribe = window.desktopApi.onDbChanged(() => {
+        cache.delete(key);
+        load();
+      });
+    }
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+      unsubscribe?.();
+    };
   }, [key, ttlMs, pollMs]);
 
   return { data, loading, error };

@@ -61,12 +61,14 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
   const [paused, setPaused] = useState(false);
   const [connected, setConnected] = useState(true);
   const [hooksEnabled, setHooksEnabled] = useState(false);
+  const [codexOptIn, setCodexOptIn] = useState(false);
 
   useEffect(() => {
     window.desktopApi.getRuntimeStatus().then((r) => setRuntime(r as Record<string, unknown>));
     window.desktopApi.getCloudCommandsPaused().then((p) => setPaused(p as boolean));
     window.desktopApi.getCloudConnectionEnabled().then((c) => setConnected(c as boolean));
     window.desktopApi.getAgentMonitorHooksEnabled().then((h) => setHooksEnabled(h as boolean));
+    window.desktopApi.getAgentMonitorCodexHooksOptIn().then((c) => setCodexOptIn(c as boolean));
   }, []);
 
   const handlePauseToggle = async () => {
@@ -85,6 +87,14 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
     const next = !hooksEnabled;
     const result = await window.desktopApi.setAgentMonitorHooksEnabled(next);
     setHooksEnabled(result.enabled);
+  };
+
+  const handleCodexToggle = async () => {
+    const next = !codexOptIn;
+    const result = await window.desktopApi.setAgentMonitorCodexHooksOptIn(next);
+    if (result.ok) {
+      setCodexOptIn(next);
+    }
   };
 
   return (
@@ -161,6 +171,19 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
           <label className="relative inline-flex items-center cursor-pointer">
             <input type="checkbox" checked={hooksEnabled} onChange={handleHooksToggle} className="sr-only peer" />
             <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)]" />
+          </label>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium">Codex Session Tracking</p>
+            <p className="text-xs text-[var(--muted-foreground)]">
+              Also track OpenAI Codex sessions via {"~/.codex/hooks.json"} (requires Claude Code tracking on; enable Codex hooks in {"~/.codex/config.toml"})
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" checked={codexOptIn} onChange={handleCodexToggle} disabled={!hooksEnabled} className="sr-only peer" />
+            <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)] peer-disabled:opacity-40" />
           </label>
         </div>
       </div>

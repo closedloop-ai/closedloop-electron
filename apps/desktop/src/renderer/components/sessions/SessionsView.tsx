@@ -4,6 +4,7 @@ import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitive
 import { SessionTable } from "@closedloop-ai/design-system/components/ui/composites/session-table";
 import { MonitorDot, Activity, Bot, Coins } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
+import { useSessionNav } from "./session-nav";
 import type { SessionRow } from "@closedloop-ai/design-system/components/ui/types";
 import type { SessionWithAgents } from "../../main/database/types";
 
@@ -24,12 +25,14 @@ function adaptSession(raw: SessionWithAgents): SessionRow {
   };
 }
 
-const STATUS_OPTIONS = ["all", "running", "completed", "failed", "stopped", "waiting"] as const;
+const STATUS_OPTIONS = ["all", "active", "waiting", "completed", "abandoned", "error"] as const;
+const TERMINAL_STATUSES = ["completed", "abandoned", "error"];
 
 export function SessionsView() {
+  const { openSession } = useSessionNav();
   const { data: sessions, loading } = useQueryCache<SessionWithAgents[]>(
     "db:sessions-details",
-    () => window.desktopApi.db.getSessionsWithDetails() as Promise<SessionWithAgents[]>,
+    () => window.desktopApi.db.getSessionsWithDetails(),
   );
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -57,7 +60,7 @@ export function SessionsView() {
   const totalAgents = allSessions.reduce((a, s) => a + s.agentCount, 0);
   const totalTokens = allSessions.reduce((a, s) => a + s.totalTokens, 0);
   const activeSessions = allSessions.filter(
-    (s) => !["completed", "failed", "stopped"].includes(s.status),
+    (s) => !TERMINAL_STATUSES.includes(s.status),
   ).length;
 
   if (loading) {
@@ -108,6 +111,15 @@ export function SessionsView() {
 
       <SessionTable
         rows={filtered.map(adaptSession)}
+        renderSessionLink={(row) => (
+          <button
+            type="button"
+            onClick={() => openSession(row.id)}
+            className="text-left font-medium text-[var(--primary)] hover:underline"
+          >
+            {row.name}
+          </button>
+        )}
         emptyState={
           <div className="py-12 text-center text-sm text-[var(--muted-foreground)]">
             {search || statusFilter !== "all"

@@ -64,6 +64,7 @@ const traySource = read("../src/main/tray.ts");
 const preloadSource = read("../src/main/preload.ts");
 const sidecarSource = read("../src/main/agent-monitor-sidecar.ts");
 const hooksSource = read("../src/main/agent-monitor-hooks.ts");
+const hooksCoreSource = read("../src/main/agent-monitor-hooks-core.ts");
 const embedAppSource = read("../scripts/agent-monitor-embed/App.tsx");
 const embedLayoutSource = read("../scripts/agent-monitor-embed/Layout.tsx");
 const contractsSource = read("../src/shared/contracts.ts");
@@ -474,9 +475,12 @@ test("hooks are opt-in: default off, silent server auto-install never enabled", 
   // The host never sets CCAM_AUTO_INSTALL_HOOKS=1; it manages hooks directly.
   assert.doesNotMatch(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"1"/);
   assert.match(hooksSource, /store\(\)\.get\("enabled", false\)/);
-  assert.match(hooksSource, /ELECTRON_RUN_AS_NODE=1/);
-  assert.match(hooksSource, /JSON\.stringify\(hookType\)/);
-  assert.match(hooksSource, /renameSync/);
+  // FEA-1497/FEA-1444: shell-command formatting + atomic settings write moved
+  // to the core module during the Codex hook ingestion split. The invariants
+  // still matter — assert them in the file that actually contains them.
+  assert.match(hooksCoreSource, /ELECTRON_RUN_AS_NODE=1/);
+  assert.match(hooksCoreSource, /JSON\.stringify\(hookType\)/);
+  assert.match(hooksCoreSource, /renameSync/);
   assert.match(hooksSource, /function uninstallHooks/);
   assert.match(appSource, /syncAgentMonitorHooksOnBoot\(\)/);
 });
