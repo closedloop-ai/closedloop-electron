@@ -30,6 +30,12 @@ export interface AgentHookListenerOptions {
   getSandboxBaseDirectory: () => string;
   /** Key-free diagnostic sink (gatewayLog). */
   log?: (message: string) => void;
+  /**
+   * Called when the listener cannot bind its port (e.g. EADDRINUSE from a stale
+   * process). Lets the host surface a degraded indicator; capture stays off for
+   * the session rather than crashing boot.
+   */
+  onBindError?: (reason: string) => void;
   /** Override for tests; defaults to AGENT_MONITOR_PORT (4820). */
   port?: number;
 }
@@ -83,11 +89,12 @@ export class AgentHookListener {
       });
       server.on("error", (error: NodeJS.ErrnoException) => {
         this.ready = false;
-        this.log(
+        const reason =
           error.code === "EADDRINUSE"
-            ? `agent hook listener: port ${this.port} in use; agent capture disabled this session`
-            : `agent hook listener error: ${error.message}`,
-        );
+            ? `Agent capture port ${this.port} is already in use; agent monitoring is off this session.`
+            : `Agent hook listener error: ${error.message}`;
+        this.log(reason);
+        this.options.onBindError?.(reason);
         resolve();
       });
       server.listen(this.port, HOST, () => {

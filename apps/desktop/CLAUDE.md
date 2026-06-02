@@ -136,26 +136,42 @@ Typical log locations:
 
 The Diagnostics tab shows the current in-memory gateway log plus a bounded previous-session tail read from `main.log` at startup. First-run or unreadable log files must not block boot; return an empty previous-session tail and continue.
 
-## Agent Monitor Sidecar
+## Agent Monitor (in-process)
 
-The desktop app bundles the MIT-licensed `Claude-Code-Agent-Monitor`
-(`agent-dashboard` + `agent-dashboard-client`, pinned in
-`apps/desktop/package.json`) and runs a generated runtime tree as a managed
-localhost **sidecar** for local Claude Code session/agent observability. It is
-the single embedded observability tool. It powers the **Dashboard** and the
-agent nav items (Sessions, Kanban, Activity Feed, etc.) in the desktop left
-sidebar. The feature is gated by the persisted `agentMonitorEnabled` desktop
-setting, which **defaults ON**; when disabled, the agent nav items are hidden
-and only the Gateway section remains.
+> **Status (FEA-1497 Phase 1):** the runtime is now FIRST-PARTY and IN-PROCESS.
+> The vendor sidecar is no longer spawned: `src/main/agent-monitor-listener.ts`
+> (`AgentHookListener`) owns `127.0.0.1:4820` in the main process, writing
+> through the `node:sqlite` repository layer (`src/main/database/`) via the hook
+> lifecycle state machine (`database/lifecycle.ts`). The renderer is a
+> first-party React app (`src/renderer/`) — there is NO iframe. The cloud relay
+> and cost-reconciliation worker read the same in-process DB through the shared
+> connection. The vendor `agent-monitor-sidecar.ts` / `build-agent-monitor.mjs`
+> / `scripts/agent-monitor-*` source survives DORMANT (still builds the hook
+> handler scripts) and is physically deleted in Phase 3E. The bullets below that
+> describe the spawned sidecar/iframe runtime are historical until then.
 
-- **Process model:** `src/main/agent-monitor-sidecar.ts` spawns the generated
-  `server/index.js` from `apps/desktop/.generated/agent-monitor/` (packaged:
-  unpacked `extraResources/agent-monitor`) using the Electron binary as Node
-  (`ELECTRON_RUN_AS_NODE=1`, `process.execPath`) — a packaged app ships no
-  standalone `node`. Started fire-and-forget from `boot()` **only when
-  `agentMonitorEnabled` is true**, and still before the gateway-start try-block
-  so a gateway-start failure never prevents it from running and a sidecar
-  failure never blocks or fails app boot.
+The desktop app provides local Claude Code (and opt-in Codex) session/agent
+observability. It powers the **Dashboard** and the agent nav items (Sessions,
+Activity, Analytics, Workflows, Kanban) in the desktop left sidebar. The feature
+is gated by the persisted `agentMonitorEnabled` desktop setting, which
+**defaults ON**; when disabled, the agent nav items are hidden and only the
+Gateway section remains.
+
+- **Process model (current):** `src/main/agent-monitor-listener.ts` binds
+  `127.0.0.1:4820` in the main process and accepts the unchanged hook payload
+  (`POST /api/hooks/event`, `GET /api/health`). Each event is gated by the
+  FEA-1407 sandbox check, harness-stamped from `__provider`, and applied by the
+  lifecycle state machine in one `BEGIN IMMEDIATE` transaction. Started from
+  `startAgentCapture()` (boot + the enable path) **only when
+  `agentMonitorEnabled` is true**, before the gateway-start try-block, and a
+  bind failure (EADDRINUSE) degrades to "no monitor" rather than blocking boot.
+  A one-time boot migration carries the historical vendor `dashboard.db` into
+  the in-process DB and renames it `dashboard.db.migrated` (downgrade-safe).
+- **Historical (dormant until Phase 3E):** `src/main/agent-monitor-sidecar.ts`
+  spawned the generated `server/index.js` from
+  `apps/desktop/.generated/agent-monitor/` (packaged: unpacked
+  `extraResources/agent-monitor`) using the Electron binary as Node
+  (`ELECTRON_RUN_AS_NODE=1`, `process.execPath`).
 - **Fixed port (differs from the gateway):** `127.0.0.1:4820`
   (`AGENT_MONITOR_PORT` in `src/shared/contracts.ts`), passed via
   `DASHBOARD_PORT`. It MUST be fixed — Claude Code hooks bake a port at install

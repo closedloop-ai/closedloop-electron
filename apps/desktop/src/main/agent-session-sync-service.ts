@@ -133,6 +133,14 @@ export interface AgentSessionSyncServiceOptions {
   getSandboxBaseDirectory?: () => string;
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
+  /**
+   * FEA-1497: the shared in-process DB connection. When provided, the service
+   * reads through it (no per-cycle open/close, no path resolution, no
+   * existsSync guard) — production passes the single openAgentDatabase()
+   * connection. When omitted, the service falls back to opening the path from
+   * getUserDataPath (used by unit tests with a self-owned fixture DB).
+   */
+  getConnection?: () => DatabaseSync;
   onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
 }
 
@@ -246,10 +254,14 @@ export class AgentSessionSyncService {
     this.syncing = true;
 
     try {
-      const dbPath = resolveAgentMonitorDatabasePath(
-        this.options.getUserDataPath?.(),
-      );
-      if (!existsSync(dbPath)) {
+      // FEA-1497: prefer the shared in-process connection. Only fall back to
+      // resolving + existsSync-guarding a standalone DB path when no shared
+      // connection is injected (unit tests).
+      const sharedDb = this.options.getConnection?.() ?? null;
+      const dbPath = sharedDb
+        ? null
+        : resolveAgentMonitorDatabasePath(this.options.getUserDataPath?.());
+      if (dbPath && !existsSync(dbPath)) {
         return;
       }
 
@@ -284,9 +296,11 @@ export class AgentSessionSyncService {
         syncIds = [sessionId];
         // Skip DB access — go straight to send.
       } else {
-        const db = new DatabaseSync(dbPath);
+        const db = sharedDb ?? new DatabaseSync(dbPath!);
         try {
-          db.exec("PRAGMA busy_timeout = 5000");
+          if (!sharedDb) {
+            db.exec("PRAGMA busy_timeout = 5000");
+          }
           this.initializeBackfillQueueIfNeeded(db);
           this.enqueueIncrementalUpdates(db);
 
@@ -426,7 +440,9 @@ export class AgentSessionSyncService {
             sessions,
           };
         } finally {
-          db.close();
+          if (!sharedDb) {
+            db.close();
+          }
         }
       }
 
@@ -923,10 +939,10 @@ export function loadSyncedSessions(
       SELECT
         session_id,
         model,
-        input_tokens + baseline_input AS input_tokens,
-        output_tokens + baseline_output AS output_tokens,
-        cache_read_tokens + baseline_cache_read AS cache_read_tokens,
-        cache_write_tokens + baseline_cache_write AS cache_write_tokens
+        input_tokens AS input_tokens,
+        output_tokens AS output_tokens,
+        cache_read_tokens AS cache_read_tokens,
+        cache_write_tokens AS cache_write_tokens
       FROM token_usage
       WHERE session_id IN (__IDS__)
       ORDER BY session_id ASC, model ASC

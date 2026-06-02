@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -74,12 +74,12 @@ import {
 import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
-import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
+import { AgentHookListener } from "./agent-monitor-listener.js";
 import { openAgentDatabase } from "./database/index.js";
-import {
-  AgentSessionSyncService,
-  resolveAgentMonitorDatabasePath,
-} from "./agent-session-sync-service.js";
+import { createLifecycle } from "./database/lifecycle.js";
+import { detectBillingMode } from "./billing-mode-detector.js";
+import { migrateVendorDashboardDb } from "./agent-monitor-db-migration.js";
+import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
   createAnthropicAdminKeyStore,
   createOpenAiAdminKeyStore,
@@ -90,7 +90,7 @@ import {
   type ReconciliationQuery,
 } from "./reconciliation-store.js";
 import {
-  loadMeteredUsageRowsFromDisk,
+  loadMeteredUsageRows,
   reconciliationCutoffIso,
 } from "./reconciliation-worker.js";
 import { CostReconciliationService } from "./cost-reconciliation-service.js";
@@ -299,7 +299,7 @@ export class DesktopApplication {
   private readonly server: DesktopGatewayServer;
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
-  private readonly agentMonitor: AgentMonitorSidecar;
+  private readonly agentHookListener: AgentHookListener;
   private readonly agentDatabase: ReturnType<typeof openAgentDatabase>;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly costReconciliation: CostReconciliationService;
@@ -405,8 +405,29 @@ export class DesktopApplication {
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
-    this.agentMonitor = new AgentMonitorSidecar({
-      onTerminalFailure: (reason: string) => {
+    this.agentDatabase = openAgentDatabase(
+      path.join(app.getPath("userData"), "agent-dashboard.sqlite"),
+    );
+    // FEA-1497: the in-process hook lifecycle owns all session/agent/event/token
+    // writes; it stamps billing_mode at ingest and pushes a live-update signal
+    // to the renderer after each event. The AgentHookListener replaces the
+    // vendor sidecar as the owner of 127.0.0.1:4820.
+    const agentLifecycle = createLifecycle(this.agentDatabase.connection, {
+      tokenUsage: this.agentDatabase.tokenUsage,
+      detectBillingMode,
+      emit: (sessionId: string) => {
+        this.desktopWindow
+          .getWindow()
+          ?.webContents.send("desktop:db:changed", { sessionId });
+      },
+      log: (message: string) => gatewayLog.warn("agent-lifecycle", message),
+    });
+    this.agentHookListener = new AgentHookListener({
+      lifecycle: agentLifecycle,
+      getSandboxBaseDirectory: () =>
+        this.settingsStore.getSandboxBaseDirectory(),
+      log: (message: string) => gatewayLog.info("agent-monitor-listener", message),
+      onBindError: (reason: string) => {
         const notification = new Notification({
           title: "ClosedLoop Agent Monitor",
           body: reason,
@@ -414,19 +435,12 @@ export class DesktopApplication {
         notification.show();
         // Latch the failure and route through refreshTrayState() — the single
         // owner of tray state — so the degraded indicator survives subsequent
-        // refreshes. A direct tray.setState here would be stomped by the next
-        // refreshTrayState() call (cloud heartbeat, gateway recheck).
+        // refreshes.
         this.agentMonitorFailed = true;
         this.agentMonitorFailureReason = reason;
         this.refreshTrayState();
       },
     });
-    this.agentMonitor.setSandboxBaseDirectory(
-      this.settingsStore.getSandboxBaseDirectory(),
-    );
-    this.agentDatabase = openAgentDatabase(
-      path.join(app.getPath("userData"), "agent-dashboard.sqlite"),
-    );
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -687,17 +701,21 @@ export class DesktopApplication {
       getSandboxBaseDirectory: () =>
         this.settingsStore.getSandboxBaseDirectory(),
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
-      getUserDataPath: () => app.getPath("userData"),
+      // FEA-1497: read from the shared in-process connection (the relay no
+      // longer opens the vendor dashboard.db per cycle).
+      getConnection: () => this.agentDatabase.connection,
       onBatchOutcome: (event) => {
         Observability.agentSessionSyncBatchFailed(event);
       },
     });
     // FEA-1435/1436: nightly cost reconciliation lives entirely in main. It owns
     // the org-level vendor Admin key stores (safeStorage, never exposed to the
-    // sidecar or renderer) and the reconciliation store, and reconciles the local
-    // genai-prices estimate (read from dashboard.db READ-ONLY) against what each
-    // vendor actually billed. loadUsageRows re-opens the live DB each run, scoped
-    // to the recent window, and returns [] when the sidecar has not created it.
+    // renderer) and the reconciliation store, and reconciles the local
+    // genai-prices estimate against what each vendor actually billed.
+    // FEA-1497: loadUsageRows reads the recent metered window from the SHARED
+    // in-process connection (the second consumer of the old dashboard.db,
+    // repointed in lockstep with the relay so the atomic cutover does not
+    // silently break nightly reconciliation).
     // One Anthropic Admin key store, shared by reconciliation (compares the local
     // estimate against the billed cost_report) and Claude Code analytics (reads
     // Anthropic's own per-user usage estimate). Sharing the store means a key
@@ -708,8 +726,8 @@ export class DesktopApplication {
       openaiKeyStore: createOpenAiAdminKeyStore(),
       store: new ReconciliationStore(),
       loadUsageRows: () =>
-        loadMeteredUsageRowsFromDisk(
-          resolveAgentMonitorDatabasePath(app.getPath("userData")),
+        loadMeteredUsageRows(
+          this.agentDatabase.connection,
           reconciliationCutoffIso(new Date()),
         ),
       log: (message) => gatewayLog.info("cost-reconciliation", message),
@@ -811,9 +829,7 @@ export class DesktopApplication {
     // the desktop shell and no background sync loop. Hook repair remains
     // opt-in and self-healing.
     if (this.settingsStore.getAgentMonitorEnabled()) {
-      void this.agentMonitor.start();
-      syncAgentMonitorHooksOnBoot();
-      this.agentSessionSync.start();
+      this.startAgentCapture();
     }
 
     // FEA-1435/1436: schedule nightly cost reconciliation. Independent of the
@@ -1416,13 +1432,29 @@ export class DesktopApplication {
     return this.settingsStore.getPlanExtractionEnabled();
   }
 
+  /**
+   * Start the in-process agent capture stack: run the one-time vendor-DB boot
+   * migration (idempotent — no-ops once dashboard.db is renamed), start the
+   * :4820 hook listener, self-heal the installed hook commands, and start the
+   * cloud relay sync. Shared by boot() and the enable path of
+   * applyAgentMonitorSetting().
+   */
+  private startAgentCapture(): void {
+    migrateVendorDashboardDb(
+      app.getPath("userData"),
+      this.agentDatabase,
+      (message) => gatewayLog.info("agent-monitor-migration", message),
+    );
+    void this.agentHookListener.start();
+    syncAgentMonitorHooksOnBoot();
+    this.agentSessionSync.start();
+  }
+
   private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {
     this.tray.setAgentMonitorEnabled(enabled);
 
     if (enabled) {
-      void this.agentMonitor.start();
-      syncAgentMonitorHooksOnBoot();
-      this.agentSessionSync.start();
+      this.startAgentCapture();
       return;
     }
 
@@ -1436,7 +1468,7 @@ export class DesktopApplication {
       );
     }
 
-    await this.agentMonitor.stop();
+    await this.agentHookListener.stop();
     this.agentSessionSync.stop();
     this.desktopWindow
       .getWindow()
@@ -1901,6 +1933,11 @@ export class DesktopApplication {
     this.clearActiveCommandKeyTargetContext("shutdown");
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
+    // Stop the in-process listener before closing the shared DB connection so a
+    // late hook POST cannot hit a closed database. stop() is idempotent, so the
+    // shutdown sequence below (which also stops it before server.stop) is a
+    // no-op second call.
+    await this.agentHookListener.stop();
     this.agentDatabase.close();
     this.costReconciliation.stop();
     return runShutdownSequence({
@@ -1914,7 +1951,7 @@ export class DesktopApplication {
       },
       cloudSocket: this.cloudSocket,
       commandExecutor: this.commandExecutor,
-      agentMonitor: this.agentMonitor,
+      agentMonitor: this.agentHookListener,
       server: this.server,
       desktopWindow: this.desktopWindow,
       tray: this.tray,
@@ -2652,65 +2689,26 @@ export class DesktopApplication {
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-app-version", () => app.getVersion());
     ipcMain.handle("desktop:get-agent-monitor-url", () => ({
-      url: this.agentMonitor.getUrl(),
-      ready: this.agentMonitor.isReady(),
+      url: this.agentHookListener.getUrl(),
+      ready: this.agentHookListener.isReady(),
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
-    // FEA-1334: proxy the sidecar's cold-start ingest progress so the renderer
-    // can drive the floating progress card without a cross-origin fetch.
-    // Returns null whenever the sidecar is not reachable — the renderer treats
-    // that as "keep polling, nothing to show yet".
-    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
-      const baseUrl = this.agentMonitor.getUrl();
-      if (!baseUrl) {
-        return null;
-      }
-      try {
-        const response = await fetch(`${baseUrl}/api/import/progress`, {
-          signal: AbortSignal.timeout(2_000),
-        });
-        if (!response.ok) {
-          return null;
-        }
-        return await response.json();
-      } catch {
-        return null;
-      }
-    });
-    // FEA-1334: clear the dashboard DB and restart the sidecar so it
-    // re-imports every agent session from scratch. The sidecar's empty-DB
-    // boot path clears the persisted ingest caches and re-runs the
-    // orchestrator, which the progress banner tracks.
-    ipcMain.handle("desktop:reprocess-agent-logs", async () => {
+    // FEA-1497: the in-process listener ingests live via the :4820 hook path;
+    // there is no cold-start file import to report in Phase 1. (Filesystem
+    // import progress returns with the multi-harness importers in Phase 2.)
+    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", () => null);
+    // FEA-1497: live hook ingestion has no batch "reprocess" to re-run in
+    // Phase 1 (the cold-start filesystem import returns in Phase 2). Report
+    // unavailable rather than destructively clearing the live DB.
+    ipcMain.handle("desktop:reprocess-agent-logs", () => {
       if (!this.isAgentMonitorEnabled()) {
         return { ok: false, error: "Agent Dashboard is disabled in Settings." };
       }
-      try {
-        await this.agentMonitor.stop();
-        const agentMonitorDir = path.join(
-          app.getPath("userData"),
-          "agent-monitor",
-        );
-        for (const name of [
-          "dashboard.db",
-          "dashboard.db-wal",
-          "dashboard.db-shm",
-        ]) {
-          try {
-            rmSync(path.join(agentMonitorDir, name));
-          } catch {
-            /* file may not exist — fine */
-          }
-        }
-        void this.agentMonitor.start();
-        return { ok: true };
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
+      return {
+        ok: false,
+        error: "Reprocessing returns with multi-harness import (Phase 2).",
+      };
     });
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
@@ -2894,11 +2892,10 @@ export class DesktopApplication {
             normalizeScopePath(currentSettings.sandboxBaseDirectory)
         ) {
           await seedReposConfig(selectedSandbox);
-          this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
-          if (this.settingsStore.getAgentMonitorEnabled()) {
-            await this.agentMonitor.stop();
-            void this.agentMonitor.start();
-          }
+          // FEA-1497: the in-process hook listener reads the sandbox base
+          // directory live (getSandboxBaseDirectory callback) on every event,
+          // so a sandbox change needs no restart — the next hook POST is gated
+          // against the new directory automatically.
         }
 
         // Notify renderer of flag changes so the Feature Flags panel can refresh.

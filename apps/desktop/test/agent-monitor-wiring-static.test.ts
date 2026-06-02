@@ -410,33 +410,42 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   );
 });
 
-test("sidecar is feature-gated and, when enabled, starts before the gateway", () => {
-  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\([\s\S]*?\)/);
+test("in-process hook listener is feature-gated and starts before the gateway", () => {
+  // FEA-1497: the AgentHookListener replaced the vendor sidecar as the owner of
+  // :4820. Boot still feature-gates capture and starts it before the gateway
+  // try-block so a gateway failure never blocks capture (and vice versa).
+  assert.match(appSource, /this\.agentHookListener = new AgentHookListener\([\s\S]*?\)/);
   assert.match(
     appSource,
-    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
+    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*this\.startAgentCapture\(\);/,
   );
-  const startIdx = appSource.indexOf("void this.agentMonitor.start()");
+  // startAgentCapture wires the one-time boot migration, the listener, the hook
+  // self-heal, and the relay sync as one unit.
+  assert.match(
+    appSource,
+    /private startAgentCapture\(\): void \{[\s\S]*migrateVendorDashboardDb\([\s\S]*void this\.agentHookListener\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
+  );
+  const startIdx = appSource.indexOf("this.startAgentCapture()");
   const gatewayTryIdx = appSource.indexOf("await this.server.start()");
-  assert.ok(startIdx > 0, "sidecar start call missing");
+  assert.ok(startIdx > 0, "agent capture start call missing");
   assert.ok(gatewayTryIdx > 0, "server.start call missing");
   assert.ok(
     startIdx < gatewayTryIdx,
-    "sidecar must start before the gateway try-block",
+    "agent capture must start before the gateway try-block",
   );
 });
 
 test("agent session sync starts and stops with the agent monitor flag", () => {
   assert.match(
     appSource,
-    /private async applyAgentMonitorSetting\(enabled: boolean\): Promise<void> \{[\s\S]*if \(enabled\) \{[\s\S]*this\.agentSessionSync\.start\(\);[\s\S]*return;[\s\S]*await this\.agentMonitor\.stop\(\);[\s\S]*this\.agentSessionSync\.stop\(\);/,
+    /private async applyAgentMonitorSetting\(enabled: boolean\): Promise<void> \{[\s\S]*if \(enabled\) \{[\s\S]*this\.startAgentCapture\(\);[\s\S]*return;[\s\S]*await this\.agentHookListener\.stop\(\);[\s\S]*this\.agentSessionSync\.stop\(\);/,
   );
 });
 
-test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
+test("listener URL + hooks toggle exposed via IPC + preload", () => {
   assert.match(
     appSource,
-    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*this\.agentMonitor\.getUrl\(\)[\s\S]*this\.agentMonitor\.isReady\(\)[\s\S]*enabled: this\.isAgentMonitorEnabled\(\)[\s\S]*planExtractionEnabled: this\.isPlanExtractionEnabled\(\)/,
+    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*this\.agentHookListener\.getUrl\(\)[\s\S]*this\.agentHookListener\.isReady\(\)[\s\S]*enabled: this\.isAgentMonitorEnabled\(\)[\s\S]*planExtractionEnabled: this\.isPlanExtractionEnabled\(\)/,
   );
   assert.match(
     appSource,
@@ -495,11 +504,12 @@ test("agent monitor terminal failure sets a tracked degraded state that refreshT
   // 1. A tracked field exists.
   assert.match(appSource, /private agentMonitorFailed = false;/);
 
-  // 2. onTerminalFailure latches the field and routes through refreshTrayState()
-  //    rather than calling tray.setState directly (which would be transient).
+  // 2. FEA-1497: the listener's onBindError (port already in use) latches the
+  //    field and routes through refreshTrayState() rather than calling
+  //    tray.setState directly (which would be transient).
   assert.match(
     appSource,
-    /onTerminalFailure: \(reason: string\) => \{[\s\S]*this\.agentMonitorFailed = true;[\s\S]*this\.refreshTrayState\(\);[\s\S]*\},/,
+    /onBindError: \(reason: string\) => \{[\s\S]*this\.agentMonitorFailed = true;[\s\S]*this\.refreshTrayState\(\);[\s\S]*\},/,
   );
 
   // 3. refreshTrayState() actually consults the field (degraded state is owned

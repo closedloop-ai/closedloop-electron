@@ -105,17 +105,11 @@ test("agent-session sync loads normalized session payloads with attribution and 
       output_tokens INTEGER NOT NULL DEFAULT 0,
       cache_read_tokens INTEGER NOT NULL DEFAULT 0,
       cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-      baseline_input INTEGER NOT NULL DEFAULT 0,
-      baseline_output INTEGER NOT NULL DEFAULT 0,
-      baseline_cache_read INTEGER NOT NULL DEFAULT 0,
-      baseline_cache_write INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE model_pricing (
-      model_pattern TEXT PRIMARY KEY,
-      input_per_mtok REAL NOT NULL DEFAULT 0,
-      output_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_read_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_write_per_mtok REAL NOT NULL DEFAULT 0
+      raw_input INTEGER NOT NULL DEFAULT 0,
+      raw_output INTEGER NOT NULL DEFAULT 0,
+      raw_cache_read INTEGER NOT NULL DEFAULT 0,
+      raw_cache_write INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (session_id, model)
     );
   `);
 
@@ -176,16 +170,16 @@ test("agent-session sync loads normalized session payloads with attribution and 
     "2026-05-20T12:02:00.000Z",
   );
 
+  // FEA-1497: the in-process token_usage stores effective reconciled counts in
+  // the plain columns (no baseline_* at read time). 1000+25 input, 500+10
+  // output, 250+5 cache-read, 100+0 cache-write — the same effective totals the
+  // old baseline-summed query produced.
   db.prepare(`
     INSERT INTO token_usage (
-      session_id, model, input_tokens, output_tokens, cache_read_tokens,
-      cache_write_tokens, baseline_input, baseline_output, baseline_cache_read,
-      baseline_cache_write
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run("sess-1", "gpt-4.1", 1000, 500, 250, 100, 25, 10, 5, 0);
+      session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run("sess-1", "gpt-4.1", 1025, 510, 255, 100);
 
-  // No model_pricing INSERT: cost is now derived from @pydantic/genai-prices,
-  // not the (legacy, no-longer-read) model_pricing table.
   const sessions = loadSyncedSessions(db, ["sess-1"]);
   assert.equal(sessions.length, 1);
 
@@ -214,9 +208,9 @@ test("agent-session sync loads normalized session payloads with attribution and 
   assert.equal(session.tokenUsageByModel[0].cacheReadTokens, 255);
   assert.equal(session.tokenUsageByModel[0].cacheWriteTokens, 100);
   // Cost is computed by genai-prices via the canonical engine. Assert the load
-  // path fed it the correctly baseline-summed, provider-normalized counts
-  // (gpt-4.1 is OpenAI → input passes through as the total, cache is a subset)
-  // rather than hard-coding a library-version-dependent dollar figure.
+  // path fed it the correct effective, provider-normalized counts (gpt-4.1 is
+  // OpenAI → input passes through as the total, cache is a subset) rather than
+  // hard-coding a library-version-dependent dollar figure.
   const expectedCost = computeTokenCost({
     model: "gpt-4.1",
     inputTokens: 1025,
