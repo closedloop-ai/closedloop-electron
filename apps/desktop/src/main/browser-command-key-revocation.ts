@@ -9,7 +9,13 @@ import {
   BROWSER_COMMAND_KEY_REVOKE_METHOD,
   BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
   BROWSER_COMMAND_KEY_REVOKE_PATH,
+  BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
 } from "../shared/contracts.js";
+import {
+  type ActiveCommandKeyTargetContext,
+  browserCommandKeyTargetContextMatches,
+  parseBrowserCommandKeyCommandTargetContext,
+} from "./command-key-target-context.js";
 
 export type BrowserCommandKeyRevocationMatch =
   | "match"
@@ -52,6 +58,7 @@ type CommandEventPayload = Pick<
 
 export type BrowserCommandKeyRevocationHandlerOptions = {
   removeAuthorizedKey: (fingerprint: string) => boolean;
+  getActiveTargetContext?: () => ActiveCommandKeyTargetContext | undefined;
   sendCommandAck: (event: CommandAckPayload) => void;
   sendCommandEvent: (event: CommandEventPayload) => void;
   onChanged?: () => void;
@@ -89,6 +96,42 @@ export function handleBrowserCommandKeyRevocationCommand(
       accepted: false,
       state: "failed",
       reason: parsed.reason,
+    });
+    return;
+  }
+
+  const commandTargetContext = parseBrowserCommandKeyCommandTargetContext(
+    command.body,
+  );
+  if (commandTargetContext.kind === "invalid") {
+    options.log?.(
+      "warn",
+      `Rejected browser command key revocation ${command.commandId}: ${BROWSER_COMMAND_KEY_REVOKE_INVALID_REASON}`,
+    );
+    options.sendCommandAck({
+      commandId: command.commandId,
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_REVOKE_INVALID_REASON,
+    });
+    return;
+  }
+  if (
+    commandTargetContext.kind === "present" &&
+    !browserCommandKeyTargetContextMatches({
+      commandContext: commandTargetContext,
+      activeContext: options.getActiveTargetContext?.(),
+    })
+  ) {
+    options.log?.(
+      "warn",
+      `Rejected browser command key revocation ${command.commandId}: ${BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON}`,
+    );
+    options.sendCommandAck({
+      commandId: command.commandId,
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
     });
     return;
   }

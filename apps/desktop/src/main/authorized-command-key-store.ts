@@ -38,6 +38,10 @@ export type CommandKeyReconciliationResult = {
   promoted: AuthorizedCommandKey[];
 };
 
+export type ReconcileOrganizationKeysOptions = {
+  removeStale?: boolean;
+};
+
 export interface AuthorizedCommandKeyStoreOptions {
   cwd?: string;
   filePath?: string;
@@ -128,6 +132,7 @@ export class AuthorizedCommandKeyStore {
 
   reconcileOrganizationKeys(
     registeredKeys: Iterable<RegisteredOrganizationCommandKey>,
+    options?: ReconcileOrganizationKeysOptions,
   ): CommandKeyReconciliationResult {
     const registered = new Map<string, { sourceUserPublicKeyId?: string }>();
     for (const registeredKey of registeredKeys) {
@@ -145,13 +150,20 @@ export class AuthorizedCommandKeyStore {
         ...(sourceUserPublicKeyId ? { sourceUserPublicKeyId } : {}),
       });
     }
+    const removeStale = options?.removeStale ?? true;
     const current = this.readFile();
-    const staleOrgKeys = current.keys.filter(
-      (key) => key.source === "org" && !registered.has(key.fingerprint),
-    );
+    const staleOrgKeys = removeStale
+      ? current.keys.filter(
+          (key) => key.source === "org" && !registered.has(key.fingerprint),
+        )
+      : [];
     const promoted: AuthorizedCommandKey[] = [];
     const keys = current.keys.flatMap((key) => {
-      if (key.source === "org" && !registered.has(key.fingerprint)) {
+      if (
+        removeStale &&
+        key.source === "org" &&
+        !registered.has(key.fingerprint)
+      ) {
         return [];
       }
       if (key.source !== "unknown" || !registered.has(key.fingerprint)) {

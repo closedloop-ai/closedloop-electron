@@ -14,6 +14,7 @@ export type OrganizationCommandPublicKey = {
   createdAt: string;
   ownerName: string;
   ownerEmail?: string;
+  targetContext?: unknown;
 };
 
 export interface FetchOrganizationCommandKeysOptions {
@@ -22,6 +23,8 @@ export interface FetchOrganizationCommandKeysOptions {
   apiKeyProvenance: ApiKeyProvenance;
   signDesktopRequest?: DesktopPopSigner;
   onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
+  computeTargetId?: string;
+  gatewayId?: string;
 }
 
 type ApiResult<T> =
@@ -36,6 +39,12 @@ export async function fetchOrganizationCommandKeys(
   options: FetchOrganizationCommandKeysOptions
 ): Promise<OrganizationCommandPublicKey[]> {
   const url = new URL("/public-keys", options.apiOrigin);
+  if (options.computeTargetId) {
+    url.searchParams.set("computeTargetId", options.computeTargetId);
+  }
+  if (options.gatewayId) {
+    url.searchParams.set("gatewayId", options.gatewayId);
+  }
   const popHeaders = await buildManagedDesktopPopHeaders({
     apiKeyProvenance: options.apiKeyProvenance,
     signDesktopRequest: options.signDesktopRequest,

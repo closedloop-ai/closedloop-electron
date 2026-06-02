@@ -39,6 +39,15 @@ export const BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH =
 export const BROWSER_COMMAND_KEY_APPROVAL_REQUEST_METHOD = "POST";
 export const BROWSER_COMMAND_KEY_APPROVAL_REQUEST_INVALID_REASON =
   "invalid browser command key approval request payload";
+export const BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON =
+  "browser command key target context mismatch";
+
+/** Browser-key trust is owner-target scoped; shared targets are not valid here. */
+export const BROWSER_KEY_TARGET_ACCESS = {
+  OwnedTarget: "owned_target",
+} as const;
+export type BrowserKeyTargetAccess =
+  (typeof BROWSER_KEY_TARGET_ACCESS)[keyof typeof BROWSER_KEY_TARGET_ACCESS];
 
 /** WebSocket relay host — the electron app connects here for cloud commands, not the REST API. */
 export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://relay.closedloop.ai";

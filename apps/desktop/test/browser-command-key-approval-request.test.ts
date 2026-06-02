@@ -14,7 +14,12 @@ import {
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_METHOD,
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
   BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH,
+  BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
 } from "../src/shared/contracts.js";
+
+const TARGET_ID = "11111111-1111-4111-8111-111111111111";
+const OTHER_TARGET_ID = "22222222-2222-4222-8222-222222222222";
+const GATEWAY_ID = "33333333-3333-4333-8333-333333333333";
 
 test("browser command key approval request uses API protocol literals", () => {
   assert.equal(
@@ -100,6 +105,155 @@ test("reserved browser command key approval request acks done and notifies pendi
   ]);
   assert.equal(changedCount, 1);
   assert.deepEqual(notifiedFingerprints, ["cl:abcdefghijklmnopqrstuv"]);
+});
+
+test("reserved browser command key approval request accepts matching target context", async () => {
+  const acks: Array<
+    Pick<DesktopCommandAckEvent, "commandId" | "accepted" | "state" | "reason">
+  > = [];
+  const notifiedFingerprints: string[] = [];
+
+  handleBrowserCommandKeyApprovalRequestCommand(
+    makeApprovalCommand({
+      body: {
+        fingerprint: "cl:abcdefghijklmnopqrstuv",
+        computeTargetId: TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      },
+    }),
+    {
+      getActiveTargetContext: () => ({
+        computeTargetId: TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      }),
+      notifyPendingKeys: (fingerprint) => {
+        notifiedFingerprints.push(fingerprint);
+      },
+      sendCommandAck: (event) => acks.push(event),
+      sendCommandEvent: () => {},
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(acks, [
+    {
+      commandId: "approval-command",
+      accepted: true,
+      state: "accepted",
+    },
+  ]);
+  assert.deepEqual(notifiedFingerprints, ["cl:abcdefghijklmnopqrstuv"]);
+});
+
+test("approval request with mismatched target context fails before notification", () => {
+  const acks: Array<
+    Pick<DesktopCommandAckEvent, "commandId" | "accepted" | "state" | "reason">
+  > = [];
+  let notifyCount = 0;
+
+  handleBrowserCommandKeyApprovalRequestCommand(
+    makeApprovalCommand({
+      body: {
+        fingerprint: "cl:abcdefghijklmnopqrstuv",
+        computeTargetId: OTHER_TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      },
+    }),
+    {
+      getActiveTargetContext: () => ({
+        computeTargetId: TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      }),
+      notifyPendingKeys: () => {
+        notifyCount += 1;
+      },
+      sendCommandAck: (event) => acks.push(event),
+      sendCommandEvent: () => {},
+    },
+  );
+
+  assert.equal(notifyCount, 0);
+  assert.deepEqual(acks, [
+    {
+      commandId: "approval-command",
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
+    },
+  ]);
+});
+
+test("approval request with present context and no active target fails closed", () => {
+  const acks: Array<
+    Pick<DesktopCommandAckEvent, "commandId" | "accepted" | "state" | "reason">
+  > = [];
+  let notifyCount = 0;
+
+  handleBrowserCommandKeyApprovalRequestCommand(
+    makeApprovalCommand({
+      body: {
+        fingerprint: "cl:abcdefghijklmnopqrstuv",
+        computeTargetId: TARGET_ID,
+        gatewayId: GATEWAY_ID,
+      },
+    }),
+    {
+      getActiveTargetContext: () => undefined,
+      notifyPendingKeys: () => {
+        notifyCount += 1;
+      },
+      sendCommandAck: (event) => acks.push(event),
+      sendCommandEvent: () => {},
+    },
+  );
+
+  assert.equal(notifyCount, 0);
+  assert.deepEqual(acks, [
+    {
+      commandId: "approval-command",
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_TARGET_CONTEXT_MISMATCH_REASON,
+    },
+  ]);
+});
+
+test("approval request with present-invalid target context cannot use legacy fallback", () => {
+  const acks: Array<
+    Pick<DesktopCommandAckEvent, "commandId" | "accepted" | "state" | "reason">
+  > = [];
+  let notifyCount = 0;
+  let legacyCount = 0;
+
+  handleBrowserCommandKeyApprovalRequestCommand(
+    makeApprovalCommand({
+      body: {
+        fingerprint: "cl:abcdefghijklmnopqrstuv",
+        gatewayId: GATEWAY_ID,
+      },
+    }),
+    {
+      notifyPendingKeys: () => {
+        notifyCount += 1;
+      },
+      onLegacyContextlessApproval: () => {
+        legacyCount += 1;
+      },
+      sendCommandAck: (event) => acks.push(event),
+      sendCommandEvent: () => {},
+    },
+  );
+
+  assert.equal(notifyCount, 0);
+  assert.equal(legacyCount, 0);
+  assert.deepEqual(acks, [
+    {
+      commandId: "approval-command",
+      accepted: false,
+      state: "failed",
+      reason: BROWSER_COMMAND_KEY_APPROVAL_REQUEST_INVALID_REASON,
+    },
+  ]);
 });
 
 test("malformed browser command key approval request fails without notification", () => {
