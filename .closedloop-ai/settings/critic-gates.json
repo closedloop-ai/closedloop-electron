@@ -50,8 +50,8 @@
       "critics": ["frontend-architect"]
     },
     {
-      "patterns": ["electron", "ipc", "preload", "tray", "window", "browserwindow", "main-process", "app-lifecycle", "single-instance", "hide-to-tray", "context-bridge"],
-      "critics": ["frontend-architect"]
+      "patterns": ["electron", "ipc", "preload", "tray", "window", "browserwindow", "main-process", "app-lifecycle", "single-instance", "hide-to-tray", "context-bridge", "macos", "dock", "native-menu", "auto-update-ux"],
+      "critics": ["desktop-platform-architect"]
     },
     {
       "patterns": ["cache", "caching", "plugin-cache", "catchup-cache"],

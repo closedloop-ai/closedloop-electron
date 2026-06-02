@@ -252,6 +252,26 @@
         "complexity": "medium"
       },
       "generation_hash": "97a9e7e7afc1183d"
+    },
+    "desktop-platform-architect": {
+      "generated": "2026-06-02T17:30:00Z",
+      "domain": "frontend",
+      "specialization": {
+        "technologies": [
+          "Electron 35.x",
+          "BrowserWindow",
+          "Tray",
+          "electron-log",
+          "electron-store",
+          "electron-updater",
+          "contextBridge / preload",
+          "macOS native menu / dock"
+        ],
+        "complexity": "medium",
+        "split_from": "frontend-architect",
+        "split_reason": "Reviewer feedback on PR #265 \u2014 narrow frontend-architect to renderer UI; main-process platform layer (lifecycle, tray, window, preload, hide-to-tray, auto-update UX) is a distinct domain and deserves a dedicated specialist."
+      },
+      "generation_hash": "97a9e7e7afc1183d"
     }
   },
   "pre_existing_agents": []
