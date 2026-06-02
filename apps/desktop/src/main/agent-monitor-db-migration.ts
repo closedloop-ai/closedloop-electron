@@ -4,8 +4,8 @@ import { DatabaseSync } from "node:sqlite";
 import { resolveAgentMonitorDatabasePath } from "./agent-session-sync-service.js";
 import type { AgentDatabase } from "./database/index.js";
 
-// CLOSEDLOOP-TICKET: remove dashboard.db migration adapter after backfill
-// completion (FEA-1497 breaking-change discipline contract #2). This one-time
+// CLOSEDLOOP-TICKET FEA-1501: remove dashboard.db migration adapter after
+// backfill completion (FEA-1497 breaking-change discipline contract #2). This one-time
 // boot import carries the vendor sidecar's historical sessions/agents/events/
 // token usage into the in-process DB, then RENAMES dashboard.db to
 // dashboard.db.migrated (not delete) so a downgrade to an older app version can

@@ -6,8 +6,8 @@ import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
 import { isSessionInSandbox } from "./agent-session-sync-service.js";
 import type { createLifecycle, HookData } from "./database/lifecycle.js";
 
-// CLOSEDLOOP-TICKET: remove legacy HTTP hook listener on 4820 after transport
-// migration (FEA-1497 breaking-change discipline contract #1). The hook
+// CLOSEDLOOP-TICKET FEA-1500: remove legacy HTTP hook listener on 4820 after
+// transport migration (FEA-1497 breaking-change discipline contract #1). The hook
 // commands baked into ~/.claude/settings.json and ~/.codex/hooks.json POST to
 // 127.0.0.1:4820/api/hooks/event; this in-process listener replaces the vendor
 // sidecar that previously owned that port. The contract (port, path, payload
