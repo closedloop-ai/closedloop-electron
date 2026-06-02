@@ -13,12 +13,22 @@ await stat(stageRoot).catch(() => {
   throw new Error("Packaging app is missing. Run `pnpm stage:package` before invoking electron-builder.");
 });
 
+const forwardedArgs = process.argv.slice(2);
+const hasExplicitPlatformTarget = forwardedArgs.some((arg) => (
+  arg === "--mac"
+  || arg === "--win"
+  || arg === "--linux"
+  || arg === "-m"
+  || arg === "-w"
+  || arg === "-l"
+));
+
 const electronBuilderArgs = [
-  "--mac",
+  ...(hasExplicitPlatformTarget ? [] : ["--mac"]),
   "--config",
   "electron-builder.yml",
   `-c.directories.app=${stageRoot}`,
-  ...process.argv.slice(2),
+  ...forwardedArgs,
 ];
 
 const electronBuilderResult = spawnSync("electron-builder", electronBuilderArgs, {

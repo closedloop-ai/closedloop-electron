@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.104",
+  "version": "0.15.105",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -33,6 +33,9 @@
     "test:audit:ui": "playwright test --config test-e2e/agent-monitor/playwright.audit.config.ts",
     "preaudit:report": "pnpm build:agent-monitor",
     "audit:report": "node test-e2e/agent-monitor/inventory/run-report.mjs",
+    "dist:mac": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --mac",
+    "dist:win": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --win",
+    "dist:all": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --mac --win",
     "package": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs",
     "release": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },

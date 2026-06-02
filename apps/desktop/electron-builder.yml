@@ -43,6 +43,22 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   notarize: true
 
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
 publish:
   provider: github
   owner: closedloop-ai
