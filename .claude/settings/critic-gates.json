@@ -50,6 +50,10 @@
       "critics": ["frontend-architect"]
     },
     {
+      "patterns": ["electron", "ipc", "preload", "tray", "window", "browserwindow", "main-process", "app-lifecycle", "single-instance", "hide-to-tray", "context-bridge"],
+      "critics": ["frontend-architect"]
+    },
+    {
       "patterns": ["cache", "caching", "plugin-cache", "catchup-cache"],
       "critics": ["caching-strategist"]
     }
