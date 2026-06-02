@@ -1,8 +1,5 @@
 import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
-import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
-import { RankedBar } from "@closedloop-ai/design-system/components/ui/primitives/ranked-bar";
 import { MonitorDot, Bot, Zap, Layers } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import { ActivityFeedView } from "../feed/ActivityFeedView";
@@ -40,9 +37,6 @@ export function DashboardPage() {
       </div>
     );
   }
-
-  const toolUsage = analytics?.toolUsage ?? [];
-  const maxToolCount = toolUsage.length > 0 ? toolUsage[0].count : 1;
 
   return (
     <div className="flex flex-col h-full">

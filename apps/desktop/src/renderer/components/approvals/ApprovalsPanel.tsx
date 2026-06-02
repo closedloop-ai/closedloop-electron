@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
+import { Card, CardContent } from "@closedloop-ai/design-system/components/ui/card";
 
 interface Approval {
   id: string;

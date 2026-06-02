@@ -1,5 +1,3 @@
-import { useCallback } from "react";
-
 interface TopbarProps {
   collapsed: boolean;
   onToggleSidebar: () => void;

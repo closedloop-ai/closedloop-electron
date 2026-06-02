@@ -6,7 +6,7 @@ import { createSessionStore } from "./sessions.js";
 import { createAgentStore } from "./agents.js";
 import { createEventStore } from "./events.js";
 import { createDashboardQueries } from "./dashboard.js";
-import type { DashboardSummary, SessionRow, AgentRow, EventRow, HookEventPayload } from "./types.js";
+import type { DashboardSummary } from "./types.js";
 
 export interface AgentDatabase {
   sessions: ReturnType<typeof createSessionStore>;
