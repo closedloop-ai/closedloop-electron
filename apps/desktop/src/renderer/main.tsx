@@ -1,8 +1,9 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { DesignSystemProvider } from "@closedloop-ai/design-system";
-import App from "./App";
 import "./globals.css";
+import "@closedloop-ai/design-system/styles/globals.css";
+import App from "./App";
 
 window.addEventListener("error", (event) => {
   console.error("[renderer]", event.error ?? event.message);
