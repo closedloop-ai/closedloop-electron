@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
@@ -115,5 +115,11 @@ CREATE TABLE IF NOT EXISTS token_usage (
 CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
 
 ALTER TABLE sessions ADD COLUMN billing_mode TEXT;
+`,
+
+  // Version 4 -> 5: index session ordering/filtering for the heavy explorer views.
+  `
+CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_status_started_at ON sessions(status, started_at DESC);
 `,
 ];

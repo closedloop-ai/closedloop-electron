@@ -1,4 +1,12 @@
-import { useState, useCallback, useEffect, useMemo, lazy, Suspense } from "react";
+import {
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  lazy,
+  Suspense,
+  startTransition,
+} from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { Topbar } from "./components/layout/Topbar";
 import { SessionNavContext } from "./components/sessions/session-nav";
@@ -73,6 +81,7 @@ export default function App() {
   const [detailSessionId, setDetailSessionId] = useState<string | null>(
     initialHashState.detailSessionId,
   );
+  const [visitedNavIds, setVisitedNavIds] = useState<NavId[]>([initialHashState.navId]);
   const [runtimeStatus, setRuntimeStatus] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
@@ -83,21 +92,31 @@ export default function App() {
   }, []);
 
   const navigate = useCallback((id: NavId) => {
-    setNavId(id);
-    setDetailSessionId(null);
+    startTransition(() => {
+      setNavId(id);
+      setDetailSessionId(null);
+      setVisitedNavIds((current) => (current.includes(id) ? current : [...current, id]));
+    });
     writeHashState(id, null);
   }, []);
 
   const handleBack = useCallback(() => {
-    setDetailSessionId(null);
+    startTransition(() => {
+      setDetailSessionId(null);
+    });
     writeHashState(navId, null);
   }, [navId]);
 
   useEffect(() => {
     const syncFromHash = () => {
       const nextState = readHashState();
-      setNavId(nextState.navId);
-      setDetailSessionId(nextState.detailSessionId);
+      startTransition(() => {
+        setNavId(nextState.navId);
+        setDetailSessionId(nextState.detailSessionId);
+        setVisitedNavIds((current) => (
+          current.includes(nextState.navId) ? current : [...current, nextState.navId]
+        ));
+      });
     };
 
     syncFromHash();
@@ -117,7 +136,9 @@ export default function App() {
   const sessionNav = useMemo(
     () => ({
       openSession: (id: string) => {
-        setDetailSessionId(id);
+        startTransition(() => {
+          setDetailSessionId(id);
+        });
         writeHashState(navId, id);
       },
     }),
@@ -129,11 +150,8 @@ export default function App() {
 
   const healthy = runtimeStatus?.gatewayHealthy === true;
 
-  const content = (() => {
-    if (detailSessionId) {
-      return <SessionDetailView sessionId={detailSessionId} onBack={handleBack} />;
-    }
-    switch (navId) {
+  const renderPage = useCallback((pageId: NavId) => {
+    switch (pageId) {
       case "dashboard":
         return <DashboardPage />;
       case "kanban":
@@ -155,7 +173,26 @@ export default function App() {
       default:
         return <DashboardPage />;
     }
-  })();
+  }, []);
+
+  const content = detailSessionId ? (
+    <SessionDetailView sessionId={detailSessionId} onBack={handleBack} />
+  ) : (
+    <Suspense fallback={<PageFallback />}>
+      {visitedNavIds.map((pageId) => {
+        const active = pageId === navId;
+        return (
+          <div
+            key={pageId}
+            aria-hidden={active ? undefined : true}
+            className={active ? "block h-full" : "hidden h-full"}
+          >
+            {renderPage(pageId)}
+          </div>
+        );
+      })}
+    </Suspense>
+  );
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -174,9 +211,7 @@ export default function App() {
         />
         <main className="flex-1 overflow-auto">
           <SessionNavContext.Provider value={sessionNav}>
-            <Suspense fallback={<PageFallback />}>
-              {content}
-            </Suspense>
+            {content}
           </SessionNavContext.Provider>
         </main>
       </div>
