@@ -4,6 +4,9 @@ import { useQueryCache } from "../../hooks/useQueryCache";
 import { SessionsView } from "../sessions/SessionsView";
 import type { DashboardSummary } from "../../../main/database/types";
 
+const SUMMARY_CARD_CLASS_NAME =
+  "min-h-0 rounded-xl border-border/70 bg-card shadow-sm [&>div:first-child]:px-5 [&>div:first-child]:pt-4 [&>div:first-child]:pb-2 [&_[data-slot='card-description']]:text-[10px] [&_[data-slot='card-title']]:text-[1.7rem] [&>div:last-child]:px-5 [&>div:last-child]:pb-4 [&>div:last-child]:text-xs";
+
 export function DashboardPage() {
   const { data: summary, error } = useQueryCache<DashboardSummary>(
     "db:summary",
@@ -28,17 +31,23 @@ export function DashboardPage() {
   }
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="p-6 pb-0 space-y-4">
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <MetricCard label="Sessions" value={summary.totalSessions} detail={`${summary.activeSessions} active`} icon={MonitorDot} />
-          <MetricCard label="Agents" value={summary.totalAgents} icon={Bot} />
-          <MetricCard label="Events" value={summary.totalEvents} icon={Zap} />
-          <MetricCard label="Event Types" value={summary.eventTypeCount} icon={Layers} />
+    <div className="h-full overflow-auto">
+      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 p-6">
+        <section className="space-y-1">
+          <h1 className="text-[1.8rem] font-semibold tracking-tight text-[var(--foreground)]">Sessions</h1>
+          <p className="text-sm text-[var(--muted-foreground)]">
+            High-level loop volume and direct access to the session explorer.
+          </p>
+        </section>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Sessions" value={summary.totalSessions} detail={`${summary.activeSessions} active`} icon={MonitorDot} />
+          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Agents" value={summary.totalAgents} icon={Bot} />
+          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Events" value={summary.totalEvents} icon={Zap} />
+          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Event Types" value={summary.eventTypeCount} icon={Layers} />
         </div>
-      </div>
-      <div className="flex-1 overflow-auto">
-        <SessionsView />
+
+        <SessionsView showOverview={false} />
       </div>
     </div>
   );
