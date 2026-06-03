@@ -22,19 +22,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # @closedloop-ai/design-system is published to GitHub Packages from another
-      # org repo, so this repo's GITHUB_TOKEN gets a 403 fetching it. Mint an
-      # org-scoped GitHub App token (the same app compatibility-smoke uses for
-      # cross-repo access) with packages:read so pnpm install can pull it.
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.CLOSEDLOOP_APP_ID_STAGE }}
-          private-key: ${{ secrets.CLOSEDLOOP_APP_SECRET_STAGE }}
-          owner: ${{ github.repository_owner }}
-          permission-packages: read
-
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
@@ -47,7 +34,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate build info
         run: pnpm -r prebuild
