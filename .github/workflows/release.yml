@@ -41,6 +41,20 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
+      # @closedloop-ai/design-system is published to GitHub Packages from another
+      # org repo, so this repo's GITHUB_TOKEN gets a 403 fetching it. Mint an
+      # org-scoped GitHub App token with packages:read for pnpm install (the
+      # publish step below keeps the repo GITHUB_TOKEN for contents:write).
+      - name: Generate GitHub App token
+        if: steps.check_release.outputs.skip != 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLOSEDLOOP_APP_ID_STAGE }}
+          private-key: ${{ secrets.CLOSEDLOOP_APP_SECRET_STAGE }}
+          owner: ${{ github.repository_owner }}
+          permission-packages: read
+
       - name: Install pnpm
         if: steps.check_release.outputs.skip != 'true'
         uses: pnpm/action-setup@v4
@@ -56,7 +70,7 @@ jobs:
         if: steps.check_release.outputs.skip != 'true'
         run: pnpm install --frozen-lockfile
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Generate build info
         if: steps.check_release.outputs.skip != 'true'
