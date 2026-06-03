@@ -25,15 +25,6 @@ const rendererEntryFile = path.join(appDir, "src/renderer/index.html");
 const stageRendererDir = path.join(stageAppDir, "src/renderer");
 const stageNpmrcFile = path.join(stageAppDir, ".npmrc");
 
-// Dependencies that Vite bundles directly into `dist/renderer` and that are
-// therefore NOT needed as runtime node modules in the packaged app. The
-// vendored design-system is declared as `file:vendor/design-system`, but the
-// staging install (`pnpm install --prod` in the stage dir) runs before any app
-// files — including `vendor/` — are copied, so that relative spec cannot
-// resolve and the install fails. Excluding it here keeps staging install-able;
-// the renderer already ships its design-system code inside the Vite bundle.
-const BUNDLED_ONLY_DEPENDENCIES = new Set(["@closedloop-ai/design-system"]);
-
 function resolveStageDependencySpec(packageJson, dependencyName, dependency) {
   if (typeof dependency.resolved === "string" && dependency.resolved.length > 0) {
     return dependency.resolved;
@@ -116,7 +107,6 @@ const stagePackageJson = {
   main: packageJson.main,
   dependencies: Object.fromEntries(
     Object.entries(installedDependencies)
-      .filter(([dependencyName]) => !BUNDLED_ONLY_DEPENDENCIES.has(dependencyName))
       .map(([dependencyName, dependency]) => [
         dependencyName,
         resolveStageDependencySpec(packageJson, dependencyName, dependency),

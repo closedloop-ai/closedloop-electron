@@ -50,7 +50,7 @@ export default defineConfig({
           if (id.includes("radix-ui") || id.includes("@radix-ui")) {
             return "vendor-radix";
           }
-          if (id.includes("vendor/design-system")) {
+          if (id.includes("@closedloop-ai/design-system")) {
             return "vendor-ds";
           }
         },

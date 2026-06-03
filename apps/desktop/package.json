@@ -14,7 +14,7 @@
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
     "build": "pnpm clean:dist && pnpm prebuild && tsc -p tsconfig.json && pnpm build:renderer",
     "build:agent-monitor": "node scripts/build-agent-monitor.mjs",
-    "build:renderer": "node scripts/patch-vendor-ds-react.mjs && vite build --config vite.renderer.config.ts",
+    "build:renderer": "vite build --config vite.renderer.config.ts",
     "dashboard:reset": "node scripts/reset-dashboard-db.mjs",
     "dashboard:reset-packs": "node scripts/reset-dashboard-db.mjs --packs-only",
     "stage:package": "node scripts/stage-packaging-app.mjs",
@@ -39,8 +39,8 @@
     "release": "pnpm clean:package && pnpm build && pnpm build:agent-monitor && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },
   "dependencies": {
-    "@closedloop-ai/design-system": "file:vendor/design-system",
-    "@closedloop-ai/loops-api": "0.2.11",
+    "@closedloop-ai/design-system": "0.1.1-dev.26887984632.1",
+    "@closedloop-ai/loops-api": "^0.3.1",
     "@pydantic/genai-prices": "0.0.62",
     "agent-dashboard": "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
     "busboy": "^1.6.0",

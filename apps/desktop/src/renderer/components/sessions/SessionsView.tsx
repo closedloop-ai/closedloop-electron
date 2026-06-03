@@ -4,7 +4,6 @@ import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitive
 import { SessionTable } from "@closedloop-ai/design-system/components/ui/composites/session-table";
 import { MonitorDot, Activity, Bot, Coins } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
-import { useSessionNav } from "./session-nav";
 import type { SessionRow } from "@closedloop-ai/design-system/components/ui/types";
 import type { SessionWithAgents } from "../../../main/database/types";
 
@@ -29,7 +28,6 @@ const STATUS_OPTIONS = ["all", "active", "waiting", "completed", "abandoned", "e
 const TERMINAL_STATUSES = ["completed", "abandoned", "error"];
 
 export function SessionsView() {
-  const { openSession } = useSessionNav();
   const { data: sessions, loading } = useQueryCache<SessionWithAgents[]>(
     "db:sessions-details",
     () => window.desktopApi.db.getSessionsWithDetails(),
@@ -111,15 +109,7 @@ export function SessionsView() {
 
       <SessionTable
         rows={filtered.map(adaptSession)}
-        renderSessionLink={(row) => (
-          <button
-            type="button"
-            onClick={() => openSession(row.id)}
-            className="text-left font-medium text-[var(--primary)] hover:underline"
-          >
-            {row.name}
-          </button>
-        )}
+        getSessionHref={(row: SessionRow) => `#tab=dashboard&sessionId=${encodeURIComponent(row.id)}`}
         emptyState={
           <div className="py-12 text-center text-sm text-[var(--muted-foreground)]">
             {search || statusFilter !== "all"

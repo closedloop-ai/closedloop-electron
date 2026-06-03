@@ -25,6 +25,40 @@ export type NavId =
   | "diagnostics"
   | "settings";
 
+const DEFAULT_NAV_ID: NavId = "dashboard";
+
+function isNavId(value: string | null): value is NavId {
+  return value === "dashboard"
+    || value === "kanban"
+    || value === "activity"
+    || value === "analytics"
+    || value === "workflows"
+    || value === "approvals"
+    || value === "requests"
+    || value === "diagnostics"
+    || value === "settings";
+}
+
+function readHashState(): { navId: NavId; detailSessionId: string | null } {
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const tab = params.get("tab");
+  const sessionId = params.get("sessionId");
+
+  return {
+    navId: isNavId(tab) ? tab : DEFAULT_NAV_ID,
+    detailSessionId: sessionId && sessionId.length > 0 ? sessionId : null,
+  };
+}
+
+function writeHashState(navId: NavId, detailSessionId: string | null): void {
+  const params = new URLSearchParams();
+  params.set("tab", navId);
+  if (detailSessionId) {
+    params.set("sessionId", detailSessionId);
+  }
+  window.location.hash = params.toString();
+}
+
 function PageFallback() {
   return (
     <div className="flex items-center justify-center h-full">
@@ -34,10 +68,11 @@ function PageFallback() {
 }
 
 export default function App() {
-  const [navId, setNavId] = useState<NavId>("dashboard");
-  // Single-depth drill-down stack (nav-stack model; no router). When set, the
-  // session detail view replaces the active nav page; Back / navigating clears.
-  const [detailSessionId, setDetailSessionId] = useState<string | null>(null);
+  const initialHashState = readHashState();
+  const [navId, setNavId] = useState<NavId>(initialHashState.navId);
+  const [detailSessionId, setDetailSessionId] = useState<string | null>(
+    initialHashState.detailSessionId,
+  );
   const [runtimeStatus, setRuntimeStatus] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
@@ -48,8 +83,26 @@ export default function App() {
   }, []);
 
   const navigate = useCallback((id: NavId) => {
-    setDetailSessionId(null);
     setNavId(id);
+    setDetailSessionId(null);
+    writeHashState(id, null);
+  }, []);
+
+  const handleBack = useCallback(() => {
+    setDetailSessionId(null);
+    writeHashState(navId, null);
+  }, [navId]);
+
+  useEffect(() => {
+    const syncFromHash = () => {
+      const nextState = readHashState();
+      setNavId(nextState.navId);
+      setDetailSessionId(nextState.detailSessionId);
+    };
+
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+    return () => window.removeEventListener("hashchange", syncFromHash);
   }, []);
 
   useEffect(() => {
@@ -62,8 +115,13 @@ export default function App() {
   }, [navigate]);
 
   const sessionNav = useMemo(
-    () => ({ openSession: (id: string) => setDetailSessionId(id) }),
-    [],
+    () => ({
+      openSession: (id: string) => {
+        setDetailSessionId(id);
+        writeHashState(navId, id);
+      },
+    }),
+    [navId],
   );
 
   const [collapsed, setCollapsed] = useState(false);
@@ -73,7 +131,7 @@ export default function App() {
 
   const content = (() => {
     if (detailSessionId) {
-      return <SessionDetailView sessionId={detailSessionId} onBack={() => setDetailSessionId(null)} />;
+      return <SessionDetailView sessionId={detailSessionId} onBack={handleBack} />;
     }
     switch (navId) {
       case "dashboard":

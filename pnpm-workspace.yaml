@@ -9,6 +9,9 @@ minimumReleaseAge: 10080
 # Our own internal packages ship frequently and are trusted — exempt from the
 # 7-day quarantine so we can consume new versions immediately.
 minimumReleaseAgeExclude:
+  # Temporary while Desktop consumes newly published design-system prereleases
+  # directly from GitHub Packages during the FEA-1497 migration.
+  - "@closedloop-ai/design-system"
   - "@closedloop-ai/loops-api"
   # External, but exempted deliberately (PRD-414 / FEA-1431). We pin
   # @pydantic/genai-prices to an EXACT version (no semver range) so this
