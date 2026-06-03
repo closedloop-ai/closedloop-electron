@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { ThemeProvider } from "next-themes";
+import { DesignSystemProvider } from "@closedloop-ai/design-system";
 import App from "./App";
 import "./globals.css";
 
@@ -18,13 +18,13 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <ThemeProvider
+    <DesignSystemProvider
       attribute="class"
       defaultTheme="light"
       disableTransitionOnChange
       enableSystem={false}
     >
       <App />
-    </ThemeProvider>
+    </DesignSystemProvider>
   </StrictMode>,
 );
