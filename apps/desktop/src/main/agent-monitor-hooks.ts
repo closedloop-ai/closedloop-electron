@@ -6,7 +6,7 @@ import path from "node:path";
 import Store from "electron-store";
 
 import { gatewayLog } from "./gateway-logger.js";
-import { resolveAgentMonitorPaths } from "./agent-monitor-path.js";
+import { resolveAgentMonitorHookPaths } from "./agent-monitor-path.js";
 import {
   applyHookInstall,
   applyHookUninstall,
@@ -44,7 +44,7 @@ export function isAgentMonitorCodexHooksOptIn(): boolean {
   return store().get("codexOptIn", false) === true;
 }
 
-// Same resolution as agent-dashboard/server/lib/claude-home.js:
+// Same resolution as collectors/claude/claude-home.ts:
 // CLAUDE_HOME || ~/.claude, then settings.json.
 function claudeSettingsPath(): string {
   const home = process.env.CLAUDE_HOME || path.join(os.homedir(), ".claude");
@@ -88,12 +88,10 @@ function userDataCodexHandlerPath(): string {
 }
 
 function refreshHandlerCopy(): string {
-  const { scriptsDir } = resolveAgentMonitorPaths();
-  const src = path.join(scriptsDir, "hook-handler.js");
+  const { hooksDir } = resolveAgentMonitorHookPaths();
+  const src = path.join(hooksDir, "hook-handler.js");
   if (!existsSync(src)) {
-    throw new Error(
-      `hook-handler.js not found at ${src} — run \`pnpm -C apps/desktop build:agent-monitor\``,
-    );
+    throw new Error(`hook-handler.js not found at ${src}`);
   }
   const dest = userDataHandlerPath();
   mkdirSync(path.dirname(dest), { recursive: true });
@@ -104,18 +102,14 @@ function refreshHandlerCopy(): string {
   return dest;
 }
 
-// FEA-1444: the Codex wrapper handler ships in-repo (not vendored from
-// upstream agent-dashboard) under `apps/desktop/scripts/agent-monitor-codex/`,
-// and is copied into the generated agent-monitor scripts/ tree by
-// build-agent-monitor.mjs so packaged + dev builds resolve to the same
-// scriptsDir as the upstream Claude handler.
+// FEA-1444 / FEA-1503: the Codex wrapper handler is first-party and ships under
+// `apps/desktop/resources/hooks/` (packaged: unpacked `extraResources/hooks`),
+// resolved via the same hooksDir as the Claude handler.
 function refreshCodexHandlerCopy(): string {
-  const { scriptsDir } = resolveAgentMonitorPaths();
-  const src = path.join(scriptsDir, "codex-hook-handler.js");
+  const { hooksDir } = resolveAgentMonitorHookPaths();
+  const src = path.join(hooksDir, "codex-hook-handler.js");
   if (!existsSync(src)) {
-    throw new Error(
-      `codex-hook-handler.js not found at ${src} — run \`pnpm -C apps/desktop build:agent-monitor\``,
-    );
+    throw new Error(`codex-hook-handler.js not found at ${src}`);
   }
   const dest = userDataCodexHandlerPath();
   mkdirSync(path.dirname(dest), { recursive: true });

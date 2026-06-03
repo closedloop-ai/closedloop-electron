@@ -1,3 +1,0 @@
-        const waiting = res.sessions.filter(isSessionAwaitingInput);
-        setTotal(waiting.length);
-        setSessions(waiting.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));

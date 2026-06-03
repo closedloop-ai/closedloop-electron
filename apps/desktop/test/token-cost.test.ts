@@ -1,52 +1,25 @@
 /**
  * @file token-cost.test.ts
- * @description Parity + correctness tests for the canonical token-cost engine.
+ * @description Correctness tests for the first-party token-cost engine
+ * (`src/shared/token-cost.ts`). FEA-1503 removed the vendor CJS twin
+ * (`scripts/agent-monitor-cost/cost-pricing.js`); the first-party engine is now
+ * the single source of truth, so this exercises it directly.
  *
- * There are TWO copies of the engine that must never diverge:
- *   • the desktop-main ESM twin  — src/shared/token-cost.ts
- *   • the sidecar CJS engine     — scripts/agent-monitor-cost/cost-pricing.js
- * They live in different module systems (the sidecar runs in a generated
- * CommonJS tree; desktop-main is ESM and must work with the sidecar disabled),
- * so the code is duplicated. This test imports BOTH and asserts byte-equal
- * output across a fixture matrix so a change to one without the other fails CI.
- *
- * It also pins a handful of known dollar values (against the pinned
+ * It pins a handful of known dollar values (against the pinned
  * @pydantic/genai-prices version) and verifies CACHE_ADDITIVE_PROVIDERS matches
  * the library's OWN extractUsage summing behavior — so if a future library
  * version changes which providers report cache additively, this test fails and
  * we update the Set deliberately rather than silently misprice.
  */
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { test } from "node:test";
-import {
-  extractUsage,
-  findProvider,
-} from "@pydantic/genai-prices";
+import { extractUsage, findProvider } from "@pydantic/genai-prices";
 import {
   buildUsage as buildUsageTwin,
   CACHE_ADDITIVE_PROVIDERS as ADDITIVE_TWIN,
   computeTokenCost as computeTokenCostTwin,
   type TokenCostInput,
 } from "../src/shared/token-cost.js";
-
-// The sidecar engine is CommonJS (its dir is scoped type:commonjs). Load it via
-// createRequire so the require("@pydantic/genai-prices") inside it resolves the
-// same way it does inside the generated sidecar tree.
-const require = createRequire(import.meta.url);
-const engine = require("../scripts/agent-monitor-cost/cost-pricing.js") as {
-  computeTokenCost: (input: TokenCostInput) => unknown;
-  buildUsage: (
-    providerId: string | null,
-    counts: {
-      input: number;
-      output: number;
-      cacheRead: number;
-      cacheWrite: number;
-    },
-  ) => unknown;
-  CACHE_ADDITIVE_PROVIDERS: Set<string>;
-};
 
 // Fixture matrix exercising every code path: provider-aware normalization,
 // cache combos, unpriced models, empty model, zero/negative/string coercion,
@@ -145,17 +118,23 @@ const FIXTURES: Array<{ name: string; input: TokenCostInput }> = [
   },
 ];
 
-test("twin and sidecar engine return byte-equal results across the fixture matrix", () => {
+test("computeTokenCost returns a well-formed result across the fixture matrix", () => {
   for (const { name, input } of FIXTURES) {
-    const twin = computeTokenCostTwin(input);
-    const cjs = engine.computeTokenCost(input);
-    assert.deepEqual(
-      twin,
-      cjs,
-      `twin/engine drift for fixture: ${name}\n` +
-        `  twin:   ${JSON.stringify(twin)}\n` +
-        `  engine: ${JSON.stringify(cjs)}`,
-    );
+    const result = computeTokenCostTwin(input);
+    assert.equal(typeof result.priced, "boolean", `priced shape for: ${name}`);
+    if (result.priced) {
+      assert.equal(typeof result.costUsd, "number", `costUsd for: ${name}`);
+      assert.ok(
+        (result.costUsd ?? -1) >= 0,
+        `costUsd non-negative for: ${name}`,
+      );
+    } else {
+      assert.equal(result.costUsd, null, `unpriced costUsd null for: ${name}`);
+      assert.ok(
+        typeof result.reason === "string" && result.reason.length > 0,
+        `unpriced reason for: ${name}`,
+      );
+    }
   }
 });
 
@@ -242,8 +221,7 @@ test("buildUsage applies the provider-aware input convention", () => {
 
   // Anthropic → additive grand total.
   assert.equal(
-    (buildUsageTwin("anthropic", counts) as { input_tokens: number })
-      .input_tokens,
+    (buildUsageTwin("anthropic", counts) as { input_tokens: number }).input_tokens,
     1800,
   );
   // OpenAI → input passes through (cache is a subset).
@@ -257,22 +235,9 @@ test("buildUsage applies the provider-aware input convention", () => {
     (buildUsageTwin(null, counts) as { input_tokens: number }).input_tokens,
     1000,
   );
-
-  // Twin and engine buildUsage agree.
-  for (const providerId of ["anthropic", "openai", null] as const) {
-    assert.deepEqual(
-      buildUsageTwin(providerId, counts),
-      engine.buildUsage(providerId, counts),
-    );
-  }
 });
 
 test("CACHE_ADDITIVE_PROVIDERS matches the library's own extractUsage summing", () => {
-  // Twin and engine declare the same set.
-  assert.deepEqual([...ADDITIVE_TWIN].sort(), [
-    ...engine.CACHE_ADDITIVE_PROVIDERS,
-  ].sort());
-
   // Anthropic: extractUsage SUMS input + cache → additive, so it MUST be in the
   // set. Raw input_tokens is fresh; cache fields are separate/additive.
   const anthropic = findProvider({ modelId: "claude-opus-4-5" });
@@ -294,10 +259,7 @@ test("CACHE_ADDITIVE_PROVIDERS matches the library's own extractUsage summing", 
     1800,
     "anthropic extractUsage should SUM cache into input_tokens",
   );
-  assert.ok(
-    ADDITIVE_TWIN.has("anthropic"),
-    "anthropic sums → must be additive",
-  );
+  assert.ok(ADDITIVE_TWIN.has("anthropic"), "anthropic sums → must be additive");
 
   // OpenAI: extractUsage does NOT sum (cached is a subset of input) → inclusive,
   // so it MUST NOT be in the set.
@@ -319,8 +281,5 @@ test("CACHE_ADDITIVE_PROVIDERS matches the library's own extractUsage summing", 
     1000,
     "openai extractUsage should NOT sum cache into input_tokens",
   );
-  assert.ok(
-    !ADDITIVE_TWIN.has("openai"),
-    "openai does not sum → must be inclusive",
-  );
+  assert.ok(!ADDITIVE_TWIN.has("openai"), "openai does not sum → must be inclusive");
 });

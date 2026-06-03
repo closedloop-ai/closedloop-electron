@@ -1,3 +1,0 @@
-                          </p>
-                          <HarnessBadge harness={session.harness} />
-                          {dashboardRunIds.has(session.id) && (

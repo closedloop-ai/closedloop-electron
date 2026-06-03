@@ -75,11 +75,11 @@ import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch }
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentHookListener } from "./agent-monitor-listener.js";
+import { CollectorManager } from "./collectors/collector-manager.js";
 import { openAgentDatabase } from "./database/index.js";
 import { coerceDbId } from "./database/ipc-validation.js";
 import { createLifecycle } from "./database/lifecycle.js";
 import { detectBillingMode } from "./billing-mode-detector.js";
-import { migrateVendorDashboardDb } from "./agent-monitor-db-migration.js";
 import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
   createAnthropicAdminKeyStore,
@@ -301,6 +301,7 @@ export class DesktopApplication {
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly agentHookListener: AgentHookListener;
+  private readonly collectorManager: CollectorManager;
   private readonly agentDatabase: ReturnType<typeof openAgentDatabase>;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly costReconciliation: CostReconciliationService;
@@ -441,6 +442,24 @@ export class DesktopApplication {
         this.agentMonitorFailureReason = reason;
         this.refreshTrayState();
       },
+    });
+    // FEA-1503: in-process multi-harness collection (boot import + live file
+    // watchers for all five agent CLIs), writing through the first-party
+    // importSession into the same in-process DB. Sandbox-gated per session
+    // (FEA-1407, fail-closed). Claude's live watcher is gated off when hooks are
+    // installed (hooks own live Claude capture; boot historical import still runs).
+    this.collectorManager = new CollectorManager({
+      agentDatabase: this.agentDatabase,
+      detectBillingMode,
+      getSandboxBaseDirectory: () => this.settingsStore.getSandboxBaseDirectory(),
+      stateDir: path.join(app.getPath("userData"), "agent-monitor"),
+      emit: (sessionId?: string) => {
+        this.desktopWindow
+          .getWindow()
+          ?.webContents.send("desktop:db:changed", { sessionId });
+      },
+      shouldWatchClaude: () => !isAgentMonitorHooksEnabled(),
+      log: (message: string) => gatewayLog.info("agent-collectors", message),
     });
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
@@ -1435,20 +1454,15 @@ export class DesktopApplication {
   }
 
   /**
-   * Start the in-process agent capture stack: run the one-time vendor-DB boot
-   * migration (idempotent — no-ops once dashboard.db is renamed), start the
-   * :4820 hook listener, self-heal the installed hook commands, and start the
-   * cloud relay sync. Shared by boot() and the enable path of
-   * applyAgentMonitorSetting().
+   * Start the in-process agent capture stack: start the :4820 hook listener,
+   * self-heal the installed hook commands, start the in-process multi-harness
+   * collectors (boot import + live watchers), and start the cloud relay sync.
+   * Shared by boot() and the enable path of applyAgentMonitorSetting().
    */
   private startAgentCapture(): void {
-    migrateVendorDashboardDb(
-      app.getPath("userData"),
-      this.agentDatabase,
-      (message) => gatewayLog.info("agent-monitor-migration", message),
-    );
     void this.agentHookListener.start();
     syncAgentMonitorHooksOnBoot();
+    this.collectorManager.start();
     this.agentSessionSync.start();
   }
 
@@ -1470,6 +1484,7 @@ export class DesktopApplication {
       );
     }
 
+    this.collectorManager.stop();
     await this.agentHookListener.stop();
     this.agentSessionSync.stop();
     this.desktopWindow
@@ -1935,11 +1950,13 @@ export class DesktopApplication {
     this.clearActiveCommandKeyTargetContext("shutdown");
     this.commandKeyReconciler.stop();
     this.agentSessionSync.stop();
-    // Stop every reader of the shared connection BEFORE closing it: the relay
-    // (above), the in-process listener (so a late hook POST cannot hit a closed
-    // DB), and the cost-reconciliation timers. stop() on the listener is
-    // idempotent, so the shutdown sequence below (which also stops it before
-    // server.stop) is a no-op second call. Close the connection last.
+    // Stop every reader/writer of the shared connection BEFORE closing it: the
+    // relay (above), the file collectors (so a late fs-watch import cannot hit a
+    // closed DB), the in-process listener (so a late hook POST cannot either),
+    // and the cost-reconciliation timers. stop() on the listener is idempotent,
+    // so the shutdown sequence below (which also stops it before server.stop) is
+    // a no-op second call. Close the connection last.
+    this.collectorManager.stop();
     await this.agentHookListener.stop();
     this.costReconciliation.stop();
     this.agentDatabase.close();
@@ -2729,7 +2746,19 @@ export class DesktopApplication {
             error: "Agent Dashboard is disabled in Settings.",
           };
         }
-        return setAgentMonitorHooksEnabled(enabled === true);
+        const result = setAgentMonitorHooksEnabled(enabled === true);
+        if (result.ok) {
+          // Hooks own live Claude capture, so toggling them must re-evaluate
+          // the Claude file-watcher gating (`shouldWatchClaude`): hooks-on ⇒ no
+          // Claude watcher (avoid double-counting turns), hooks-off ⇒ Claude
+          // watcher resumes live capture. Restart the collectors so the frozen
+          // boot-time decision is recomputed; boot import is idempotent, so the
+          // restart is safe. (CLAUDE.md: toggles must update in-memory side
+          // effects together — no one-way restart guards.)
+          this.collectorManager.stop();
+          this.collectorManager.start();
+        }
+        return result;
       },
     );
     // FEA-1444 (carried into FEA-1497): opt-in Codex hook ingestion. Gated on
