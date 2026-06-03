@@ -2,18 +2,13 @@ import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitive
 import { MonitorDot, Bot, Zap, Layers } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import { SessionsView } from "../sessions/SessionsView";
-import type { DashboardSummary, AnalyticsData } from "../../../main/database/types";
+import type { DashboardSummary } from "../../../main/database/types";
 
 export function DashboardPage() {
   const { data: summary, error } = useQueryCache<DashboardSummary>(
     "db:summary",
     () => window.desktopApi.db.getDashboardSummary(),
     3_000, 5_000,
-  );
-  const { data: analytics } = useQueryCache<AnalyticsData>(
-    "db:analytics",
-    () => window.desktopApi.db.getAnalytics(),
-    30_000, 60_000,
   );
 
   if (error) {
@@ -39,7 +34,7 @@ export function DashboardPage() {
           <MetricCard label="Sessions" value={summary.totalSessions} detail={`${summary.activeSessions} active`} icon={MonitorDot} />
           <MetricCard label="Agents" value={summary.totalAgents} icon={Bot} />
           <MetricCard label="Events" value={summary.totalEvents} icon={Zap} />
-          <MetricCard label="Event Types" value={analytics?.eventsByType.length ?? 0} icon={Layers} />
+          <MetricCard label="Event Types" value={summary.eventTypeCount} icon={Layers} />
         </div>
       </div>
       <div className="flex-1 overflow-auto">

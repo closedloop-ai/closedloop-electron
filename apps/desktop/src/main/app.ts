@@ -3661,7 +3661,7 @@ export class DesktopApplication {
 
     ipcMain.handle("desktop:db:get-dashboard-summary", () => {
       if (!this.isAgentMonitorEnabled()) {
-        return { totalSessions: 0, activeSessions: 0, totalAgents: 0, totalEvents: 0, totalTokens: 0, recentSessions: [] };
+        return { totalSessions: 0, activeSessions: 0, totalAgents: 0, totalEvents: 0, eventTypeCount: 0, totalTokens: 0, recentSessions: [] };
       }
       return this.agentDatabase.getSummary();
     });

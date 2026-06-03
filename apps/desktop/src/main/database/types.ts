@@ -55,6 +55,7 @@ export interface DashboardSummary {
   activeSessions: number;
   totalAgents: number;
   totalEvents: number;
+  eventTypeCount: number;
   totalTokens: number;
   recentSessions: Array<{
     id: string;

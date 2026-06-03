@@ -8,6 +8,9 @@ export function createDashboardQueries(db: DatabaseSync) {
   );
   const totalAgentsStmt = db.prepare("SELECT COUNT(*) as count FROM agents");
   const totalEventsStmt = db.prepare("SELECT COUNT(*) as count FROM events");
+  const eventTypeCountStmt = db.prepare(
+    "SELECT COUNT(DISTINCT event_type) as count FROM events",
+  );
   const totalTokensStmt = db.prepare(`
     SELECT COALESCE(SUM(input_tokens + output_tokens), 0) as total
     FROM token_usage
@@ -138,6 +141,7 @@ export function createDashboardQueries(db: DatabaseSync) {
       const activeSessions = (activeSessionsStmt.get() as { count: number }).count;
       const totalAgents = (totalAgentsStmt.get() as { count: number }).count;
       const totalEvents = (totalEventsStmt.get() as { count: number }).count;
+      const eventTypeCount = (eventTypeCountStmt.get() as { count: number }).count;
       const totalTokens = (totalTokensStmt.get() as { total: number }).total;
       const recentSessions = recentSessionsStmt.all() as Array<{
         id: string;
@@ -153,6 +157,7 @@ export function createDashboardQueries(db: DatabaseSync) {
         activeSessions,
         totalAgents,
         totalEvents,
+        eventTypeCount,
         totalTokens,
         recentSessions: recentSessions.map((s) => ({
           id: s.id,
