@@ -418,6 +418,7 @@ export class DesktopApplication {
       tokenUsage: this.agentDatabase.tokenUsage,
       detectBillingMode,
       emit: (sessionId: string) => {
+        this.agentDatabase.sessions.handleSessionMutation(sessionId);
         this.desktopWindow
           .getWindow()
           ?.webContents.send("desktop:db:changed", { sessionId });
