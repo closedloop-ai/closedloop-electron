@@ -3,6 +3,14 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
+const DESIGN_SYSTEM_PACKAGE = "@closedloop-ai/design-system";
+const DESIGN_SYSTEM_DIST_DIR = path.resolve(
+  "node_modules",
+  "@closedloop-ai",
+  "design-system",
+  "dist",
+);
+
 function stripCrossorigin(): Plugin {
   return {
     name: "strip-crossorigin",
@@ -15,14 +23,55 @@ function stripCrossorigin(): Plugin {
   };
 }
 
+function usePatchedDesignSystemBuild(): Plugin {
+  return {
+    name: "use-patched-design-system-build",
+    enforce: "pre",
+    resolveId(source) {
+      if (source === DESIGN_SYSTEM_PACKAGE) {
+        return path.join(DESIGN_SYSTEM_DIST_DIR, "index.mjs");
+      }
+
+      if (source.startsWith(`${DESIGN_SYSTEM_PACKAGE}/`)) {
+        const subpath = source.slice(`${DESIGN_SYSTEM_PACKAGE}/`.length);
+        if (subpath.endsWith(".css")) {
+          return null;
+        }
+        return path.join(DESIGN_SYSTEM_DIST_DIR, `${subpath}.mjs`);
+      }
+
+      return null;
+    },
+    transform(code, id) {
+      if (
+        !id.startsWith(DESIGN_SYSTEM_DIST_DIR)
+        || !id.endsWith(".mjs")
+        || !code.includes("React.createElement")
+        || code.includes('from "react"')
+        || code.includes("from 'react'")
+      ) {
+        return null;
+      }
+
+      return {
+        code: `import * as React from "react";\n${code}`,
+        map: null,
+      };
+    },
+  };
+}
+
 export default defineConfig({
   root: "src/renderer",
   base: "./",
-  plugins: [tailwindcss(), react(), stripCrossorigin()],
+  plugins: [usePatchedDesignSystemBuild(), tailwindcss(), react(), stripCrossorigin()],
   resolve: {
     alias: {
       "@": path.resolve("src/renderer"),
     },
+  },
+  optimizeDeps: {
+    exclude: [DESIGN_SYSTEM_PACKAGE],
   },
   build: {
     outDir: path.resolve("dist/renderer"),
