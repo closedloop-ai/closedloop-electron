@@ -6,6 +6,7 @@ import {
   CloudCommandExecutor,
   type CloudCommandExecutorOptions,
 } from "../src/main/cloud-command-executor.js";
+import { SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR } from "../src/main/loop-command-preparer.js";
 import { COMMAND_SIGNING_REJECTION_REASONS } from "../src/shared/contracts.js";
 import type {
   DesktopCancelEvent,
@@ -608,6 +609,44 @@ test("rejects unsigned commands before queueing when server signing support is e
     },
   ]);
   assert.deepEqual(events, []);
+  assert.deepEqual(executor.getStats(), { activeCommands: 0, queueDepth: 0 });
+});
+
+test("emits terminal error with managed-key message when command preparation fails", async () => {
+  const events: Array<
+    Omit<
+      DesktopCommandStreamEvent,
+      "protocolVersion" | "messageId" | "timestamp"
+    >
+  > = [];
+  const commandId = "0196b1bb-7a00-7000-8000-000000000008";
+
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: (event) => events.push(event),
+    prepareCommandForExecution: async () => {
+      throw new Error(SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR);
+    },
+  });
+  executor.setConnected(true);
+  executor.enqueue(buildCommand(commandId, { command: "symphony_loop" }));
+
+  await waitFor(() =>
+    events.some(
+      (event) =>
+        event.commandId === commandId && event.eventType === "error",
+    ),
+  );
+
+  const errorEvent = events.find(
+    (event) => event.commandId === commandId && event.eventType === "error",
+  );
+  assert.ok(errorEvent);
+  assert.deepEqual(errorEvent.data, {
+    type: "error",
+    terminal: true,
+    error: SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR,
+  });
   assert.deepEqual(executor.getStats(), { activeCommands: 0, queueDepth: 0 });
 });
 

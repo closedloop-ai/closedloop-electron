@@ -11,10 +11,26 @@ type FetchExecutionCredentials = (
   options: FetchLoopExecutionCredentialsOptions,
 ) => Promise<Record<string, unknown>>;
 
+export const SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR =
+  "Signed loop launch requires a desktop-managed key with request signing; the active config uses a manually configured key or cannot load its signing key. Re-run managed onboarding.";
+
+export type ManagedPopSigningReadinessReason =
+  | "ready"
+  | "user_created_key"
+  | "signing_unavailable"
+  | "missing_signer";
+
+export type ManagedPopSigningReadiness = {
+  provenance: ApiKeyProvenance;
+  signingReady: boolean;
+  reason: ManagedPopSigningReadinessReason;
+};
+
 export interface LoopCommandPreparationOptions {
   getApiOrigin: () => string;
   getApiKey: () => string | null;
   getApiKeyProvenance: () => ApiKeyProvenance | null;
+  getManagedPopSigningReadiness?: () => ManagedPopSigningReadiness;
   getComputeTargetId: () => string | null;
   signDesktopRequest?: DesktopPopSigner;
   onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
@@ -38,6 +54,7 @@ export async function prepareLoopCommandForExecution(
   if (!loopId || body.userIntent === undefined) {
     return command;
   }
+  assertManagedSigningReady(options);
   const apiKey = options.getApiKey();
   const computeTargetId = options.getComputeTargetId();
   if (!(apiKey && computeTargetId)) {
@@ -58,6 +75,40 @@ export async function prepareLoopCommandForExecution(
       onDesktopPopUnavailable: options.onDesktopPopUnavailable,
     }),
   };
+}
+
+function getDefaultReadiness(
+  options: LoopCommandPreparationOptions,
+): ManagedPopSigningReadiness {
+  const provenance = options.getApiKeyProvenance() ?? "USER_CREATED";
+  const signingReady =
+    provenance === "DESKTOP_MANAGED" && options.signDesktopRequest !== undefined;
+  return {
+    provenance,
+    signingReady,
+    reason: signingReady
+      ? "ready"
+      : provenance === "DESKTOP_MANAGED"
+        ? "missing_signer"
+        : "user_created_key",
+  };
+}
+
+function assertManagedSigningReady(
+  options: LoopCommandPreparationOptions,
+): void {
+  const readiness =
+    options.getManagedPopSigningReadiness?.() ?? getDefaultReadiness(options);
+  if (readiness.provenance === "DESKTOP_MANAGED" && readiness.signingReady) {
+    return;
+  }
+  if (readiness.provenance === "DESKTOP_MANAGED") {
+    options.onDesktopPopUnavailable?.(
+      "loop_execution_credentials",
+      readiness.reason,
+    );
+  }
+  throw new Error(SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
