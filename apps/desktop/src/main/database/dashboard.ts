@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { DashboardSummary, TokenAnalytics, AnalyticsData, WorkflowQueryData } from "./types.js";
+import type { DashboardSummary, TokenAnalytics, AnalyticsData, WorkflowQueryData } from "../../shared/agent-db-contract.js";
 
 export function createDashboardQueries(db: DatabaseSync) {
   const totalSessionsStmt = db.prepare("SELECT COUNT(*) as count FROM sessions");

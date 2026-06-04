@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { SessionRow, SessionWithAgents } from "./types.js";
+import type { SessionRow, SessionWithAgents } from "../../shared/agent-db-contract.js";
 
 // Terminal session statuses (vendor + canonical AgentSession vocabulary). A
 // session not in this set is treated as active. Writes are owned by

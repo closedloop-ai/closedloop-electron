@@ -4,6 +4,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-
 
 type SettingsTab = "relay-gateway" | "security" | "policies" | "binary-paths" | "labs";
 
+/** Renderer view of ApiKeyStore.getStatus() (src/main/api-key-store.ts). */
+interface ApiKeyStatusView {
+  hasApiKey: boolean;
+  source: "safeStorage" | "environment" | "none";
+  environmentVariable?: string;
+  provenance?: string;
+}
+
 export function SettingsPanel() {
   const [tab, setTab] = useState<SettingsTab>("relay-gateway");
   const [settings, setSettings] = useState<Record<string, unknown> | null>(null);
@@ -193,9 +201,19 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
 
 function SecurityTab({ settings }: { settings: Record<string, unknown> | null }) {
   const [dangerousAutoApprove, setDangerousAutoApprove] = useState(false);
+  const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatusView | null>(null);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+
+  const refreshApiKeyStatus = async () => {
+    const status = await window.desktopApi.getApiKeyStatus();
+    setApiKeyStatus(status as ApiKeyStatusView);
+  };
 
   useEffect(() => {
     window.desktopApi.getDangerousAutoApprove().then(setDangerousAutoApprove);
+    void refreshApiKeyStatus();
   }, []);
 
   const handleDangerousToggle = async () => {
@@ -204,6 +222,44 @@ function SecurityTab({ settings }: { settings: Record<string, unknown> | null })
     setDangerousAutoApprove(next);
   };
 
+  const handleSetApiKey = async () => {
+    const value = apiKeyInput.trim();
+    if (!value) return;
+    setApiKeyBusy(true);
+    setApiKeyError(null);
+    try {
+      await window.desktopApi.setApiKey(value);
+      setApiKeyInput("");
+      await refreshApiKeyStatus();
+    } catch (err) {
+      setApiKeyError(err instanceof Error ? err.message : "Failed to set API key");
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
+  const handleClearApiKey = async () => {
+    setApiKeyBusy(true);
+    setApiKeyError(null);
+    try {
+      await window.desktopApi.clearApiKey();
+      setApiKeyInput("");
+      await refreshApiKeyStatus();
+    } catch (err) {
+      setApiKeyError(err instanceof Error ? err.message : "Failed to clear API key");
+    } finally {
+      setApiKeyBusy(false);
+    }
+  };
+
+  const apiKeyConfigured = apiKeyStatus?.hasApiKey === true;
+  const apiKeyFromEnv = apiKeyStatus?.source === "environment";
+  const apiKeyValueLabel = !apiKeyStatus
+    ? "..."
+    : apiKeyConfigured
+      ? `Configured (${apiKeyStatus.source}${apiKeyStatus.provenance ? `, ${apiKeyStatus.provenance}` : ""})`
+      : "Not configured";
+
   return (
     <div className="space-y-4 mt-4">
       <Card>
@@ -211,8 +267,48 @@ function SecurityTab({ settings }: { settings: Record<string, unknown> | null })
           <CardTitle>Security Settings</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <ConfigRow label="API Key" value={(settings?.apiKeyStatus ?? "unknown") as string} />
+          <ConfigRow label="API Key" value={apiKeyValueLabel} />
           <ConfigRow label="Auth Mode" value={(settings?.authMode as string) ?? "standard"} />
+
+          <div className="space-y-2 pt-2 border-t">
+            <p className="text-sm font-medium">Manage API Key</p>
+            <p className="text-xs text-[var(--muted-foreground)]">
+              {apiKeyFromEnv
+                ? "An API key is provided via an environment variable. Setting one here stores an encrypted key that takes precedence."
+                : "Set a ClosedLoop API key (starts with sk_live_). It is stored encrypted at rest."}
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleSetApiKey(); }}
+                placeholder="sk_live_..."
+                autoComplete="off"
+                className="flex-1 text-xs font-mono bg-[var(--input)] border rounded px-2 py-1 text-[var(--foreground)]"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleSetApiKey}
+                disabled={apiKeyBusy || apiKeyInput.trim().length === 0}
+              >
+                Set
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleClearApiKey}
+                disabled={apiKeyBusy || !apiKeyConfigured}
+                className="text-[var(--destructive)]"
+              >
+                Clear
+              </Button>
+            </div>
+            {apiKeyError && (
+              <p className="text-xs text-[var(--destructive)]">{apiKeyError}</p>
+            )}
+          </div>
 
           <div className="flex items-center justify-between pt-2 border-t">
             <div>

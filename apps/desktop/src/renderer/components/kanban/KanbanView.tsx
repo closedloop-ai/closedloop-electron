@@ -2,7 +2,7 @@ import { useState } from "react";
 import { KanbanBoardLayout, KanbanColumn, KanbanCardFrame } from "@closedloop-ai/design-system/components/ui/layout/kanban-board";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
 import { useQueryCache } from "../../hooks/useQueryCache";
-import type { SessionWithAgents } from "../../../main/database/types";
+import type { SessionWithAgents } from "../../../shared/agent-db-contract";
 
 function PlayIcon() { return <span className="text-blue-400 text-xs">&#9654;</span>; }
 function ClockIcon() { return <span className="text-yellow-400 text-xs">&#9201;</span>; }

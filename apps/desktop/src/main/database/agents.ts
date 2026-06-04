@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentRow, AgentHierarchyNode } from "./types.js";
+import type { AgentRow, AgentHierarchyNode } from "../../shared/agent-db-contract.js";
 
 // Read-only agent store; writes are owned by `lifecycle.ts`.
 export function createAgentStore(db: DatabaseSync) {

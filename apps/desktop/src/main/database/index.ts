@@ -7,7 +7,7 @@ import { createAgentStore } from "./agents.js";
 import { createEventStore } from "./events.js";
 import { createTokenUsageStore } from "./token-usage.js";
 import { createDashboardQueries } from "./dashboard.js";
-import type { DashboardSummary } from "./types.js";
+import type { DashboardSummary } from "../../shared/agent-db-contract.js";
 
 export interface AgentDatabase {
   /**

@@ -5,7 +5,7 @@ import { SessionTable } from "@closedloop-ai/design-system/components/ui/composi
 import { MonitorDot, Activity, Bot, Coins } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import type { SessionRow } from "@closedloop-ai/design-system/components/ui/types";
-import type { SessionWithAgents } from "../../../main/database/types";
+import type { SessionWithAgents } from "../../../shared/agent-db-contract";
 
 const OVERVIEW_CARD_CLASS_NAME =
   "min-h-0 gap-0 rounded-xl border-border/70 bg-card shadow-sm [&>div:first-child]:px-5 [&>div:first-child]:pt-4 [&>div:first-child]:pb-2 [&_[data-slot='card-description']]:text-[10px] [&_[data-slot='card-title']]:text-[1.75rem] [&>div:last-child]:px-5 [&>div:last-child]:pb-4 [&>div:last-child]:text-xs";

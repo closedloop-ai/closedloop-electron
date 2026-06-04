@@ -2,7 +2,7 @@ import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitive
 import { MonitorDot, Bot, Zap, Layers } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import { SessionsView } from "../sessions/SessionsView";
-import type { DashboardSummary } from "../../../main/database/types";
+import type { DashboardSummary } from "../../../shared/agent-db-contract";
 
 const SUMMARY_CARD_CLASS_NAME =
   "min-h-0 rounded-xl border-border/70 bg-card shadow-sm [&>div:first-child]:px-5 [&>div:first-child]:pt-4 [&>div:first-child]:pb-2 [&_[data-slot='card-description']]:text-[10px] [&_[data-slot='card-title']]:text-[1.7rem] [&>div:last-child]:px-5 [&>div:last-child]:pb-4 [&>div:last-child]:text-xs";

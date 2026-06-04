@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { EventRow, EventCountByType } from "./types.js";
+import type { EventRow, EventCountByType, EventWithSession } from "../../shared/agent-db-contract.js";
 
 // Read-only event store; event writes are owned by `lifecycle.ts`.
 export function createEventStore(db: DatabaseSync) {
@@ -37,15 +37,15 @@ export function createEventStore(db: DatabaseSync) {
     };
   }
 
-  function toEventWithSession(raw: Record<string, unknown> | undefined): (EventRow & { sessionName: string | null }) | undefined {
+  function toEventWithSession(raw: Record<string, unknown> | undefined): EventWithSession | undefined {
     if (!raw) return undefined;
     const row = toRow(raw);
     if (!row) return undefined;
     return { ...row, sessionName: (raw.session_name as string) ?? null };
   }
 
-  function eventsWithSessionToList(raws: Record<string, unknown>[]): (EventRow & { sessionName: string | null })[] {
-    return raws.map(toEventWithSession).filter(Boolean) as (EventRow & { sessionName: string | null })[];
+  function eventsWithSessionToList(raws: Record<string, unknown>[]): EventWithSession[] {
+    return raws.map(toEventWithSession).filter(Boolean) as EventWithSession[];
   }
 
   function rowsToList(raws: Record<string, unknown>[]): EventRow[] {
@@ -61,11 +61,11 @@ export function createEventStore(db: DatabaseSync) {
       return rowsToList(getBySessionAndAgentStmt.all(sessionId, agentId) as Record<string, unknown>[]);
     },
 
-    getAll(): (EventRow & { sessionName: string | null })[] {
+    getAll(): EventWithSession[] {
       return eventsWithSessionToList(getAllStmt.all() as Record<string, unknown>[]);
     },
 
-    getWithSession(sessionId: string): (EventRow & { sessionName: string | null })[] {
+    getWithSession(sessionId: string): EventWithSession[] {
       return eventsWithSessionToList(getEventsWithSessionStmt.all(sessionId) as Record<string, unknown>[]);
     },
 

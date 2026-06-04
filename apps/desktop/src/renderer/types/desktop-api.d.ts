@@ -10,7 +10,7 @@ import type {
   AnalyticsData,
   WorkflowQueryData,
   AgentHierarchyNode,
-} from "../../main/database/types";
+} from "../../shared/agent-db-contract";
 
 export interface AgentMonitorUrl {
   url: string | null;

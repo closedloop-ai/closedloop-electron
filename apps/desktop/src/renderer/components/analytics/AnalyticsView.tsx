@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
 import { Coins, ArrowDownToLine, ArrowUpFromLine, DatabaseZap } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
-import type { AnalyticsData } from "../../../main/database/types";
+import type { AnalyticsData } from "../../../shared/agent-db-contract";
 
 const AnalyticsDetails = lazy(() =>
   import("./AnalyticsDetails").then((module) => ({

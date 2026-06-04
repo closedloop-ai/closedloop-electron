@@ -4,7 +4,7 @@ import { DonutChart } from "@closedloop-ai/design-system/components/ui/primitive
 import { RankedBar } from "@closedloop-ai/design-system/components/ui/primitives/ranked-bar";
 import { ActivityHeatmap } from "@closedloop-ai/design-system/components/ui/primitives/activity-heatmap";
 import { SegmentedBar } from "@closedloop-ai/design-system/components/ui/primitives/segmented-bar";
-import type { AnalyticsData } from "../../../main/database/types";
+import type { AnalyticsData } from "../../../shared/agent-db-contract";
 
 const PALETTE = [
   "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",

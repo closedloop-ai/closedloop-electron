@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { Topbar } from "./components/layout/Topbar";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { SessionNavContext } from "./components/sessions/session-nav";
 
 const DashboardPage = lazy(() => import("./components/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })));
@@ -203,6 +204,7 @@ export default function App() {
         runtimeHealthy={healthy}
       />
       <div className="flex flex-col flex-1 min-w-0">
+        <UpdateBanner />
         <Topbar
           collapsed={collapsed}
           onToggleSidebar={toggleSidebar}

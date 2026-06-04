@@ -11,7 +11,7 @@ import type {
   AnalyticsData,
   WorkflowQueryData,
   AgentHierarchyNode,
-} from "./database/types.js";
+} from "../shared/agent-db-contract.js";
 import { contextBridge, ipcRenderer } from "electron";
 
 const desktopApi = {
