@@ -30,6 +30,7 @@ export default defineConfig({
     sourcemap: true,
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
+      input: path.resolve("src/renderer/design-system/index.html"),
       onLog(level, log) {
         if (
           level === "warn" &&

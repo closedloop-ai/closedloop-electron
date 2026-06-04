@@ -16,6 +16,10 @@ import type { createLifecycle, HookData } from "./database/lifecycle.js";
 
 const HOST = "127.0.0.1";
 const MAX_BODY_BYTES = 8 * 1024 * 1024; // hook payloads (incl. large tool_input) cap
+const CLAUDE_HOOK_EVENT_PATH = "/api/hooks/event";
+const CODEX_HOOK_EVENT_PATH = "/api/hooks/codex/event";
+const PROVIDER_HINT_FIELD = "__provider";
+type HookHarness = "claude" | "codex";
 
 /** The `{ hook_type, data }` envelope every hook handler POSTs. */
 const HookEnvelopeSchema = z.object({
@@ -44,13 +48,16 @@ export interface AgentHookListenerOptions {
  * First-party in-process replacement for the vendor agent-monitor sidecar's
  * HTTP receiver. Binds `127.0.0.1:4820` and accepts the unchanged hook payload
  * contract:
- *   - `GET  /api/health`      → 200 `{ ok: true }`
- *   - `POST /api/hooks/event` → `{ hook_type, data }`, snake_case `data`.
+ *   - `GET  /api/health`            → 200 `{ ok: true }`
+ *   - `POST /api/hooks/event`       → Claude `{ hook_type, data }`
+ *   - `POST /api/hooks/codex/event` → Codex `{ hook_type, data }`
  *
  * Every request responds 200 fail-soft so a hook never blocks an agent turn.
  * FEA-1407 sandbox gating is enforced BEFORE any DB write — with no sandbox
  * configured, nothing is captured (fail-closed; do not ungate — defense in
- * depth so out-of-sandbox sessions never enter the local DB).
+ * depth so out-of-sandbox sessions never enter the local DB). Provider
+ * attribution is route-owned; payload-level provider hints are rejected as
+ * spoofable data before lifecycle writes or live DB-change emits.
  */
 export class AgentHookListener {
   private readonly options: AgentHookListenerOptions;
@@ -129,14 +136,22 @@ export class AgentHookListener {
       this.json(res, 200, { ok: true });
       return;
     }
-    if (req.method === "POST" && req.url === "/api/hooks/event") {
-      this.handleHookEvent(req, res);
+    if (req.method === "POST" && req.url === CLAUDE_HOOK_EVENT_PATH) {
+      this.handleHookEvent(req, res, "claude");
+      return;
+    }
+    if (req.method === "POST" && req.url === CODEX_HOOK_EVENT_PATH) {
+      this.handleHookEvent(req, res, "codex");
       return;
     }
     this.json(res, 404, { ok: false, error: "not found" });
   }
 
-  private handleHookEvent(req: IncomingMessage, res: ServerResponse): void {
+  private handleHookEvent(
+    req: IncomingMessage,
+    res: ServerResponse,
+    harness: HookHarness,
+  ): void {
     readBody(req, MAX_BODY_BYTES)
       .then((body) => {
         try {
@@ -149,9 +164,13 @@ export class AgentHookListener {
           const { hook_type: hookType, data: rawData } = parsed.data;
           const data = (rawData ?? {}) as HookData;
 
-          // Harness is stamped at the boundary from the transport hint the
-          // codex handler injects; everything else is Claude Code.
-          const harness = data.__provider === "codex" ? "codex" : "claude";
+          // Provider selection must not be attacker-controlled hook JSON. Codex
+          // attribution comes from CODEX_HOOK_EVENT_PATH, so any payload-level
+          // provider hint is spoofable and rejected before lifecycle writes.
+          if (Object.prototype.hasOwnProperty.call(data, PROVIDER_HINT_FIELD)) {
+            this.json(res, 200, { ok: true, skipped: "invalid-provider-hint" });
+            return;
+          }
 
           // FEA-1407: gate LOCAL capture on the sandbox BEFORE any write. Empty
           // sandbox ⇒ isSessionInSandbox returns false ⇒ nothing is captured.
@@ -189,16 +208,25 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let tooLarge = false;
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > maxBytes) {
-        reject(new Error("payload too large"));
-        req.destroy();
+        tooLarge = true;
+        chunks.length = 0;
         return;
       }
-      chunks.push(chunk);
+      if (!tooLarge) {
+        chunks.push(chunk);
+      }
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("end", () => {
+      if (tooLarge) {
+        reject(new Error("payload too large"));
+        return;
+      }
+      resolve(Buffer.concat(chunks).toString("utf-8"));
+    });
     req.on("error", reject);
   });
 }

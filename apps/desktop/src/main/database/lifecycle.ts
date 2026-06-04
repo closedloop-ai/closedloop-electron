@@ -35,7 +35,6 @@ export interface HookData {
   prompt?: string;
   description?: string;
   session_name?: string;
-  __provider?: string;
   [key: string]: unknown;
 }
 

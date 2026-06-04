@@ -451,7 +451,8 @@ function BinaryPathsTab() {
 }
 
 const LAB_FLAGS: { key: string; label: string; description: string; category: string; requiresRestart?: boolean }[] = [
-  { key: "agentMonitorEnabled", label: "Agent Dashboard", description: "Enable the Claude Dashboard for session and agent observability.", category: "Monitoring" },
+  { key: "agentMonitorEnabled", label: "Agent Dashboard", description: "Enable the legacy sidecar-backed Agent Dashboard.", category: "Monitoring", requiresRestart: true },
+  { key: "agentDashboardDesignSystemEnabled", label: "Agent Dashboard Design System", description: "Use the in-process design-system dashboard instead of the legacy dashboard.", category: "Labs", requiresRestart: true },
   { key: "planExtractionEnabled", label: "Plan Extraction", description: "Enable Plans / plan extraction UI in the Agent Dashboard.", category: "Monitoring" },
   { key: "commandSigningEnforcementEnabled", label: "Command Signing Enforcement", description: "Require ED25519 signatures on browser commands.", category: "Security", requiresRestart: true },
   { key: "verboseLogging", label: "Verbose Logging", description: "Enable verbose gateway logging for debugging.", category: "Debugging" },

@@ -134,13 +134,12 @@ export interface AgentSessionSyncServiceOptions {
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
   /**
-   * FEA-1497: the shared in-process DB connection. When provided, the service
-   * reads through it (no per-cycle open/close, no path resolution, no
-   * existsSync guard) — production passes the single openAgentDatabase()
-   * connection. When omitted, the service falls back to opening the path from
-   * getUserDataPath (used by unit tests with a self-owned fixture DB).
+   * The optional design-system in-process DB connection. When provided, the
+   * service reads through it (no per-cycle open/close, no path resolution, no
+   * existsSync guard). When omitted or null, the service falls back to the
+   * legacy sidecar dashboard.db path from getUserDataPath.
    */
-  getConnection?: () => DatabaseSync;
+  getConnection?: () => DatabaseSync | null;
   onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
 }
 
@@ -149,6 +148,8 @@ export class AgentSessionSyncService {
   private timer: NodeJS.Timeout | null = null;
   private started = false;
   private syncing = false;
+  private activeSyncToken: symbol | null = null;
+  private sourceStateGeneration = 0;
   private observedTopUpdatedAt: string | null = null;
   private observedIdsAtTopUpdatedAt = new Set<string>();
   private lastIncrementalBatchAttemptedAtMs = 0;
@@ -199,8 +200,37 @@ export class AgentSessionSyncService {
 
   stop(): void {
     this.started = false;
-    this.syncing = false;
     this.clearTimer();
+    this.resetSourceState();
+  }
+
+  /**
+   * Clear every cursor, queue, retry, dead-letter, pending chunk, and
+   * attribution cache that is derived from the currently selected dashboard
+   * source. Availability disable and source transitions must restart from the
+   * next selected source instead of replaying stale work from the prior one.
+   */
+  resetSourceState(): void {
+    this.sourceStateGeneration += 1;
+    this.activeSyncToken = null;
+    this.syncing = false;
+    this.observedTopUpdatedAt = null;
+    this.observedIdsAtTopUpdatedAt = new Set<string>();
+    this.lastIncrementalBatchAttemptedAtMs = 0;
+    this.featureDisabledForRelaySession = false;
+    this.firstAckReceived = false;
+    this.incrementalQueue = [];
+    this.incrementalQueuedIds.clear();
+    this.backfillQueue = [];
+    this.backfillQueuedIds.clear();
+    this.attributionCache.attributionByCwd.clear();
+    this.attributionCache.launchMetadataRootByCwd.clear();
+    this.attributionCache.repoFullNameByPath.clear();
+    this.timeoutCountById.clear();
+    this.rateLimitedCountById.clear();
+    this.nextRetryAfterMs.clear();
+    this.deadLetteredIds.clear();
+    this.pendingChunks = null;
   }
 
   refresh(): void {
@@ -251,12 +281,15 @@ export class AgentSessionSyncService {
     if (this.syncing || !this.shouldRun()) {
       return;
     }
+    const syncToken = Symbol("agent-session-sync");
+    const sourceStateGeneration = this.sourceStateGeneration;
+    this.activeSyncToken = syncToken;
     this.syncing = true;
 
     try {
-      // FEA-1497: prefer the shared in-process connection. Only fall back to
-      // resolving + existsSync-guarding a standalone DB path when no shared
-      // connection is injected (unit tests).
+      // The caller owns the dashboard source by mode: design-system injects an
+      // in-process connection, legacy falls back to dashboard.db on disk, and
+      // disabled mode stops this service before it reaches the source lookup.
       const sharedDb = this.options.getConnection?.() ?? null;
       const dbPath = sharedDb
         ? null
@@ -451,6 +484,17 @@ export class AgentSessionSyncService {
       }
 
       const ack = await this.options.sendBatch(batch);
+      if (
+        this.activeSyncToken !== syncToken ||
+        this.sourceStateGeneration !== sourceStateGeneration ||
+        !this.started
+      ) {
+        gatewayLog.debug(
+          TAG,
+          "ignoring agent-session batch ack from a stale dashboard source",
+        );
+        return;
+      }
       this.handleBatchAck(syncMode, syncIds, batch.sessionCount, accumulatedBytes, ack);
     } catch (error) {
       gatewayLog.warn(
@@ -458,7 +502,10 @@ export class AgentSessionSyncService {
         `sync failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
-      this.syncing = false;
+      if (this.activeSyncToken === syncToken) {
+        this.activeSyncToken = null;
+        this.syncing = false;
+      }
     }
   }
 

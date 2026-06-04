@@ -1,0 +1,5 @@
+{
+  "//": "Scopes this dir to CommonJS (parent apps/desktop is type:module). cost-pricing.js is build-time-copied into the generated agent-monitor server/lib (a CommonJS tree), mirroring scripts/agent-monitor-plans. Not part of the desktop ESM build.",
+  "type": "commonjs",
+  "private": true
+}

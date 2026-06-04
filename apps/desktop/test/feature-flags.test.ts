@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { resolveAgentDashboardMode } from "../src/main/agent-dashboard-mode.js";
 import { SettingsStore } from "../src/main/settings-store.js";
 import { FEATURE_FLAGS, type FlagKey } from "../src/shared/feature-flags.js";
 
@@ -38,6 +39,11 @@ function makeStore(seed: Record<string, unknown> = {}): SettingsStore {
 test("getFlag returns registry default when key is absent from store", () => {
   const store = makeStore();
   assert.equal(store.getFlag("agentMonitorEnabled"), true, "agentMonitorEnabled defaults to true");
+  assert.equal(
+    store.getFlag("agentDashboardDesignSystemEnabled"),
+    false,
+    "design-system dashboard is opt-in and defaults to false",
+  );
   assert.equal(store.getFlag("planExtractionEnabled"), false, "planExtractionEnabled defaults to false");
 });
 
@@ -117,6 +123,38 @@ test("legacy getters return same values as getFlag", () => {
   assert.equal(
     store.getCommandSigningEnforcementEnabled(),
     store.getFlag("commandSigningEnforcementEnabled"),
+  );
+});
+
+test("agent dashboard mode preserves legacy default and requires strict design flag true", () => {
+  assert.equal(
+    resolveAgentDashboardMode({
+      getAgentMonitorEnabled: () => true,
+      getFlag: () => false,
+    }),
+    "legacy",
+  );
+  assert.equal(
+    resolveAgentDashboardMode({
+      getAgentMonitorEnabled: () => true,
+      getFlag: () => true,
+    }),
+    "design-system",
+  );
+  assert.equal(
+    resolveAgentDashboardMode({
+      getAgentMonitorEnabled: () => false,
+      getFlag: () => true,
+    }),
+    "disabled",
+  );
+  assert.equal(
+    resolveAgentDashboardMode({
+      getAgentMonitorEnabled: () => true,
+      getFlag: () => "true" as unknown as boolean,
+    }),
+    "legacy",
+    "tampered non-boolean values must not opt into design-system mode",
   );
 });
 

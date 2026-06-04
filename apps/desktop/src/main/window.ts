@@ -1,44 +1,138 @@
-import { app, BrowserWindow, protocol } from "electron";
-import { readFileSync, existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { app, BrowserWindow, protocol, shell } from "electron";
+import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
+import type { AgentDashboardMode } from "./agent-dashboard-mode.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const RENDERER_DIR = path.resolve(__dirname, "..", "renderer");
+const DESIGN_RENDERER_DIR = path.join(RENDERER_DIR, "design-system");
+const DESIGN_RENDERER_URL = "app://renderer/design-system/index.html";
 const APP_PROTOCOL = "app";
+const EXTERNAL_LINK_HOSTS = new Set([
+  "app.closedloop.ai",
+  "closedloop.ai",
+  "docs.closedloop.ai",
+  "github.com",
+]);
+
+let appProtocolRegistered = false;
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html",
   ".js": "text/javascript",
   ".css": "text/css",
   ".json": "application/json",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
   ".png": "image/png",
+  ".webp": "image/webp",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
   ".map": "application/json",
 };
+
+const APP_PROTOCOL_EXTENSIONS = new Set(Object.keys(MIME_TYPES));
 
 function mimeType(ext: string): string {
   return MIME_TYPES[ext] ?? "application/octet-stream";
 }
 
 function registerAppProtocol(): void {
+  if (appProtocolRegistered) {
+    return;
+  }
+
   protocol.handle(APP_PROTOCOL, (request) => {
-    const url = new URL(request.url);
-    const relativePath = url.pathname.replace(/^\//, "");
-    const filePath = path.join(RENDERER_DIR, relativePath);
+    return serveAppProtocolAsset(request);
+  });
+  appProtocolRegistered = true;
+}
 
-    if (!existsSync(filePath)) {
-      return new Response("Not found", { status: 404 });
+function unregisterAppProtocol(): void {
+  if (!appProtocolRegistered) {
+    return;
+  }
+
+  const protocolWithUnhandle = protocol as typeof protocol & {
+    unhandle?: (scheme: string) => void;
+  };
+  if (typeof protocolWithUnhandle.unhandle === "function") {
+    protocolWithUnhandle.unhandle(APP_PROTOCOL);
+  }
+  appProtocolRegistered = false;
+}
+
+function serveAppProtocolAsset(request: Request): Response {
+  if (request.method !== "GET") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  let url: URL;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return new Response("Bad request", { status: 400 });
+  }
+
+  if (url.protocol !== `${APP_PROTOCOL}:` || url.hostname !== "renderer") {
+    return new Response("Not found", { status: 404 });
+  }
+
+  let decodedPathname: string;
+  try {
+    decodedPathname = decodeURIComponent(url.pathname);
+  } catch {
+    return new Response("Bad request", { status: 400 });
+  }
+
+  if (
+    !decodedPathname.startsWith("/design-system/") ||
+    decodedPathname.includes("\0") ||
+    decodedPathname.includes("\\")
+  ) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const relativePath = decodedPathname.replace(/^\//, "");
+  const pathParts = relativePath.split("/");
+  if (pathParts.includes("..") || path.isAbsolute(relativePath)) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  const filePath = path.resolve(RENDERER_DIR, relativePath);
+  if (!isPathInside(filePath, DESIGN_RENDERER_DIR)) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (!APP_PROTOCOL_EXTENSIONS.has(ext)) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  if (!existsSync(filePath)) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  let realRoot: string;
+  let realFile: string;
+  try {
+    realRoot = realpathSync(DESIGN_RENDERER_DIR);
+    realFile = realpathSync(filePath);
+    if (!statSync(realFile).isFile() || !isPathInside(realFile, realRoot)) {
+      return new Response("Forbidden", { status: 403 });
     }
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
 
-    const data = readFileSync(filePath);
-    const ext = path.extname(filePath);
-    return new Response(data, {
-      status: 200,
-      headers: { "Content-Type": mimeType(ext) },
-    });
+  const data = readFileSync(realFile);
+  return new Response(data, {
+    status: 200,
+    headers: { "Content-Type": mimeType(ext) },
   });
 }
 
@@ -46,12 +140,19 @@ export class DesktopWindow {
   private browserWindow: BrowserWindow | null = null;
   private disposing = false;
   private quitting = false;
+  private allowedRendererUrl: string | null = null;
+  private agentDashboardMode: AgentDashboardMode;
+
+  constructor(options: { agentDashboardMode: AgentDashboardMode }) {
+    this.agentDashboardMode = options.agentDashboardMode;
+  }
 
   init(): void {
     if (this.browserWindow) {
       return;
     }
 
+    this.allowedRendererUrl = null;
     this.browserWindow = new BrowserWindow({
       width: 1280,
       height: 800,
@@ -60,7 +161,11 @@ export class DesktopWindow {
       webPreferences: {
         contextIsolation: true,
         sandbox: false,
-        preload: path.join(__dirname, "preload.js"),
+        preload: this.resolvePreloadPath(),
+        additionalArguments:
+          this.agentDashboardMode === "design-system"
+            ? ["--closedloop-agent-dashboard-design-system"]
+            : [],
       },
     });
     this.browserWindow.once("ready-to-show", () => {
@@ -73,36 +178,86 @@ export class DesktopWindow {
       event.preventDefault();
       this.browserWindow?.hide();
     });
+    this.installNavigationGuards();
 
     void this.loadContent();
   }
 
-  private async loadContent(): Promise<void> {
-    registerAppProtocol();
+  /**
+   * Recreate the BrowserWindow with the preload and renderer target for the
+   * requested Agent Dashboard mode. Electron preloads are fixed at window
+   * creation time, so runtime availability disable must replace the window
+   * instead of only navigating the existing design-system renderer.
+   */
+  reloadForAgentDashboardMode(agentDashboardMode: AgentDashboardMode): void {
+    const wasVisible = this.browserWindow?.isVisible() ?? false;
+    this.agentDashboardMode = agentDashboardMode;
 
-    // The privileged renderer window carries the full `desktopApi` preload
-    // bridge (approvals, settings, logs, DB reads, binary-path mutations). The
-    // Vite dev server (http://localhost:5173) is only ever loaded into it when a
-    // developer explicitly opts in via CL_RENDERER_DEV_SERVER=1 — otherwise any
-    // local process that binds :5173 first could serve renderer JS into the
-    // privileged window. The default path (including every packaged build) is
-    // the custom `app://` protocol, which also skips a pointless failed loadURL
-    // on the common dev workflow where no Vite server is running.
-    const devServerUrl =
-      !app.isPackaged && process.env.CL_RENDERER_DEV_SERVER === "1"
-        ? process.env.CL_RENDERER_DEV_SERVER_URL || "http://localhost:5173"
-        : null;
-
-    if (devServerUrl) {
-      try {
-        await this.browserWindow!.loadURL(devServerUrl);
-        return;
-      } catch {
-        // Dev server unreachable — fall through to the packaged renderer.
-      }
+    if (this.browserWindow) {
+      this.dispose();
     }
 
-    await this.browserWindow!.loadURL(`app://renderer/index.html`);
+    this.init();
+    if (wasVisible) {
+      this.show();
+    }
+  }
+
+  private async loadContent(): Promise<void> {
+    if (this.agentDashboardMode !== "design-system") {
+      unregisterAppProtocol();
+      const rendererPath = resolveLegacyRendererPath();
+      this.allowRendererUrl(pathToFileURL(rendererPath).toString());
+      await this.browserWindow!.loadFile(rendererPath);
+      return;
+    }
+
+    registerAppProtocol();
+    this.allowRendererUrl(DESIGN_RENDERER_URL);
+    await this.browserWindow!.loadURL(DESIGN_RENDERER_URL);
+  }
+
+  private installNavigationGuards(): void {
+    if (!this.browserWindow) {
+      return;
+    }
+
+    this.browserWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (isAllowedExternalUrl(url)) {
+        void shell.openExternal(url);
+      }
+      return { action: "deny" };
+    });
+
+    this.browserWindow.webContents.on("will-navigate", (event, url) => {
+      if (!this.isAllowedNavigation(url)) {
+        event.preventDefault();
+      }
+    });
+  }
+
+  private isAllowedNavigation(url: string): boolean {
+    if (!this.allowedRendererUrl) {
+      return false;
+    }
+    try {
+      return new URL(url).href === this.allowedRendererUrl;
+    } catch {
+      return false;
+    }
+  }
+
+  private allowRendererUrl(url: string): void {
+    this.allowedRendererUrl = new URL(url).href;
+  }
+
+  private resolvePreloadPath(): string {
+    return path.join(
+      __dirname,
+      this.agentDashboardMode === "design-system"
+        ? "preload-design-system.js"
+        : "preload.js",
+    );
   }
 
   getWindow(): BrowserWindow | null {
@@ -126,6 +281,40 @@ export class DesktopWindow {
     this.disposing = true;
     this.browserWindow.close();
     this.browserWindow = null;
+    this.allowedRendererUrl = null;
     this.disposing = false;
   }
+}
+
+function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      EXTERNAL_LINK_HOSTS.has(parsed.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPathInside(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function resolveLegacyRendererPath(): string {
+  if (app.isPackaged) {
+    return path.join(__dirname, "..", "..", "src", "renderer", "index.html");
+  }
+
+  const cwd = process.cwd();
+  const inDesktopCwdPath = path.join(cwd, "src", "renderer", "index.html");
+  if (existsSync(inDesktopCwdPath)) {
+    return inDesktopCwdPath;
+  }
+
+  return path.join(cwd, "apps", "desktop", "src", "renderer", "index.html");
 }

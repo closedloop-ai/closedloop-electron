@@ -3,9 +3,9 @@
 /**
  * @file codex-hook-handler.js
  * @description Codex CLI hook handler (FEA-1503; first-party, moved out of the
- * deleted vendor scripts tree). Mirrors the Claude `hook-handler.js` but injects
- * `__provider: "codex"` into the forwarded payload so the in-process listener
- * stamps the session row with `harness='codex'`.
+ * deleted vendor scripts tree). Mirrors the Claude `hook-handler.js` but posts
+ * to the Codex-owned listener route so the in-process listener stamps the
+ * session row with `harness='codex'` without trusting payload data.
  *
  * Zero-dependency, plain CommonJS, fail-silent — a hook must never block a Codex
  * turn. Codex calls this once per lifecycle event (SessionStart, UserPromptSubmit,
@@ -32,21 +32,18 @@ process.stdin.on("end", () => {
     parsedData = { raw: input };
   }
 
-  // Mark the payload as Codex-sourced so the listener stamps harness='codex'.
-  // Field name is dunder-prefixed to make it obvious this is a transport hint,
-  // not a Codex-native field.
-  const enrichedData =
+  const data =
     parsedData && typeof parsedData === "object" && !Array.isArray(parsedData)
-      ? { ...parsedData, __provider: "codex" }
-      : { raw: parsedData, __provider: "codex" };
+      ? parsedData
+      : { raw: parsedData };
 
-  const payload = JSON.stringify({ hook_type: hookType, data: enrichedData });
+  const payload = JSON.stringify({ hook_type: hookType, data });
 
   const req = http.request(
     {
       hostname: "127.0.0.1",
       port,
-      path: "/api/hooks/event",
+      path: "/api/hooks/codex/event",
       method: "POST",
       headers: {
         "Content-Type": "application/json",

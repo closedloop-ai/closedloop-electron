@@ -136,20 +136,17 @@ Typical log locations:
 
 The Diagnostics tab shows the current in-memory gateway log plus a bounded previous-session tail read from `main.log` at startup. First-run or unreadable log files must not block boot; return an empty previous-session tail and continue.
 
-## Agent Monitor (in-process)
+## Agent Monitor
 
-> **Status (FEA-1503):** the agent monitor is FULLY FIRST-PARTY and IN-PROCESS.
-> The third-party agent-monitor vendor tool is GONE — no sidecar, no generated
-> tree, no vendor dependency, no vendor-generated hook handler.
-> `src/main/agent-monitor-listener.ts` (`AgentHookListener`) owns
-> `127.0.0.1:4820` in the main process and writes through the `node:sqlite`
-> repository (`src/main/database/`) via the hook lifecycle state machine
-> (`database/lifecycle.ts`). The renderer is a first-party React app
-> (`src/renderer/`) — there is NO iframe. The first-party collection layer
-> (`src/main/collectors/`) imports historical sessions on boot and watches the
-> live transcript files of all five agent CLIs, writing through the same DB. The
-> cloud relay and cost-reconciliation worker read that DB through the shared
-> connection.
+> **Status (FEA-1504):** Agent Monitor has three boot modes. The default user
+> experience is the legacy sidecar-backed dashboard (`agentMonitorEnabled=true`,
+> `agentDashboardDesignSystemEnabled=false`): pnpm-managed upstream packages are
+> materialized into `.generated/agent-monitor`, shipped unpacked, and rendered in
+> the legacy iframe shell. The in-process design-system dashboard is a Labs
+> opt-in only. When `agentDashboardDesignSystemEnabled` is not the literal
+> boolean `true`, the main process must not load `src/main/database/`,
+> `src/main/collectors/`, `AgentHookListener`, `desktop:db:*`, or the `app://`
+> design renderer path.
 
 The desktop app provides local Claude Code (and opt-in Codex) session/agent
 observability. It powers the **Dashboard** and the agent nav items (Sessions,
@@ -158,22 +155,27 @@ is gated by the persisted `agentMonitorEnabled` desktop setting, which
 **defaults ON**; when disabled, the agent nav items are hidden and only the
 Gateway section remains.
 
-- **Hook listener:** `src/main/agent-monitor-listener.ts` binds `127.0.0.1:4820`
-  in the main process and accepts the hook payload (`POST /api/hooks/event`,
-  `GET /api/health`). Each event is gated by the FEA-1407 sandbox check,
-  harness-stamped from `__provider`, and applied by the lifecycle state machine
-  in one `BEGIN IMMEDIATE` transaction. Started from `startAgentCapture()` (boot
-  + the enable path) **only when `agentMonitorEnabled` is true**, before the
-  gateway-start try-block; a bind failure (EADDRINUSE) degrades to "no monitor"
-  rather than blocking boot.
-- **Collection layer (`src/main/collectors/`):** `CollectorManager` runs a
-  best-effort boot bulk import and live file watchers for all five agent CLIs,
-  writing through the first-party `importSession` into the same in-process DB.
-  It is started/stopped alongside the listener (and stopped in `shutdown()`
-  BEFORE `agentDatabase.close()` so a late fs-watch import can't hit a closed
-  DB). Every parsed session is sandbox-gated (FEA-1407, fail-closed) before any
-  write. Import is idempotent via a per-(session, event_type) high-water-mark on
-  `created_at`. Watchers self-heal if a data dir doesn't exist at boot.
+- **Legacy sidecar (default):** `src/main/agent-monitor-sidecar.ts` launches the
+  generated Claude-Code-Agent-Monitor runtime tree. `build:agent-monitor`
+  materializes the tree from pnpm-managed upstream packages; package/stage logic
+  must keep `.generated/agent-monitor` available for default users.
+- **Design-system runtime (Labs opt-in):** `src/main/agent-dashboard-design-system-runtime.ts`
+  is the only module allowed to import `src/main/database/`,
+  `src/main/collectors/`, `AgentHookListener`, or register `desktop:db:*`. It is
+  reached only through `await import()` after boot mode resolves to
+  `design-system`.
+- **Disabled mode:** `agentMonitorEnabled=false` starts no sidecar, no
+  design-system runtime, no dashboard-derived sync source, and no
+  dashboard-derived cost source.
+- **Hook listener:** in design-system mode, `src/main/agent-monitor-listener.ts`
+  binds `127.0.0.1:4820` in the main process and accepts the hook payload
+  (`POST /api/hooks/event`, `GET /api/health`). Each event is gated by the
+  FEA-1407 sandbox check, harness-stamped from `__provider`, and applied by the
+  lifecycle state machine.
+- **Collection layer (`src/main/collectors/`):** design-system mode uses
+  `CollectorManager` for best-effort boot bulk import and live file watchers for
+  all five agent CLIs, writing through the first-party `importSession` into the
+  same in-process DB.
 - **Fixed port (differs from the gateway):** `127.0.0.1:4820`
   (`AGENT_MONITOR_PORT` in `src/shared/contracts.ts`). It MUST be fixed — the
   hook handler POSTs to `127.0.0.1:${CLAUDE_DASHBOARD_PORT||4820}`, baked into

@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -74,13 +74,16 @@ import {
 import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
-import { AgentHookListener } from "./agent-monitor-listener.js";
-import { CollectorManager } from "./collectors/collector-manager.js";
-import { openAgentDatabase } from "./database/index.js";
-import { coerceDbId } from "./database/ipc-validation.js";
-import { createLifecycle } from "./database/lifecycle.js";
-import { detectBillingMode } from "./billing-mode-detector.js";
-import { AgentSessionSyncService } from "./agent-session-sync-service.js";
+import {
+  type AgentDashboardMode,
+  resolveAgentDashboardMode,
+} from "./agent-dashboard-mode.js";
+import type { AgentDashboardDesignSystemRuntime } from "./agent-dashboard-design-system-runtime.js";
+import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
+import {
+  AgentSessionSyncService,
+  resolveAgentMonitorDatabasePath,
+} from "./agent-session-sync-service.js";
 import {
   createAnthropicAdminKeyStore,
   createOpenAiAdminKeyStore,
@@ -91,8 +94,9 @@ import {
   type ReconciliationQuery,
 } from "./reconciliation-store.js";
 import {
-  loadMeteredUsageRows,
+  loadMeteredUsageRowsFromDisk,
   reconciliationCutoffIso,
+  type MeteredUsageRow,
 } from "./reconciliation-worker.js";
 import { CostReconciliationService } from "./cost-reconciliation-service.js";
 import { ClaudeCodeAnalyticsService } from "./claude-code-analytics-service.js";
@@ -300,9 +304,9 @@ export class DesktopApplication {
   private readonly server: DesktopGatewayServer;
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
-  private readonly agentHookListener: AgentHookListener;
-  private readonly collectorManager: CollectorManager;
-  private readonly agentDatabase: ReturnType<typeof openAgentDatabase>;
+  private readonly agentDashboardMode: AgentDashboardMode;
+  private readonly agentMonitor: AgentMonitorSidecar | null;
+  private agentDashboardDesignSystem: AgentDashboardDesignSystemRuntime | null = null;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly costReconciliation: CostReconciliationService;
   private readonly claudeCodeAnalytics: ClaudeCodeAnalyticsService;
@@ -406,62 +410,32 @@ export class DesktopApplication {
     this.loopTokenStore = new LoopTokenStore();
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
-    this.desktopWindow = new DesktopWindow();
-    this.agentDatabase = openAgentDatabase(
-      path.join(app.getPath("userData"), "agent-dashboard.sqlite"),
+    this.agentDashboardMode = resolveAgentDashboardMode(this.settingsStore);
+    this.desktopWindow = new DesktopWindow({
+      agentDashboardMode: this.agentDashboardMode,
+    });
+    this.agentMonitor =
+      this.agentDashboardMode === "legacy"
+        ? new AgentMonitorSidecar({
+            onTerminalFailure: (reason: string) => {
+              const notification = new Notification({
+                title: "ClosedLoop Agent Monitor",
+                body: reason,
+              });
+              notification.show();
+              // Latch the failure and route through refreshTrayState() — the
+              // single owner of tray state — so the degraded indicator survives
+              // subsequent refreshes. A direct tray.setState here would be
+              // stomped by the next refreshTrayState() call.
+              this.agentMonitorFailed = true;
+              this.agentMonitorFailureReason = reason;
+              this.refreshTrayState();
+            },
+          })
+        : null;
+    this.agentMonitor?.setSandboxBaseDirectory(
+      this.settingsStore.getSandboxBaseDirectory(),
     );
-    // FEA-1497: the in-process hook lifecycle owns all session/agent/event/token
-    // writes; it stamps billing_mode at ingest and pushes a live-update signal
-    // to the renderer after each event. The AgentHookListener replaces the
-    // vendor sidecar as the owner of 127.0.0.1:4820.
-    const agentLifecycle = createLifecycle(this.agentDatabase.connection, {
-      tokenUsage: this.agentDatabase.tokenUsage,
-      detectBillingMode,
-      emit: (sessionId: string) => {
-        this.agentDatabase.sessions.handleSessionMutation(sessionId);
-        this.desktopWindow
-          .getWindow()
-          ?.webContents.send("desktop:db:changed", { sessionId });
-      },
-      log: (message: string) => gatewayLog.warn("agent-lifecycle", message),
-    });
-    this.agentHookListener = new AgentHookListener({
-      lifecycle: agentLifecycle,
-      getSandboxBaseDirectory: () =>
-        this.settingsStore.getSandboxBaseDirectory(),
-      log: (message: string) => gatewayLog.info("agent-monitor-listener", message),
-      onBindError: (reason: string) => {
-        const notification = new Notification({
-          title: "ClosedLoop Agent Monitor",
-          body: reason,
-        });
-        notification.show();
-        // Latch the failure and route through refreshTrayState() — the single
-        // owner of tray state — so the degraded indicator survives subsequent
-        // refreshes.
-        this.agentMonitorFailed = true;
-        this.agentMonitorFailureReason = reason;
-        this.refreshTrayState();
-      },
-    });
-    // FEA-1503: in-process multi-harness collection (boot import + live file
-    // watchers for all five agent CLIs), writing through the first-party
-    // importSession into the same in-process DB. Sandbox-gated per session
-    // (FEA-1407, fail-closed). Claude's live watcher is gated off when hooks are
-    // installed (hooks own live Claude capture; boot historical import still runs).
-    this.collectorManager = new CollectorManager({
-      agentDatabase: this.agentDatabase,
-      detectBillingMode,
-      getSandboxBaseDirectory: () => this.settingsStore.getSandboxBaseDirectory(),
-      stateDir: path.join(app.getPath("userData"), "agent-monitor"),
-      emit: (sessionId?: string) => {
-        this.desktopWindow
-          .getWindow()
-          ?.webContents.send("desktop:db:changed", { sessionId });
-      },
-      shouldWatchClaude: () => !isAgentMonitorHooksEnabled(),
-      log: (message: string) => gatewayLog.info("agent-collectors", message),
-    });
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -714,7 +688,7 @@ export class DesktopApplication {
       },
     });
     this.agentSessionSync = new AgentSessionSyncService({
-      isAgentMonitorEnabled: () => this.settingsStore.getAgentMonitorEnabled(),
+      isAgentMonitorEnabled: () => this.isAgentMonitorEnabled(),
       isRelayReady: () =>
         this.serverAgentSessionSyncSupported &&
         this.cloudStatus.state === "online",
@@ -722,9 +696,11 @@ export class DesktopApplication {
       getSandboxBaseDirectory: () =>
         this.settingsStore.getSandboxBaseDirectory(),
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
-      // FEA-1497: read from the shared in-process connection (the relay no
-      // longer opens the vendor dashboard.db per cycle).
-      getConnection: () => this.agentDatabase.connection,
+      getUserDataPath: () => app.getPath("userData"),
+      getConnection: () =>
+        this.agentDashboardMode === "design-system"
+          ? this.agentDashboardDesignSystem?.connection ?? null
+          : null,
       onBatchOutcome: (event) => {
         Observability.agentSessionSyncBatchFailed(event);
       },
@@ -733,10 +709,9 @@ export class DesktopApplication {
     // the org-level vendor Admin key stores (safeStorage, never exposed to the
     // renderer) and the reconciliation store, and reconciles the local
     // genai-prices estimate against what each vendor actually billed.
-    // FEA-1497: loadUsageRows reads the recent metered window from the SHARED
-    // in-process connection (the second consumer of the old dashboard.db,
-    // repointed in lockstep with the relay so the atomic cutover does not
-    // silently break nightly reconciliation).
+    // Agent Dashboard usage rows are mode-owned: legacy reads dashboard.db from
+    // disk, design-system reads the in-process connection, and disabled returns
+    // no rows so the dashboard code path stays inert.
     // One Anthropic Admin key store, shared by reconciliation (compares the local
     // estimate against the billed cost_report) and Claude Code analytics (reads
     // Anthropic's own per-user usage estimate). Sharing the store means a key
@@ -746,11 +721,7 @@ export class DesktopApplication {
       anthropicKeyStore,
       openaiKeyStore: createOpenAiAdminKeyStore(),
       store: new ReconciliationStore(),
-      loadUsageRows: () =>
-        loadMeteredUsageRows(
-          this.agentDatabase.connection,
-          reconciliationCutoffIso(new Date()),
-        ),
+      loadUsageRows: () => this.loadAgentDashboardMeteredUsageRows(),
       log: (message) => gatewayLog.info("cost-reconciliation", message),
     });
     // FEA-1436: Claude Code per-user usage view. Read-only, main-only, and uses
@@ -817,6 +788,9 @@ export class DesktopApplication {
     this.tray.setAgentMonitorEnabled(this.settingsStore.getAgentMonitorEnabled());
     this.tray.setPaused(this.cloudCommandsPaused);
     this.syncPendingApprovalsToTray();
+    if (this.agentDashboardMode === "design-system") {
+      await this.ensureAgentDashboardDesignSystemRuntime();
+    }
     this.desktopWindow.init();
     this.bootReadyForOnboarding = true;
     void this.drainQueuedOnboardingHandoffs();
@@ -843,20 +817,19 @@ export class DesktopApplication {
     loopSleepRecovery.init();
 
     // Independent of the gateway, but fully feature-gated. When enabled, start
-    // the sidecar fire-and-forget BEFORE the gateway try-block so a
-    // gateway-start failure never prevents it from running, and a sidecar
-    // failure never blocks or fails app boot. The relay sync service follows
-    // the same flag, so disabling Agent Monitor leaves only dormant wiring in
-    // the desktop shell and no background sync loop. Hook repair remains
-    // opt-in and self-healing.
-    if (this.settingsStore.getAgentMonitorEnabled()) {
-      this.startAgentCapture();
+    // the selected capture stack BEFORE the gateway try-block so gateway-start
+    // failures do not prevent it from running, and dashboard failures never
+    // block or fail app boot. The relay sync service follows the same flag, so
+    // disabling Agent Monitor leaves only dormant wiring in the desktop shell
+    // and no background sync loop. Hook repair remains opt-in and self-healing.
+    if (this.isAgentMonitorEnabled()) {
+      await this.startAgentCapture();
     }
 
     // FEA-1435/1436: schedule nightly cost reconciliation. Independent of the
     // Agent Monitor toggle — the scheduled tick no-ops unless a vendor Admin key
-    // is configured, and loadUsageRows returns [] when the shared in-process DB
-    // has no metered rows in the window.
+    // is configured, and loadUsageRows returns [] when the selected dashboard
+    // source is disabled or has no metered rows in the window.
     this.costReconciliation.start();
 
     try {
@@ -1454,24 +1427,131 @@ export class DesktopApplication {
     return this.settingsStore.getPlanExtractionEnabled();
   }
 
+  private getAgentMonitorUrl(): string | null {
+    if (this.agentDashboardMode === "legacy") {
+      return this.agentMonitor?.getUrl() ?? null;
+    }
+    if (this.agentDashboardMode === "design-system") {
+      return this.agentDashboardDesignSystem?.getUrl() ?? null;
+    }
+    return null;
+  }
+
+  private isAgentMonitorReady(): boolean {
+    if (this.agentDashboardMode === "legacy") {
+      return this.agentMonitor?.isReady() ?? false;
+    }
+    if (this.agentDashboardMode === "design-system") {
+      return this.agentDashboardDesignSystem?.isReady() ?? false;
+    }
+    return false;
+  }
+
+  private loadAgentDashboardMeteredUsageRows(): MeteredUsageRow[] {
+    if (!this.isAgentMonitorEnabled()) {
+      return [];
+    }
+
+    const cutoffIso = reconciliationCutoffIso(new Date());
+    if (this.agentDashboardMode === "design-system") {
+      return (
+        this.agentDashboardDesignSystem?.loadMeteredUsageRows(cutoffIso) ?? []
+      );
+    }
+
+    if (this.agentDashboardMode === "legacy") {
+      return loadMeteredUsageRowsFromDisk(
+        resolveAgentMonitorDatabasePath(app.getPath("userData")),
+        cutoffIso,
+      );
+    }
+
+    return [];
+  }
+
+  private async ensureAgentDashboardDesignSystemRuntime(): Promise<AgentDashboardDesignSystemRuntime | null> {
+    if (this.agentDashboardMode !== "design-system") {
+      return null;
+    }
+    if (!this.agentDashboardDesignSystem) {
+      const { createAgentDashboardDesignSystemRuntime } = await import(
+        "./agent-dashboard-design-system-runtime.js"
+      );
+      this.agentDashboardDesignSystem =
+        createAgentDashboardDesignSystemRuntime({
+          userDataPath: app.getPath("userData"),
+          getSandboxBaseDirectory: () =>
+            this.settingsStore.getSandboxBaseDirectory(),
+          getWindow: () => this.desktopWindow.getWindow(),
+          onTerminalFailure: (reason) => {
+            const notification = new Notification({
+              title: "ClosedLoop Agent Monitor",
+              body: reason,
+            });
+            notification.show();
+            this.agentMonitorFailed = true;
+            this.agentMonitorFailureReason = reason;
+            this.refreshTrayState();
+          },
+          log: (scope, message) => gatewayLog.info(scope, message),
+        });
+      this.agentDashboardDesignSystem.registerIpcHandlers();
+    }
+    return this.agentDashboardDesignSystem;
+  }
+
   /**
-   * Start the in-process agent capture stack: start the :4820 hook listener,
-   * self-heal the installed hook commands, start the in-process multi-harness
-   * collectors (boot import + live watchers), and start the cloud relay sync.
-   * Shared by boot() and the enable path of applyAgentMonitorSetting().
+   * Start the selected Agent Dashboard capture stack. The in-process
+   * design-system runtime is dynamically imported only inside the flag-on mode.
    */
-  private startAgentCapture(): void {
-    void this.agentHookListener.start();
+  private async startAgentCapture(): Promise<void> {
+    if (!this.isAgentMonitorEnabled()) {
+      return;
+    }
+
+    if (this.agentDashboardMode === "legacy") {
+      void this.agentMonitor?.start();
+      syncAgentMonitorHooksOnBoot();
+      this.agentSessionSync.start();
+      return;
+    }
+
+    const runtime = await this.ensureAgentDashboardDesignSystemRuntime();
+    if (!runtime) {
+      return;
+    }
+    runtime.start();
     syncAgentMonitorHooksOnBoot();
-    this.collectorManager.start();
     this.agentSessionSync.start();
+  }
+
+  private async stopAgentCapture(
+    options: { closeDesignSystem?: boolean } = {},
+  ): Promise<void> {
+    if (this.agentDashboardMode === "legacy") {
+      await this.agentMonitor?.stop();
+    } else if (this.agentDashboardMode === "design-system") {
+      await this.agentDashboardDesignSystem?.stop();
+    }
+    this.agentSessionSync.stop();
+    if (
+      options.closeDesignSystem &&
+      this.agentDashboardMode === "design-system" &&
+      this.agentDashboardDesignSystem
+    ) {
+      this.agentDashboardDesignSystem.close();
+      this.agentDashboardDesignSystem = null;
+    }
   }
 
   private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {
     this.tray.setAgentMonitorEnabled(enabled);
 
     if (enabled) {
-      this.startAgentCapture();
+      if (this.agentDashboardMode === "design-system") {
+        this.desktopWindow.reloadForAgentDashboardMode("design-system");
+      }
+      await this.startAgentCapture();
       return;
     }
 
@@ -1485,9 +1565,10 @@ export class DesktopApplication {
       );
     }
 
-    this.collectorManager.stop();
-    await this.agentHookListener.stop();
-    this.agentSessionSync.stop();
+    await this.stopAgentCapture({ closeDesignSystem: true });
+    if (this.agentDashboardMode === "design-system") {
+      this.desktopWindow.reloadForAgentDashboardMode("disabled");
+    }
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-tab", "settings");
@@ -1509,7 +1590,12 @@ export class DesktopApplication {
     }
     this.desktopWindow
       .getWindow()
-      ?.webContents.send("desktop:navigate-tab", "claude-dashboard");
+      ?.webContents.send(
+        "desktop:navigate-tab",
+        this.agentDashboardMode === "design-system"
+          ? "dashboard"
+          : "claude-dashboard",
+      );
   }
 
   private notifyCommandKeysChanged(): void {
@@ -1950,17 +2036,9 @@ export class DesktopApplication {
     this.queueStatsTelemetryDebounce.cancel();
     this.clearActiveCommandKeyTargetContext("shutdown");
     this.commandKeyReconciler.stop();
-    this.agentSessionSync.stop();
-    // Stop every reader/writer of the shared connection BEFORE closing it: the
-    // relay (above), the file collectors (so a late fs-watch import cannot hit a
-    // closed DB), the in-process listener (so a late hook POST cannot either),
-    // and the cost-reconciliation timers. stop() on the listener is idempotent,
-    // so the shutdown sequence below (which also stops it before server.stop) is
-    // a no-op second call. Close the connection last.
-    this.collectorManager.stop();
-    await this.agentHookListener.stop();
+    await this.stopAgentCapture();
     this.costReconciliation.stop();
-    this.agentDatabase.close();
+    this.agentDashboardDesignSystem?.close();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -1972,7 +2050,7 @@ export class DesktopApplication {
       },
       cloudSocket: this.cloudSocket,
       commandExecutor: this.commandExecutor,
-      agentMonitor: this.agentHookListener,
+      agentMonitor: { stop: () => this.stopAgentCapture() },
       server: this.server,
       desktopWindow: this.desktopWindow,
       tray: this.tray,
@@ -2710,26 +2788,66 @@ export class DesktopApplication {
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-app-version", () => app.getVersion());
     ipcMain.handle("desktop:get-agent-monitor-url", () => ({
-      url: this.agentHookListener.getUrl(),
-      ready: this.agentHookListener.isReady(),
+      url: this.getAgentMonitorUrl(),
+      ready: this.isAgentMonitorReady(),
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
-    // FEA-1497: the in-process listener ingests live via the :4820 hook path;
-    // there is no cold-start file import to report in Phase 1. (Filesystem
-    // import progress returns with the multi-harness importers in Phase 2.)
-    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", () => null);
-    // FEA-1497: live hook ingestion has no batch "reprocess" to re-run in
-    // Phase 1 (the cold-start filesystem import returns in Phase 2). Report
-    // unavailable rather than destructively clearing the live DB.
-    ipcMain.handle("desktop:reprocess-agent-logs", () => {
+    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
+      if (this.agentDashboardMode !== "legacy") {
+        return null;
+      }
+      const baseUrl = this.agentMonitor?.getUrl();
+      if (!baseUrl) {
+        return null;
+      }
+      try {
+        const response = await fetch(`${baseUrl}/api/import/progress`, {
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (!response.ok) {
+          return null;
+        }
+        return await response.json();
+      } catch {
+        return null;
+      }
+    });
+    ipcMain.handle("desktop:reprocess-agent-logs", async () => {
       if (!this.isAgentMonitorEnabled()) {
         return { ok: false, error: "Agent Dashboard is disabled in Settings." };
       }
-      return {
-        ok: false,
-        error: "Reprocessing returns with multi-harness import (Phase 2).",
-      };
+      if (this.agentDashboardMode !== "legacy" || !this.agentMonitor) {
+        return {
+          ok: false,
+          error: "Reprocessing is not available in design-system dashboard mode.",
+        };
+      }
+      try {
+        await this.agentMonitor.stop();
+        const agentMonitorDir = path.join(
+          app.getPath("userData"),
+          "agent-monitor",
+        );
+        for (const name of [
+          "dashboard.db",
+          "dashboard.db-wal",
+          "dashboard.db-shm",
+        ]) {
+          try {
+            rmSync(path.join(agentMonitorDir, name));
+          } catch {
+            /* file may not exist */
+          }
+        }
+        void this.agentMonitor.start();
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
     });
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
@@ -2748,7 +2866,7 @@ export class DesktopApplication {
           };
         }
         const result = setAgentMonitorHooksEnabled(enabled === true);
-        if (result.ok) {
+        if (result.ok && this.agentDashboardMode === "design-system") {
           // Hooks own live Claude capture, so toggling them must re-evaluate
           // the Claude file-watcher gating (`shouldWatchClaude`): hooks-on ⇒ no
           // Claude watcher (avoid double-counting turns), hooks-off ⇒ Claude
@@ -2756,15 +2874,14 @@ export class DesktopApplication {
           // boot-time decision is recomputed; boot import is idempotent, so the
           // restart is safe. (CLAUDE.md: toggles must update in-memory side
           // effects together — no one-way restart guards.)
-          this.collectorManager.stop();
-          this.collectorManager.start();
+          this.agentDashboardDesignSystem?.restartCollectors();
         }
         return result;
       },
     );
     // FEA-1444 (carried into FEA-1497): opt-in Codex hook ingestion. Gated on
-    // the master Agent Dashboard toggle; the in-process listener stamps
-    // harness='codex' from the __provider hint the codex handler injects.
+    // the master Agent Dashboard toggle; the Codex hook handler uses a
+    // route-owned listener path so payload data cannot choose harness='codex'.
     ipcMain.handle("desktop:get-agent-monitor-codex-hooks-opt-in", () =>
       this.isAgentMonitorEnabled() && isAgentMonitorCodexHooksOptIn(),
     );
@@ -2855,6 +2972,10 @@ export class DesktopApplication {
         if (typeof partial.agentMonitorEnabled === "boolean") {
           nextPartial.agentMonitorEnabled = partial.agentMonitorEnabled;
         }
+        if (typeof partial.agentDashboardDesignSystemEnabled === "boolean") {
+          nextPartial.agentDashboardDesignSystemEnabled =
+            partial.agentDashboardDesignSystemEnabled;
+        }
         if (typeof partial.planExtractionEnabled === "boolean") {
           nextPartial.planExtractionEnabled = partial.planExtractionEnabled;
         }
@@ -2925,10 +3046,15 @@ export class DesktopApplication {
             normalizeScopePath(currentSettings.sandboxBaseDirectory)
         ) {
           await seedReposConfig(selectedSandbox);
-          // FEA-1497: the in-process hook listener reads the sandbox base
-          // directory live (getSandboxBaseDirectory callback) on every event,
-          // so a sandbox change needs no restart — the next hook POST is gated
-          // against the new directory automatically.
+          if (this.agentDashboardMode === "legacy" && this.agentMonitor) {
+            this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
+            if (this.isAgentMonitorEnabled()) {
+              await this.agentMonitor.stop();
+              void this.agentMonitor.start();
+            }
+          }
+          // Design-system mode reads the sandbox directory through a live
+          // callback on every hook/collector event, so it needs no restart.
         }
 
         // Notify renderer of flag changes so the Feature Flags panel can refresh.
@@ -3653,97 +3779,6 @@ export class DesktopApplication {
       }
       this.restartCloudSocket();
       return appliedConfig;
-    });
-
-    ipcMain.handle("desktop:db:get-sessions", () => {
-      if (!this.isAgentMonitorEnabled()) return [];
-      return this.agentDatabase.sessions.getAll();
-    });
-
-    ipcMain.handle("desktop:db:get-session", (_event, id: unknown) => {
-      if (!this.isAgentMonitorEnabled()) return undefined;
-      const sessionId = coerceDbId(id);
-      if (sessionId === null) return undefined;
-      return this.agentDatabase.sessions.getById(sessionId);
-    });
-
-    ipcMain.handle("desktop:db:get-agents", (_event, sessionId: unknown) => {
-      if (!this.isAgentMonitorEnabled()) return [];
-      const id = coerceDbId(sessionId);
-      if (id === null) return [];
-      return this.agentDatabase.agents.getBySession(id);
-    });
-
-    ipcMain.handle(
-      "desktop:db:get-events",
-      (_event, sessionId: unknown, agentId?: unknown) => {
-        if (!this.isAgentMonitorEnabled()) return [];
-        const sid = coerceDbId(sessionId);
-        if (sid === null) return [];
-        // A missing or malformed agentId falls back to the session-wide query.
-        const aid = coerceDbId(agentId);
-        if (aid !== null) {
-          return this.agentDatabase.events.getBySessionAndAgent(sid, aid);
-        }
-        return this.agentDatabase.events.getBySession(sid);
-      },
-    );
-
-    ipcMain.handle("desktop:db:get-dashboard-summary", () => {
-      if (!this.isAgentMonitorEnabled()) {
-        return { totalSessions: 0, activeSessions: 0, totalAgents: 0, totalEvents: 0, eventTypeCount: 0, totalTokens: 0, recentSessions: [] };
-      }
-      return this.agentDatabase.getSummary();
-    });
-
-    ipcMain.handle("desktop:db:get-sessions-with-details", () => {
-      if (!this.isAgentMonitorEnabled()) return [];
-      return this.agentDatabase.sessions.getAllWithDetails();
-    });
-
-    ipcMain.handle("desktop:db:get-event-feed", () => {
-      if (!this.isAgentMonitorEnabled()) return [];
-      return this.agentDatabase.events.getAll();
-    });
-
-    ipcMain.handle("desktop:db:get-events-with-session", (_event, sessionId: unknown) => {
-      if (!this.isAgentMonitorEnabled()) return [];
-      const id = coerceDbId(sessionId);
-      if (id === null) return [];
-      return this.agentDatabase.events.getWithSession(id);
-    });
-
-    ipcMain.handle("desktop:db:get-event-count-by-type", () => {
-      if (!this.isAgentMonitorEnabled()) return [];
-      return this.agentDatabase.events.getCountByType();
-    });
-
-    ipcMain.handle("desktop:db:get-token-analytics", () => {
-      if (!this.isAgentMonitorEnabled()) {
-        return { totalInputTokens: 0, totalOutputTokens: 0, totalCacheReadTokens: 0, totalCacheWriteTokens: 0, byModel: [], byDay: [] };
-      }
-      return this.agentDatabase.dashboard.getTokenAnalytics();
-    });
-
-    ipcMain.handle("desktop:db:get-agent-hierarchy", (_event, sessionId: unknown) => {
-      if (!this.isAgentMonitorEnabled()) return [];
-      const id = coerceDbId(sessionId);
-      if (id === null) return [];
-      return this.agentDatabase.agents.getBySessionWithChildren(id, this.agentDatabase.events);
-    });
-
-    ipcMain.handle("desktop:db:get-analytics", () => {
-      if (!this.isAgentMonitorEnabled()) {
-        return { tokens: { totalInputTokens: 0, totalOutputTokens: 0, totalCacheReadTokens: 0, totalCacheWriteTokens: 0, byModel: [], byDay: [] }, eventsByType: [], toolUsage: [], dailyEvents: [], sessionsByStatus: [], agentsByStatus: [], agentsByType: [], totalSessions: 0, totalAgents: 0, totalEvents: 0 };
-      }
-      return this.agentDatabase.dashboard.getAnalytics();
-    });
-
-    ipcMain.handle("desktop:db:get-workflow-data", () => {
-      if (!this.isAgentMonitorEnabled()) {
-        return { stats: { totalSessions: 0, totalAgents: 0, totalSubagents: 0, avgSubagents: 0, successRate: 100, avgDepth: 0, avgDurationSec: 0, totalCompactions: 0, avgCompactions: 0, topFlow: null }, orchestration: { sessionCount: 0, mainCount: 0, subagentTypes: [], edges: [], outcomes: [], compactions: { total: 0, sessions: 0 } }, toolFlow: { transitions: [], toolCounts: [] }, effectiveness: [], cooccurrence: [] };
-      }
-      return this.agentDatabase.dashboard.getWorkflowData();
     });
 
     // Verify no channel name collision: grep confirms 'desktop:get-managed-key-hint-state'

@@ -45,5 +45,14 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Assert design-system boundary
+        run: pnpm -C apps/desktop assert:design-system-boundary
+
+      - name: Assert design-system flag-off boot
+        run: pnpm -C apps/desktop test:boot:design-system-off
+
+      - name: Measure Agent Dashboard storage
+        run: pnpm -C apps/desktop measure:agent-dashboard-storage
+
       - name: Run tests
         run: pnpm test
