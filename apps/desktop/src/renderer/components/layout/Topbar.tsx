@@ -8,7 +8,9 @@ interface TopbarProps {
 const NAV_LABELS: Record<string, string> = {
   dashboard: "Sessions",
   kanban: "My Tasks",
-  agents: "Agents",
+  activity: "Activity",
+  analytics: "Analytics",
+  workflows: "Workflows",
   approvals: "Approvals",
   requests: "Requests",
   diagnostics: "Diagnostics",
