@@ -41,10 +41,23 @@ jobs:
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: ''
         run: |
-          if ! node -e "require('electron')" >/dev/null 2>&1; then
-            node node_modules/electron/install.js
-          fi
-          node -e "require('electron')"
+          electron_dir="$(node -p "const path = require('node:path'); path.dirname(require.resolve('electron/package.json'))")"
+          node "$electron_dir/install.js"
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const electronDir = path.dirname(require.resolve("electron/package.json"));
+          const pathFile = path.join(electronDir, "path.txt");
+          if (!fs.existsSync(pathFile)) {
+            throw new Error(`Electron path.txt missing after install at ${pathFile}`);
+          }
+
+          const electronBinary = require("electron");
+          if (!fs.existsSync(electronBinary)) {
+            throw new Error(`Electron binary missing after install at ${electronBinary}`);
+          }
+          NODE
 
       - name: Generate build info
         run: pnpm -r prebuild
