@@ -164,7 +164,10 @@ const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
-import { prepareLoopCommandForExecution } from "./loop-command-preparer.js";
+import {
+  prepareLoopCommandForExecution,
+  type ManagedPopSigningReadiness,
+} from "./loop-command-preparer.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
 import {
   buildUpdateAndRestartDisabledResult,
@@ -1173,12 +1176,44 @@ export class DesktopApplication {
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getApiKeyProvenance: () => this.apiKeyStore.getApiKeyProvenance(),
+      getManagedPopSigningReadiness: () =>
+        this.getManagedPopSigningReadiness(),
       getComputeTargetId: () =>
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       signDesktopRequest: (request) => this.signDesktopRequest(request),
       onDesktopPopUnavailable: (surface, reason) =>
         this.reportDesktopPopUnavailable(surface, reason),
     });
+  }
+
+  private getManagedPopSigningReadiness(): ManagedPopSigningReadiness {
+    const provenance = this.apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED";
+    switch (this.getConnectionSecurityStatus().mode) {
+      case "enhanced":
+        return {
+          provenance: "DESKTOP_MANAGED",
+          signingReady: true,
+          reason: "ready",
+        };
+      case "signing_unavailable":
+        return {
+          provenance: "DESKTOP_MANAGED",
+          signingReady: false,
+          reason: "signing_unavailable",
+        };
+      case "unconfigured":
+        return {
+          provenance,
+          signingReady: false,
+          reason: "missing_signer",
+        };
+      case "standard":
+        return {
+          provenance: "USER_CREATED",
+          signingReady: false,
+          reason: "user_created_key",
+        };
+    }
   }
 
   private getUpgradeCapableGatewayId(): string | null {

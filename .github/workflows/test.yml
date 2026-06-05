@@ -28,13 +28,18 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Node 24 Ubuntu runners have installed the electron package without a
+      # usable platform binary/path; verify first and repair only if needed.
+      - name: Verify Electron binary install
+        run: pnpm -C apps/desktop verify:electron-binary
 
       - name: Generate build info
         run: pnpm -r prebuild

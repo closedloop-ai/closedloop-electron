@@ -6,15 +6,29 @@ import {
   fetchLoopExecutionCredentials,
   type FetchLoopExecutionCredentialsOptions,
 } from "./loop-execution-credentials-client.js";
+import { SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR } from "./signed-loop-launch-error.js";
 
 type FetchExecutionCredentials = (
   options: FetchLoopExecutionCredentialsOptions,
 ) => Promise<Record<string, unknown>>;
 
+export type ManagedPopSigningReadinessReason =
+  | "ready"
+  | "user_created_key"
+  | "signing_unavailable"
+  | "missing_signer";
+
+export type ManagedPopSigningReadiness = {
+  provenance: ApiKeyProvenance;
+  signingReady: boolean;
+  reason: ManagedPopSigningReadinessReason;
+};
+
 export interface LoopCommandPreparationOptions {
   getApiOrigin: () => string;
   getApiKey: () => string | null;
   getApiKeyProvenance: () => ApiKeyProvenance | null;
+  getManagedPopSigningReadiness: () => ManagedPopSigningReadiness;
   getComputeTargetId: () => string | null;
   signDesktopRequest?: DesktopPopSigner;
   onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
@@ -38,6 +52,7 @@ export async function prepareLoopCommandForExecution(
   if (!loopId || body.userIntent === undefined) {
     return command;
   }
+  assertManagedSigningReady(options);
   const apiKey = options.getApiKey();
   const computeTargetId = options.getComputeTargetId();
   if (!(apiKey && computeTargetId)) {
@@ -58,6 +73,22 @@ export async function prepareLoopCommandForExecution(
       onDesktopPopUnavailable: options.onDesktopPopUnavailable,
     }),
   };
+}
+
+function assertManagedSigningReady(
+  options: LoopCommandPreparationOptions,
+): void {
+  const readiness = options.getManagedPopSigningReadiness();
+  if (readiness.provenance === "DESKTOP_MANAGED" && readiness.signingReady) {
+    return;
+  }
+  if (readiness.provenance === "DESKTOP_MANAGED") {
+    options.onDesktopPopUnavailable?.(
+      "loop_execution_credentials",
+      readiness.reason,
+    );
+  }
+  throw new Error(SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
