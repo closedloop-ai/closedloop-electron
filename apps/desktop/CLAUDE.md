@@ -181,7 +181,8 @@ Gateway section remains.
   hook handler POSTs to `127.0.0.1:${CLAUDE_DASHBOARD_PORT||4820}`, baked into
   `~/.claude/settings.json` at install time, so 4820 means hooks need zero
   per-hook env. 4820 is outside `PORT_PROBE_ORDER`, so it never collides with
-  the gateway. (FEA-1500 tracks migrating this transport later.)
+  the gateway. This loopback-HTTP transport is the accepted permanent design; a
+  unix-socket alternative was considered and declined (FEA-1500, obsoleted).
 - **Durable DB:** `app.getPath("userData")/agent-dashboard.sqlite` (schema in
   `src/main/database/schema.ts`), Node's built-in `node:sqlite`. Persisted
   collector caches live under `<userData>/agent-monitor/`.

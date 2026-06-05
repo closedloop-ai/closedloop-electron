@@ -10,7 +10,8 @@
  * Zero-dependency, plain CommonJS, fail-silent — a hook must never block a Codex
  * turn. Codex calls this once per lifecycle event (SessionStart, UserPromptSubmit,
  * PreToolUse, PostToolUse, Stop) with the event name as the single argv arg. The
- * port + path + payload envelope are a backward-compatible contract (FEA-1500).
+ * port + path + payload envelope must stay in sync with the in-process listener
+ * (src/main/agent-monitor-listener.ts); both ship in the same build.
  *
  * Part of FEA-1444 (opt-in Codex hook ingestion).
  */

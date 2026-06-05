@@ -6,13 +6,16 @@ import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
 import { isSessionInSandbox } from "./agent-session-sync-service.js";
 import type { createLifecycle, HookData } from "./database/lifecycle.js";
 
-// CLOSEDLOOP-TICKET FEA-1500: remove legacy HTTP hook listener on 4820 after
-// transport migration (FEA-1497 breaking-change discipline contract #1). The hook
-// commands baked into ~/.claude/settings.json and ~/.codex/hooks.json POST to
-// 127.0.0.1:4820/api/hooks/event; this in-process listener replaces the vendor
-// sidecar that previously owned that port. The contract (port, path, payload
-// envelope) MUST stay backward-compatible until all installs self-heal to a
-// lighter transport.
+// Fixed-port hook transport (127.0.0.1:4820). The first-party hook handlers
+// (resources/hooks/hook-handler.js, codex-hook-handler.js) POST the
+// `{ hook_type, data }` envelope to /api/hooks/event (Codex:
+// /api/hooks/codex/event); this in-process listener serves it. Port + path +
+// envelope must stay in sync with those handlers, but both ship in the same app
+// build and refresh together (refreshHandlerCopy rewrites the userData handler
+// copy on boot), so this is an INTERNAL contract — not externally pinned. 4820 is
+// fixed and outside PORT_PROBE_ORDER so hooks need zero per-hook env. This
+// loopback-HTTP transport is the accepted permanent design; a unix-socket
+// alternative was considered and declined (FEA-1500, obsoleted).
 
 const HOST = "127.0.0.1";
 const MAX_BODY_BYTES = 8 * 1024 * 1024; // hook payloads (incl. large tool_input) cap

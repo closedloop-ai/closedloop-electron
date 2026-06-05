@@ -12,8 +12,9 @@
  *
  * Zero-dependency, plain CommonJS, fail-silent: it runs via the Electron binary
  * as Node (ELECTRON_RUN_AS_NODE) from a userData copy, and must NEVER block or
- * fail a Claude turn. The port + path + payload envelope are a backward-compatible
- * contract baked into ~/.claude/settings.json (see FEA-1500); do not change them.
+ * fail a Claude turn. The port + path + payload envelope must stay in sync with
+ * the in-process listener (src/main/agent-monitor-listener.ts); both ship in the
+ * same build and refresh together, so do not change one without the other.
  */
 
 const http = require("http");
