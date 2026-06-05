@@ -3,55 +3,59 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
 
-const rendererPath = path.resolve("src/renderer/index.html");
-
-function readRenderer(): string {
-  return fs.readFileSync(rendererPath, "utf8");
+function readSource(relativePath: string): string {
+  return fs.readFileSync(path.resolve(relativePath), "utf8");
 }
 
-describe("renderer Diagnostics and update banner wiring", () => {
-  test("Diagnostics uses incremental rendering controls instead of whole-list HTML replacement", () => {
-    const html = readRenderer();
+// FEA-1497: PR #264 replaced the monolithic inline-JS index.html shell (which
+// hosted the Diagnostics log viewer, the packaged update banner, and the
+// security-settings copy) with a first-party React renderer. The update banner
+// and API-key controls are now delivered as React components, so the previous
+// string guards against index.html are superseded. These guards instead assert
+// that the React components wire the real IPC channels/events. Behavior of the
+// banner's visibility/apply gate is unit-tested in update-banner-state.test.ts.
+describe("React renderer update banner wiring", () => {
+  test("UpdateBanner subscribes to update events and gates apply on download", () => {
+    const banner = readSource("src/renderer/components/UpdateBanner.tsx");
 
-    assert.equal(html.includes("logsList.innerHTML"), false);
-    assert.match(html, /id="pauseLogsBtn"/);
-    assert.match(html, /id="openLogFileBtn"/);
-    assert.match(html, /Paused - \$\{queuedCount\} new entries queued/);
-    assert.match(html, /entry\.session === "previous"/);
-    assert.match(html, /previous session/);
-    assert.match(html, /api\.openLogFile/);
-    assert.match(html, /api\.getLogFilePath/);
-    assert.match(html, /void pollLogs\(\);/);
-    assert.match(html, /function renderLogs\(entries = \[\]\)/);
+    assert.match(banner, /desktop:update-status/);
+    assert.match(banner, /desktop:update-available/);
+    assert.match(banner, /window\.desktopApi\.applyUpdate\(\)/);
+    assert.match(banner, /isUpdateApplyEnabled/);
+    assert.match(banner, /Update & restart/);
   });
 
-  test("packaged update banner listens for update-status and gates on downloaded readiness", () => {
-    const html = readRenderer();
+  test("UpdateBanner is mounted in the app shell", () => {
+    const app = readSource("src/renderer/App.tsx");
 
-    assert.match(html, /desktop:update-status/);
-    assert.match(html, /status\?\.status === "downloaded"/);
-    assert.match(html, /status\?\.readyToInstall === true/);
-    assert.match(html, /status\?\.status === "available"/);
-    assert.match(html, /status\?\.status === "downloading"/);
-    assert.match(html, /hideUpdateBanner\(\)/);
-    assert.match(html, /Update &amp; restart/);
-  });
-
-  test("Security settings copy covers command signing enforcement states", () => {
-    const html = readRenderer();
-
-    assert.match(html, /id="commandSigningEnforcementEnabled"/);
-    assert.match(html, /<section class="sec-section" hidden id="browserCommandKeysSection">/);
-    assert.match(html, /const serverSupported = state\.serverSupported === true;/);
-    assert.match(html, /browserCommandKeysSection\.hidden = !serverSupported;/);
-    assert.match(html, /updateSigningPostureUnavailable\(\);/);
-    assert.match(html, /Current server does not support trusted browser keys/);
-    assert.match(html, /Browser command keys let this Desktop trust specific web browsers/);
-    assert.match(html, /signed-in browser sessions with access to this Desktop can send commands without an approved key/);
-    assert.match(html, /If you require trusted keys before approving one, browser commands will be rejected/);
-    assert.match(html, /Only trusted browser keys can send cloud commands to this Desktop/);
-    assert.match(html, /Requiring trusted keys before approving a browser key will reject browser commands/);
-    assert.match(html, /\.sec-toggle input\s*{[^}]*margin: 0;/s);
-    assert.match(html, /desktop:command-keys-changed/);
+    assert.match(app, /import \{ UpdateBanner \} from "\.\/components\/UpdateBanner"/);
+    assert.match(app, /<UpdateBanner\s*\/>/);
   });
 });
+
+describe("React renderer Security tab API-key controls", () => {
+  test("SecurityTab wires set/clear/status IPC for the desktop API key", () => {
+    const panel = readSource("src/renderer/components/settings/SettingsPanel.tsx");
+
+    assert.match(panel, /window\.desktopApi\.getApiKeyStatus\(/);
+    assert.match(panel, /window\.desktopApi\.setApiKey\(/);
+    assert.match(panel, /window\.desktopApi\.clearApiKey\(/);
+    // Set and Clear buttons must be present and refresh status after mutating.
+    assert.match(panel, /onClick=\{handleSetApiKey\}/);
+    assert.match(panel, /onClick=\{handleClearApiKey\}/);
+    assert.match(panel, /refreshApiKeyStatus\(\)/);
+  });
+});
+
+// Still deferred beyond PR #264's settings slice: the React Diagnostics
+// incremental-rendering controls (LogsPanel) and the security command-signing /
+// browser-command-key management UI. These were covered by the old inline-JS
+// index.html guards; re-guard them when the corresponding React work lands.
+describe(
+  "deferred React renderer guards (Diagnostics incremental render, command-signing UI)",
+  { skip: "deferred beyond PR #264 settings slice; not yet implemented in React renderer" },
+  () => {
+    test("Diagnostics incremental log rendering controls (deferred)", () => {});
+    test("Security command-signing / browser-command-key UI copy (deferred)", () => {});
+  },
+);

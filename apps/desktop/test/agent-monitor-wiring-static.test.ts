@@ -61,9 +61,10 @@ const shutdownSource = read("../src/main/shutdown.ts");
 const stagePackagingSource = read("../scripts/stage-packaging-app.mjs");
 const thirdPartyNoticesSource = read("../../../THIRD_PARTY_NOTICES.md");
 const traySource = read("../src/main/tray.ts");
-const preloadSource = read("../src/main/preload.ts");
+const preloadSource = read("../src/main/preload-common.ts");
 const sidecarSource = read("../src/main/agent-monitor-sidecar.ts");
 const hooksSource = read("../src/main/agent-monitor-hooks.ts");
+const hooksCoreSource = read("../src/main/agent-monitor-hooks-core.ts");
 const embedAppSource = read("../scripts/agent-monitor-embed/App.tsx");
 const embedLayoutSource = read("../scripts/agent-monitor-embed/Layout.tsx");
 const contractsSource = read("../src/shared/contracts.ts");
@@ -394,6 +395,8 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   // The Agent Dashboard now powers the primary Dashboard + agent nav, so the
   // sidecar defaults ON (it can still be turned off in Settings).
   assert.match(contractsSource, /agentMonitorEnabled: true/);
+  assert.match(contractsSource, /agentDashboardDesignSystemEnabled: boolean/);
+  assert.match(contractsSource, /agentDashboardDesignSystemEnabled: false/);
   assert.match(contractsSource, /planExtractionEnabled: boolean/);
   assert.match(contractsSource, /planExtractionEnabled: false/);
   assert.match(settingsStoreSource, /getAgentMonitorEnabled\(\)/);
@@ -408,14 +411,17 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
 });
 
 test("sidecar is feature-gated and, when enabled, starts before the gateway", () => {
-  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\([\s\S]*?\)/);
   assert.match(
     appSource,
-    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
+    /this\.agentDashboardMode === "legacy"[\s\S]*new AgentMonitorSidecar/,
   );
-  const startIdx = appSource.indexOf("void this.agentMonitor.start()");
+  assert.match(
+    appSource,
+    /private async startAgentCapture\(\): Promise<void> \{[\s\S]*this\.agentDashboardMode === "legacy"[\s\S]*void this\.agentMonitor\?\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
+  );
+  const startIdx = appSource.indexOf("await this.startAgentCapture()");
   const gatewayTryIdx = appSource.indexOf("await this.server.start()");
-  assert.ok(startIdx > 0, "sidecar start call missing");
+  assert.ok(startIdx > 0, "agent capture start call missing");
   assert.ok(gatewayTryIdx > 0, "server.start call missing");
   assert.ok(
     startIdx < gatewayTryIdx,
@@ -426,15 +432,25 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
 test("agent session sync starts and stops with the agent monitor flag", () => {
   assert.match(
     appSource,
-    /private async applyAgentMonitorSetting\(enabled: boolean\): Promise<void> \{[\s\S]*if \(enabled\) \{[\s\S]*this\.agentSessionSync\.start\(\);[\s\S]*return;[\s\S]*await this\.agentMonitor\.stop\(\);[\s\S]*this\.agentSessionSync\.stop\(\);/,
+    /private async applyAgentMonitorSetting\(enabled: boolean\): Promise<void> \{[\s\S]*if \(enabled\) \{[\s\S]*await this\.startAgentCapture\(\);[\s\S]*return;[\s\S]*await this\.stopAgentCapture\(\{ closeDesignSystem: true \}\);/,
+  );
+  assert.match(
+    appSource,
+    /private async stopAgentCapture\(\s*options: \{ closeDesignSystem\?: boolean \} = \{\},\s*\): Promise<void> \{[\s\S]*await this\.agentMonitor\?\.stop\(\);[\s\S]*this\.agentSessionSync\.stop\(\);/,
+  );
+  assert.match(
+    appSource,
+    /options\.closeDesignSystem[\s\S]*this\.agentDashboardDesignSystem\.close\(\);[\s\S]*this\.agentDashboardDesignSystem = null;/,
   );
 });
 
 test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
   assert.match(
     appSource,
-    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*this\.agentMonitor\.getUrl\(\)[\s\S]*this\.agentMonitor\.isReady\(\)[\s\S]*enabled: this\.isAgentMonitorEnabled\(\)[\s\S]*planExtractionEnabled: this\.isPlanExtractionEnabled\(\)/,
+    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*url: this\.getAgentMonitorUrl\(\)[\s\S]*ready: this\.isAgentMonitorReady\(\)[\s\S]*enabled: this\.isAgentMonitorEnabled\(\)[\s\S]*planExtractionEnabled: this\.isPlanExtractionEnabled\(\)/,
   );
+  assert.match(appSource, /this\.agentMonitor\?\.getUrl\(\)/);
+  assert.match(appSource, /this\.agentMonitor\?\.isReady\(\)/);
   assert.match(
     appSource,
     /ipcMain\.handle\(\s*"desktop:set-agent-monitor-hooks-enabled"[\s\S]*Agent Dashboard is disabled in Settings\.[\s\S]*setAgentMonitorHooksEnabled/,
@@ -452,7 +468,7 @@ test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
 test("openClaudeDashboard redirects to settings when disabled and tray access is gated", () => {
   assert.match(
     appSource,
-    /openClaudeDashboard\(\): void \{[\s\S]*this\.desktopWindow\.show\(\);[\s\S]*if \(!this\.isAgentMonitorEnabled\(\)\) \{[\s\S]*"desktop:navigate-tab", "settings"[\s\S]*"desktop:navigate-settings-tab", "relay-gateway"[\s\S]*return;[\s\S]*"desktop:navigate-tab",\s*"claude-dashboard"/,
+    /openClaudeDashboard\(\): void \{[\s\S]*this\.desktopWindow\.show\(\);[\s\S]*if \(!this\.isAgentMonitorEnabled\(\)\) \{[\s\S]*"desktop:navigate-tab", "settings"[\s\S]*"desktop:navigate-settings-tab", "relay-gateway"[\s\S]*return;[\s\S]*this\.agentDashboardMode === "design-system"[\s\S]*\? "dashboard"[\s\S]*: "claude-dashboard"/,
   );
   assert.match(
     appSource,
@@ -472,9 +488,9 @@ test("hooks are opt-in: default off, silent server auto-install never enabled", 
   // The host never sets CCAM_AUTO_INSTALL_HOOKS=1; it manages hooks directly.
   assert.doesNotMatch(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"1"/);
   assert.match(hooksSource, /store\(\)\.get\("enabled", false\)/);
-  assert.match(hooksSource, /ELECTRON_RUN_AS_NODE=1/);
-  assert.match(hooksSource, /JSON\.stringify\(hookType\)/);
-  assert.match(hooksSource, /renameSync/);
+  assert.match(hooksCoreSource, /ELECTRON_RUN_AS_NODE=1/);
+  assert.match(hooksCoreSource, /JSON\.stringify\(hookType\)/);
+  assert.match(hooksCoreSource, /renameSync/);
   assert.match(hooksSource, /function uninstallHooks/);
   assert.match(appSource, /syncAgentMonitorHooksOnBoot\(\)/);
 });

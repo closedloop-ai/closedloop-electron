@@ -12,7 +12,7 @@ export interface FlagDefinition {
   default: boolean;
   label: string;
   description: string;
-  category: "Cloud" | "Diagnostics" | "Experimental" | "Security";
+  category: "Cloud" | "Diagnostics" | "Experimental" | "Labs" | "Security";
   /** If true, flag requires an app restart to take full effect. */
   requiresRestart?: boolean;
   /** Env var that overrides the persisted value when set to "1"/"0"/"true"/"false". */
@@ -27,6 +27,15 @@ const FEATURE_FLAGS_INTERNAL = [
     description:
       "Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar.",
     category: "Diagnostics" as const,
+    requiresRestart: true,
+  },
+  {
+    key: "agentDashboardDesignSystemEnabled" as const,
+    default: false,
+    label: "Agent Dashboard Design System",
+    description:
+      "Use the in-process design-system Agent Dashboard instead of the legacy sidecar dashboard.",
+    category: "Labs" as const,
     requiresRestart: true,
   },
   {

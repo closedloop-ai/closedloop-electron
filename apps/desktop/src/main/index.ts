@@ -1,9 +1,11 @@
-import { app, nativeTheme } from "electron";
+import { app, nativeTheme, protocol } from "electron";
+import { resolveAgentDashboardMode } from "./agent-dashboard-mode.js";
 import { DesktopApplication } from "./app.js";
 import { handleActivateEvent } from "./app-lifecycle.js";
 import { handleUncaughtException, handleUnhandledRejection } from "./error-handlers.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { initializePersistentLogging } from "./persistent-log.js";
+import { SettingsStore } from "./settings-store.js";
 import { createBeforeQuitHandler } from "./shutdown-lifecycle.js";
 
 app.setName("ClosedLoop");
@@ -26,6 +28,15 @@ process.on("unhandledRejection", (reason) =>
     exit: (code) => app.exit(code),
   })
 );
+
+if (shouldRegisterDesignSystemScheme()) {
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: "app",
+      privileges: { standard: true, secure: true, supportFetchAPI: true },
+    },
+  ]);
+}
 
 const desktopApplication = new DesktopApplication();
 
@@ -60,3 +71,16 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
+
+function shouldRegisterDesignSystemScheme(): boolean {
+  try {
+    return resolveAgentDashboardMode(new SettingsStore()) === "design-system";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    gatewayLog.warn(
+      "agent-dashboard",
+      `skipping app:// scheme registration after settings read failed: ${message}`,
+    );
+    return false;
+  }
+}

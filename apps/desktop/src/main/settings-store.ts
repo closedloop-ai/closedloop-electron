@@ -265,6 +265,10 @@ export class SettingsStore {
     return this.getFlag("agentMonitorEnabled");
   }
 
+  getAgentDashboardDesignSystemEnabled(): boolean {
+    return this.getFlag("agentDashboardDesignSystemEnabled");
+  }
+
   getPlanExtractionEnabled(): boolean {
     return this.getFlag("planExtractionEnabled");
   }
@@ -307,6 +311,10 @@ export class SettingsStore {
 
   setAgentMonitorEnabled(agentMonitorEnabled: boolean): void {
     this.setFlag("agentMonitorEnabled", agentMonitorEnabled);
+  }
+
+  setAgentDashboardDesignSystemEnabled(enabled: boolean): void {
+    this.setFlag("agentDashboardDesignSystemEnabled", enabled);
   }
 
   setPlanExtractionEnabled(planExtractionEnabled: boolean): void {

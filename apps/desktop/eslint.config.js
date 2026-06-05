@@ -7,6 +7,12 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     files: ["src/**/*.ts"],
+    // src/renderer is built by Vite and is excluded from tsconfig.json, so it
+    // is not part of the type-aware TypeScript program. Exclude it from this
+    // type-checked block too (otherwise its .ts/.d.ts files error with
+    // "parserOptions.project ... file not found"); renderer files are still
+    // linted by the recommended (syntactic) config above.
+    ignores: ["src/renderer/**"],
     languageOptions: {
       parserOptions: {
         project: "./tsconfig.json",

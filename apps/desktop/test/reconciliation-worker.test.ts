@@ -442,9 +442,9 @@ test("persists reconciled rows into a real ReconciliationStore", async () => {
   assert.equal(listed[0].localEstimateMicroCents, local);
 });
 
-test("loadMeteredUsageRows sums effective (raw+baseline) tokens, metered only, within the cutoff", () => {
+test("loadMeteredUsageRows reads effective tokens, metered only, within the cutoff", () => {
   const dir = makeTempDir();
-  const dbPath = path.join(dir, "dashboard.db");
+  const dbPath = path.join(dir, "agent-dashboard.sqlite");
   const db = new DatabaseSync(dbPath);
   db.exec(
     `CREATE TABLE sessions (
@@ -453,13 +453,15 @@ test("loadMeteredUsageRows sums effective (raw+baseline) tokens, metered only, w
        metadata TEXT, harness TEXT, billing_mode TEXT
      )`,
   );
+  // FEA-1497 in-process schema: the plain columns already hold the effective
+  // reconciled counts (raw_* are write-time accumulators, not read here).
   db.exec(
     `CREATE TABLE token_usage (
        session_id TEXT, model TEXT DEFAULT 'unknown',
        input_tokens INTEGER, output_tokens INTEGER,
        cache_read_tokens INTEGER, cache_write_tokens INTEGER,
-       baseline_input INTEGER, baseline_output INTEGER,
-       baseline_cache_read INTEGER, baseline_cache_write INTEGER,
+       raw_input INTEGER, raw_output INTEGER,
+       raw_cache_read INTEGER, raw_cache_write INTEGER,
        PRIMARY KEY (session_id, model)
      )`,
   );
@@ -468,21 +470,19 @@ test("loadMeteredUsageRows sums effective (raw+baseline) tokens, metered only, w
   );
   const insertUsage = db.prepare(
     `INSERT INTO token_usage
-       (session_id, model, input_tokens, output_tokens, cache_read_tokens,
-        cache_write_tokens, baseline_input, baseline_output, baseline_cache_read,
-        baseline_cache_write)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   );
 
-  // Metered, in-window session: effective tokens are raw + baseline.
+  // Metered, in-window session: effective tokens live in the plain columns.
   insertSession.run("s1", "2026-05-20T10:00:00Z", "claude", "api");
-  insertUsage.run("s1", "claude-opus-4-5", 1000, 200, 50, 10, 500, 100, 25, 5);
+  insertUsage.run("s1", "claude-opus-4-5", 1500, 300, 75, 15);
   // Subscription session — excluded by the metered filter.
   insertSession.run("s2", "2026-05-20T10:00:00Z", "claude", "subscription_unknown");
-  insertUsage.run("s2", "claude-opus-4-5", 1000, 200, 0, 0, 0, 0, 0, 0);
+  insertUsage.run("s2", "claude-opus-4-5", 1000, 200, 0, 0);
   // Metered but before the cutoff — excluded by the window.
   insertSession.run("s3", "2025-01-01T00:00:00Z", "claude", "api");
-  insertUsage.run("s3", "claude-opus-4-5", 1, 2, 3, 4, 0, 0, 0, 0);
+  insertUsage.run("s3", "claude-opus-4-5", 1, 2, 3, 4);
 
   const cutoff = reconciliationCutoffIso(new Date("2026-05-28T00:00:00Z"), 35);
   const rows = loadMeteredUsageRows(db, cutoff);

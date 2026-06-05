@@ -106,10 +106,11 @@ const stagePackageJson = {
   type: packageJson.type,
   main: packageJson.main,
   dependencies: Object.fromEntries(
-    Object.entries(installedDependencies).map(([dependencyName, dependency]) => [
-      dependencyName,
-      resolveStageDependencySpec(packageJson, dependencyName, dependency),
-    ]),
+    Object.entries(installedDependencies)
+      .map(([dependencyName, dependency]) => [
+        dependencyName,
+        resolveStageDependencySpec(packageJson, dependencyName, dependency),
+      ]),
   ),
 };
 const stageRootPackageJson = {
@@ -130,7 +131,17 @@ await writeFile(
   stageRootPackageJsonFile,
   `${JSON.stringify(stageRootPackageJson, null, 2)}\n`,
 );
-await writeFile(stageNpmrcFile, `${repoNpmrc.trimEnd()}\nnode-linker=hoisted\n`);
+await writeFile(
+  stageNpmrcFile,
+  [
+    repoNpmrc.trimEnd(),
+    "node-linker=hoisted",
+    "minimum-release-age-exclude[]=@closedloop-ai/design-system",
+    "minimum-release-age-exclude[]=@closedloop-ai/loops-api",
+    "minimum-release-age-exclude[]=@pydantic/genai-prices",
+    "",
+  ].join("\n"),
+);
 
 const installResult = spawnSync(
   "pnpm",

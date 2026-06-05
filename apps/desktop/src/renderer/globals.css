@@ -1,0 +1,6 @@
+@source "./**/*.{ts,tsx}";
+
+:root {
+  --font-sans: "Geist", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

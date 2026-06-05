@@ -24,6 +24,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -33,6 +34,7 @@ import { fileURLToPath } from "node:url";
 
 const SOURCE_ROOT_PACKAGE = "agent-dashboard";
 const SOURCE_CLIENT_PACKAGE = "agent-dashboard-client";
+const LEGACY_TAILWIND_PACKAGE = "tailwindcss-legacy";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.resolve(scriptDir, "..");
@@ -44,6 +46,7 @@ const sourceRootDir = resolvePackageRoot(SOURCE_ROOT_PACKAGE);
 const sourceClientDir = resolvePackageRoot(SOURCE_CLIENT_PACKAGE);
 const sourceRootPkg = path.join(sourceRootDir, "package.json");
 const sourceClientPkg = path.join(sourceClientDir, "package.json");
+const legacyTailwindDir = resolvePackageRoot(LEGACY_TAILWIND_PACKAGE);
 const sourceServerEntry = path.join(sourceRootDir, "server", "index.js");
 const sourceSessionsRoute = path.join(sourceRootDir, "server", "routes", "sessions.js");
 const sourceHooksRoute = path.join(sourceRootDir, "server", "routes", "hooks.js");
@@ -526,11 +529,32 @@ function currentStamp() {
 function buildClient() {
   patchClientSource();
   rmSync(sourceClientDistDir, { recursive: true, force: true });
-  runNodeScript("vite build", viteBin, ["build"], sourceClientDir);
+  withLegacyTailwindForClientBuild(() => {
+    runNodeScript("vite build", viteBin, ["build"], sourceClientDir);
+  });
   if (!existsSync(path.join(sourceClientDistDir, "index.html"))) {
     throw new Error(
       `Client build completed but ${path.join(sourceClientDistDir, "index.html")} is missing.`,
     );
+  }
+}
+
+function withLegacyTailwindForClientBuild(work) {
+  const clientNodeModulesDir = path.join(sourceClientDir, "node_modules");
+  const clientTailwindLink = path.join(clientNodeModulesDir, "tailwindcss");
+  const createdLink = !existsSync(clientTailwindLink);
+
+  if (createdLink) {
+    mkdirSync(clientNodeModulesDir, { recursive: true });
+    symlinkSync(legacyTailwindDir, clientTailwindLink, "dir");
+  }
+
+  try {
+    work();
+  } finally {
+    if (createdLink) {
+      rmSync(clientTailwindLink, { recursive: true, force: true });
+    }
   }
 }
 
