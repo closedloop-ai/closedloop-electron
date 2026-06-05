@@ -40,109 +40,38 @@ jobs:
         working-directory: apps/desktop
         run: |
           unset ELECTRON_SKIP_BINARY_DOWNLOAD
-          node --input-type=module <<'NODE'
-          import childProcess from "node:child_process";
-          import fs from "node:fs";
-          import os from "node:os";
-          import path from "node:path";
-          import { createRequire } from "node:module";
+          electron_dir="$(node -p 'const path = require("node:path"); path.dirname(require.resolve("electron/package.json"))')"
+          version="$(node -p 'require("electron/package.json").version')"
+          platform="$(node -p 'process.env.npm_config_platform || process.platform')"
+          arch="$(node -p 'process.env.npm_config_arch || process.arch')"
+          platform_path="$(node -p 'const paths = { darwin: "Electron.app/Contents/MacOS/Electron", freebsd: "electron", linux: "electron", mas: "Electron.app/Contents/MacOS/Electron", openbsd: "electron", win32: "electron.exe" }; const value = paths[process.argv[1]]; if (!value) throw new Error(`Electron builds are not available on platform: ${process.argv[1]}`); value' "$platform")"
+          artifact="electron-v$version-$platform-$arch.zip"
+          checksum="$(node -p 'const path = require("node:path"); const { createRequire } = require("node:module"); const electronDir = path.dirname(require.resolve("electron/package.json")); const electronRequire = createRequire(path.join(electronDir, "install.js")); const value = electronRequire("./checksums.json")[process.argv[1]]; if (!value) throw new Error(`Missing Electron checksum for ${process.argv[1]}`); value' "$artifact")"
 
-          const require = createRequire(path.join(process.cwd(), "electron-verify.js"));
-          const electronDir = path.dirname(require.resolve("electron/package.json"));
-          const electronRequire = createRequire(path.join(electronDir, "install.js"));
-          const extract = electronRequire("extract-zip");
-          const { downloadArtifact } = electronRequire("@electron/get");
-          const { version } = electronRequire("./package");
+          download_dir="${RUNNER_TEMP:-$(mktemp -d)}"
+          zip_path="$download_dir/$artifact"
+          curl --fail --location --retry 3 --output "$zip_path" \
+            "https://github.com/electron/electron/releases/download/v$version/$artifact"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual_checksum="$(sha256sum "$zip_path" | awk '{print $1}')"
+          else
+            actual_checksum="$(shasum -a 256 "$zip_path" | awk '{print $1}')"
+          fi
+          if [ "$actual_checksum" != "$checksum" ]; then
+            echo "Electron checksum mismatch for $artifact" >&2
+            echo "expected $checksum, got $actual_checksum" >&2
+            exit 1
+          fi
 
-          function getPlatformPath(platform) {
-            switch (platform) {
-              case "mas":
-              case "darwin":
-                return "Electron.app/Contents/MacOS/Electron";
-              case "freebsd":
-              case "openbsd":
-              case "linux":
-                return "electron";
-              case "win32":
-                return "electron.exe";
-              default:
-                throw new Error(`Electron builds are not available on platform: ${platform}`);
-            }
-          }
+          rm -rf "$electron_dir/dist"
+          mkdir -p "$electron_dir/dist"
+          unzip -q "$zip_path" -d "$electron_dir/dist"
+          if [ -f "$electron_dir/dist/electron.d.ts" ]; then
+            mv "$electron_dir/dist/electron.d.ts" "$electron_dir/electron.d.ts"
+          fi
+          printf "%s" "$platform_path" > "$electron_dir/path.txt"
 
-          function getArch(platform) {
-            let arch = process.env.npm_config_arch || process.arch;
-            if (platform === "darwin" && process.platform === "darwin" && arch === "x64" && process.env.npm_config_arch === undefined) {
-              try {
-                if (childProcess.execSync("sysctl -in sysctl.proc_translated").toString().trim() === "1") {
-                  arch = "arm64";
-                }
-              } catch {
-                // Best-effort Rosetta detection; fall back to Node's reported arch.
-              }
-            }
-            return arch;
-          }
-
-          function isInstalled(platformPath) {
-            try {
-              const installedVersion = fs.readFileSync(path.join(electronDir, "dist", "version"), "utf8").replace(/^v/, "");
-              const installedPath = fs.readFileSync(path.join(electronDir, "path.txt"), "utf8");
-              if (installedVersion !== version || installedPath !== platformPath) {
-                return false;
-              }
-            } catch {
-              return false;
-            }
-
-            const electronPath = process.env.ELECTRON_OVERRIDE_DIST_PATH || path.join(electronDir, "dist", platformPath);
-            return fs.existsSync(electronPath);
-          }
-
-          async function ensureInstalled() {
-            const platform = process.env.npm_config_platform || os.platform();
-            const platformPath = getPlatformPath(platform);
-            if (isInstalled(platformPath)) {
-              return;
-            }
-
-            const zipPath = await downloadArtifact({
-              version,
-              artifactName: "electron",
-              force: process.env.force_no_cache === "true",
-              cacheRoot: process.env.electron_config_cache,
-              checksums: process.env.electron_use_remote_checksums ?? process.env.npm_config_electron_use_remote_checksums
-                ? undefined
-                : electronRequire("./checksums.json"),
-              platform,
-              arch: getArch(platform),
-            });
-
-            const distPath = process.env.ELECTRON_OVERRIDE_DIST_PATH || path.join(electronDir, "dist");
-            const extractPath = path.join(electronDir, "dist");
-            fs.rmSync(extractPath, { recursive: true, force: true });
-            await extract(zipPath, { dir: extractPath });
-
-            const typeDefinitionsPath = path.join(distPath, "electron.d.ts");
-            if (fs.existsSync(typeDefinitionsPath)) {
-              fs.renameSync(typeDefinitionsPath, path.join(electronDir, "electron.d.ts"));
-            }
-
-            await fs.promises.writeFile(path.join(electronDir, "path.txt"), platformPath);
-          }
-
-          try {
-            await ensureInstalled();
-            const electronBinary = require("electron");
-            if (!fs.existsSync(electronBinary)) {
-              throw new Error(`Electron binary missing after install at ${electronBinary}`);
-            }
-            console.log(`Electron verified at ${electronBinary}`);
-          } catch (error) {
-            console.error(error.stack || error);
-            process.exit(1);
-          }
-          NODE
+          node -e 'const fs = require("node:fs"); const electronBinary = require("electron"); if (!fs.existsSync(electronBinary)) throw new Error(`Electron binary missing after install at ${electronBinary}`); console.log(`Electron verified at ${electronBinary}`)'
 
       - name: Generate build info
         run: pnpm -r prebuild
