@@ -40,13 +40,14 @@ jobs:
         working-directory: apps/desktop
         run: |
           unset ELECTRON_SKIP_BINARY_DOWNLOAD
-          node - <<'NODE'
-          const childProcess = require("node:child_process");
-          const fs = require("node:fs");
-          const os = require("node:os");
-          const path = require("node:path");
-          const { createRequire } = require("node:module");
+          node --input-type=module <<'NODE'
+          import childProcess from "node:child_process";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+          import { createRequire } from "node:module";
 
+          const require = createRequire(path.join(process.cwd(), "electron-verify.js"));
           const electronDir = path.dirname(require.resolve("electron/package.json"));
           const electronRequire = createRequire(path.join(electronDir, "install.js"));
           const extract = electronRequire("extract-zip");
@@ -130,16 +131,17 @@ jobs:
             await fs.promises.writeFile(path.join(electronDir, "path.txt"), platformPath);
           }
 
-          ensureInstalled().then(() => {
+          try {
+            await ensureInstalled();
             const electronBinary = require("electron");
             if (!fs.existsSync(electronBinary)) {
               throw new Error(`Electron binary missing after install at ${electronBinary}`);
             }
             console.log(`Electron verified at ${electronBinary}`);
-          }).catch((error) => {
+          } catch (error) {
             console.error(error.stack || error);
             process.exit(1);
-          });
+          }
           NODE
 
       - name: Generate build info
