@@ -28,6 +28,14 @@ extraResources:
       - scripts/**/*
       - package.json
       - LICENSE
+  # First-party agent-monitor hook handlers (FEA-1503), shipped unpacked outside
+  # the asar so they resolve as real files. agent-monitor-hooks.ts copies them
+  # into userData at install time; the installed hook command runs them via the
+  # Electron binary as Node (ELECTRON_RUN_AS_NODE) against that userData copy.
+  - from: resources/hooks
+    to: hooks
+    filter:
+      - "*.js"
 
 mac:
   icon: resources/icon.icns

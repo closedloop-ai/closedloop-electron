@@ -132,4 +132,3 @@
 | `kanban.agents.waiting.count` | — | ✅ text | `upstream/KanbanBoard.tsx:397` | column count badge | groupedAgents['waiting']?.length ?? 0 |
 | `kanban.agents.completed.count` | — | ✅ text | `upstream/KanbanBoard.tsx:397` | column count badge | groupedAgents['completed']?.length ?? 0 |
 | `kanban.agents.error.count` | — | ✅ text | `upstream/KanbanBoard.tsx:397` | column count badge | groupedAgents['error']?.length ?? 0 |
-

@@ -133,6 +133,13 @@ export interface AgentSessionSyncServiceOptions {
   getSandboxBaseDirectory?: () => string;
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
+  /**
+   * The optional design-system in-process DB connection. When provided, the
+   * service reads through it (no per-cycle open/close, no path resolution, no
+   * existsSync guard). When omitted or null, the service falls back to the
+   * legacy sidecar dashboard.db path from getUserDataPath.
+   */
+  getConnection?: () => DatabaseSync | null;
   onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
 }
 
@@ -141,6 +148,8 @@ export class AgentSessionSyncService {
   private timer: NodeJS.Timeout | null = null;
   private started = false;
   private syncing = false;
+  private activeSyncToken: symbol | null = null;
+  private sourceStateGeneration = 0;
   private observedTopUpdatedAt: string | null = null;
   private observedIdsAtTopUpdatedAt = new Set<string>();
   private lastIncrementalBatchAttemptedAtMs = 0;
@@ -191,8 +200,37 @@ export class AgentSessionSyncService {
 
   stop(): void {
     this.started = false;
-    this.syncing = false;
     this.clearTimer();
+    this.resetSourceState();
+  }
+
+  /**
+   * Clear every cursor, queue, retry, dead-letter, pending chunk, and
+   * attribution cache that is derived from the currently selected dashboard
+   * source. Availability disable and source transitions must restart from the
+   * next selected source instead of replaying stale work from the prior one.
+   */
+  resetSourceState(): void {
+    this.sourceStateGeneration += 1;
+    this.activeSyncToken = null;
+    this.syncing = false;
+    this.observedTopUpdatedAt = null;
+    this.observedIdsAtTopUpdatedAt = new Set<string>();
+    this.lastIncrementalBatchAttemptedAtMs = 0;
+    this.featureDisabledForRelaySession = false;
+    this.firstAckReceived = false;
+    this.incrementalQueue = [];
+    this.incrementalQueuedIds.clear();
+    this.backfillQueue = [];
+    this.backfillQueuedIds.clear();
+    this.attributionCache.attributionByCwd.clear();
+    this.attributionCache.launchMetadataRootByCwd.clear();
+    this.attributionCache.repoFullNameByPath.clear();
+    this.timeoutCountById.clear();
+    this.rateLimitedCountById.clear();
+    this.nextRetryAfterMs.clear();
+    this.deadLetteredIds.clear();
+    this.pendingChunks = null;
   }
 
   refresh(): void {
@@ -243,13 +281,20 @@ export class AgentSessionSyncService {
     if (this.syncing || !this.shouldRun()) {
       return;
     }
+    const syncToken = Symbol("agent-session-sync");
+    const sourceStateGeneration = this.sourceStateGeneration;
+    this.activeSyncToken = syncToken;
     this.syncing = true;
 
     try {
-      const dbPath = resolveAgentMonitorDatabasePath(
-        this.options.getUserDataPath?.(),
-      );
-      if (!existsSync(dbPath)) {
+      // The caller owns the dashboard source by mode: design-system injects an
+      // in-process connection, legacy falls back to dashboard.db on disk, and
+      // disabled mode stops this service before it reaches the source lookup.
+      const sharedDb = this.options.getConnection?.() ?? null;
+      const dbPath = sharedDb
+        ? null
+        : resolveAgentMonitorDatabasePath(this.options.getUserDataPath?.());
+      if (dbPath && !existsSync(dbPath)) {
         return;
       }
 
@@ -284,9 +329,11 @@ export class AgentSessionSyncService {
         syncIds = [sessionId];
         // Skip DB access — go straight to send.
       } else {
-        const db = new DatabaseSync(dbPath);
+        const db = sharedDb ?? new DatabaseSync(dbPath!);
         try {
-          db.exec("PRAGMA busy_timeout = 5000");
+          if (!sharedDb) {
+            db.exec("PRAGMA busy_timeout = 5000");
+          }
           this.initializeBackfillQueueIfNeeded(db);
           this.enqueueIncrementalUpdates(db);
 
@@ -426,7 +473,9 @@ export class AgentSessionSyncService {
             sessions,
           };
         } finally {
-          db.close();
+          if (!sharedDb) {
+            db.close();
+          }
         }
       }
 
@@ -435,6 +484,17 @@ export class AgentSessionSyncService {
       }
 
       const ack = await this.options.sendBatch(batch);
+      if (
+        this.activeSyncToken !== syncToken ||
+        this.sourceStateGeneration !== sourceStateGeneration ||
+        !this.started
+      ) {
+        gatewayLog.debug(
+          TAG,
+          "ignoring agent-session batch ack from a stale dashboard source",
+        );
+        return;
+      }
       this.handleBatchAck(syncMode, syncIds, batch.sessionCount, accumulatedBytes, ack);
     } catch (error) {
       gatewayLog.warn(
@@ -442,7 +502,10 @@ export class AgentSessionSyncService {
         `sync failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
-      this.syncing = false;
+      if (this.activeSyncToken === syncToken) {
+        this.activeSyncToken = null;
+        this.syncing = false;
+      }
     }
   }
 
@@ -923,10 +986,10 @@ export function loadSyncedSessions(
       SELECT
         session_id,
         model,
-        input_tokens + baseline_input AS input_tokens,
-        output_tokens + baseline_output AS output_tokens,
-        cache_read_tokens + baseline_cache_read AS cache_read_tokens,
-        cache_write_tokens + baseline_cache_write AS cache_write_tokens
+        input_tokens AS input_tokens,
+        output_tokens AS output_tokens,
+        cache_read_tokens AS cache_read_tokens,
+        cache_write_tokens AS cache_write_tokens
       FROM token_usage
       WHERE session_id IN (__IDS__)
       ORDER BY session_id ASC, model ASC

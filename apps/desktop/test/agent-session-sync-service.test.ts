@@ -19,7 +19,10 @@ import {
   sanitizeSessionForSync,
   SESSION_PAYLOAD_BYTE_CAP,
 } from "../src/main/agent-session-sync-service.js";
-import { DesktopAgentSessionsAckReason } from "../src/main/cloud-protocol.js";
+import {
+  DesktopAgentSessionsAckReason,
+  type DesktopAgentSessionsAck,
+} from "../src/main/cloud-protocol.js";
 import {
   createAgentMonitorTestDatabase as createServiceTestDatabase,
   flushAgentSessionSync,
@@ -105,17 +108,11 @@ test("agent-session sync loads normalized session payloads with attribution and 
       output_tokens INTEGER NOT NULL DEFAULT 0,
       cache_read_tokens INTEGER NOT NULL DEFAULT 0,
       cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-      baseline_input INTEGER NOT NULL DEFAULT 0,
-      baseline_output INTEGER NOT NULL DEFAULT 0,
-      baseline_cache_read INTEGER NOT NULL DEFAULT 0,
-      baseline_cache_write INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE model_pricing (
-      model_pattern TEXT PRIMARY KEY,
-      input_per_mtok REAL NOT NULL DEFAULT 0,
-      output_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_read_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_write_per_mtok REAL NOT NULL DEFAULT 0
+      raw_input INTEGER NOT NULL DEFAULT 0,
+      raw_output INTEGER NOT NULL DEFAULT 0,
+      raw_cache_read INTEGER NOT NULL DEFAULT 0,
+      raw_cache_write INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (session_id, model)
     );
   `);
 
@@ -176,16 +173,16 @@ test("agent-session sync loads normalized session payloads with attribution and 
     "2026-05-20T12:02:00.000Z",
   );
 
+  // FEA-1497: the in-process token_usage stores effective reconciled counts in
+  // the plain columns (no baseline_* at read time). 1000+25 input, 500+10
+  // output, 250+5 cache-read, 100+0 cache-write — the same effective totals the
+  // old baseline-summed query produced.
   db.prepare(`
     INSERT INTO token_usage (
-      session_id, model, input_tokens, output_tokens, cache_read_tokens,
-      cache_write_tokens, baseline_input, baseline_output, baseline_cache_read,
-      baseline_cache_write
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run("sess-1", "gpt-4.1", 1000, 500, 250, 100, 25, 10, 5, 0);
+      session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run("sess-1", "gpt-4.1", 1025, 510, 255, 100);
 
-  // No model_pricing INSERT: cost is now derived from @pydantic/genai-prices,
-  // not the (legacy, no-longer-read) model_pricing table.
   const sessions = loadSyncedSessions(db, ["sess-1"]);
   assert.equal(sessions.length, 1);
 
@@ -214,9 +211,9 @@ test("agent-session sync loads normalized session payloads with attribution and 
   assert.equal(session.tokenUsageByModel[0].cacheReadTokens, 255);
   assert.equal(session.tokenUsageByModel[0].cacheWriteTokens, 100);
   // Cost is computed by genai-prices via the canonical engine. Assert the load
-  // path fed it the correctly baseline-summed, provider-normalized counts
-  // (gpt-4.1 is OpenAI → input passes through as the total, cache is a subset)
-  // rather than hard-coding a library-version-dependent dollar figure.
+  // path fed it the correct effective, provider-normalized counts (gpt-4.1 is
+  // OpenAI → input passes through as the total, cache is a subset) rather than
+  // hard-coding a library-version-dependent dollar figure.
   const expectedCost = computeTokenCost({
     model: "gpt-4.1",
     inputTokens: 1025,
@@ -465,6 +462,136 @@ test("agent-session sync throttles repeated incremental full-session syncs", asy
   }
 });
 
+test("agent-session sync stop clears retry state before a new dashboard source is selected", async () => {
+  const legacyRootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-legacy-"));
+  const designRootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-design-"));
+  const legacyDb = createServiceTestDatabase(legacyRootDir);
+  const designDb = createServiceTestDatabase(designRootDir);
+  insertSessionRow(legacyDb, {
+    id: "shared-session",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+  });
+  insertSessionRow(designDb, {
+    id: "shared-session",
+    startedAt: "2026-05-20T13:00:00.000Z",
+    updatedAt: "2026-05-20T13:05:00.000Z",
+  });
+
+  let monitorEnabled = true;
+  let source: "legacy" | "design" = "legacy";
+  const sentSessionStartedAt: string[] = [];
+  const service = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => monitorEnabled,
+    isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
+    getConnection: () => (source === "design" ? designDb : null),
+    getUserDataPath: () => path.join(legacyRootDir, "user-data"),
+    sendBatch: async (batch) => {
+      sentSessionStartedAt.push(batch.sessions[0]?.startedAt ?? "");
+      if (source === "legacy") {
+        return {
+          accepted: false,
+          reason: DesktopAgentSessionsAckReason.RateLimited,
+        };
+      }
+      return { accepted: true };
+    },
+  });
+
+  service.start();
+  await flushAgentSessionSync();
+  assert.deepEqual(sentSessionStartedAt, ["2026-05-20T12:00:00.000Z"]);
+
+  monitorEnabled = false;
+  service.stop();
+  service.refresh();
+  await flushAgentSessionSync();
+  assert.deepEqual(
+    sentSessionStartedAt,
+    ["2026-05-20T12:00:00.000Z"],
+    "disabled mode must not send from the stopped source",
+  );
+
+  monitorEnabled = true;
+  source = "design";
+  service.start();
+  await flushAgentSessionSync();
+  assert.deepEqual(
+    sentSessionStartedAt,
+    ["2026-05-20T12:00:00.000Z", "2026-05-20T13:00:00.000Z"],
+    "design source must send immediately instead of inheriting legacy backoff",
+  );
+
+  service.stop();
+  legacyDb.close();
+  designDb.close();
+});
+
+test("agent-session sync ignores stale in-flight acks after source reset", async () => {
+  const legacyRootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-legacy-"));
+  const designRootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-design-"));
+  const legacyDb = createServiceTestDatabase(legacyRootDir);
+  const designDb = createServiceTestDatabase(designRootDir);
+  insertSessionRow(legacyDb, {
+    id: "shared-session",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+  });
+  insertSessionRow(designDb, {
+    id: "shared-session",
+    startedAt: "2026-05-20T13:00:00.000Z",
+    updatedAt: "2026-05-20T13:05:00.000Z",
+  });
+
+  let monitorEnabled = true;
+  let source: "legacy" | "design" = "legacy";
+  let resolveLegacyAck: ((ack: DesktopAgentSessionsAck) => void) | null = null;
+  const sentSessionStartedAt: string[] = [];
+  const service = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => monitorEnabled,
+    isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
+    getConnection: () => (source === "design" ? designDb : null),
+    getUserDataPath: () => path.join(legacyRootDir, "user-data"),
+    sendBatch: async (batch) => {
+      sentSessionStartedAt.push(batch.sessions[0]?.startedAt ?? "");
+      if (batch.sessions[0]?.startedAt === "2026-05-20T12:00:00.000Z") {
+        return await new Promise<DesktopAgentSessionsAck>((resolve) => {
+          resolveLegacyAck = resolve;
+        });
+      }
+      return { accepted: true };
+    },
+  });
+
+  service.start();
+  await flushAgentSessionSync();
+  assert.deepEqual(sentSessionStartedAt, ["2026-05-20T12:00:00.000Z"]);
+
+  monitorEnabled = false;
+  service.stop();
+  resolveLegacyAck?.({
+    accepted: false,
+    reason: DesktopAgentSessionsAckReason.RateLimited,
+  });
+  await flushAgentSessionSync();
+
+  source = "design";
+  monitorEnabled = true;
+  service.start();
+  await flushAgentSessionSync();
+  assert.deepEqual(
+    sentSessionStartedAt,
+    ["2026-05-20T12:00:00.000Z", "2026-05-20T13:00:00.000Z"],
+    "stale legacy ack after stop must not back off the next design source",
+  );
+
+  service.stop();
+  legacyDb.close();
+  designDb.close();
+});
+
 test("agent-session sync cost estimator returns undefined for an unpriced model", () => {
   // An unknown model is not priced by genai-prices → undefined, so the caller
   // omits the optional estimatedCostUsd field (renders as "—", not a silent $0).
@@ -499,6 +626,87 @@ function insertEventRow(
     "2026-05-20T12:00:00.000Z",
   );
 }
+
+function insertPaddingEvents(
+  db: DatabaseSync,
+  sessionId: string,
+  count: number,
+  toolName: string,
+): void {
+  for (let index = 0; index < count; index += 1) {
+    db.prepare(`
+      INSERT INTO events (session_id, agent_id, event_type, tool_name, summary, data, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sessionId,
+      null,
+      "tool_use",
+      toolName,
+      null,
+      null,
+      "2026-05-20T12:00:00.000Z",
+    );
+  }
+}
+
+test("agent-session sync stop clears pending chunks before source re-enable", async () => {
+  const legacyRootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-legacy-"));
+  const designRootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-design-"));
+  const legacyDb = createServiceTestDatabase(legacyRootDir);
+  const designDb = createServiceTestDatabase(designRootDir);
+  insertSessionRow(legacyDb, {
+    id: "legacy-chunked",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+  });
+  insertPaddingEvents(
+    legacyDb,
+    "legacy-chunked",
+    Math.ceil((SESSION_PAYLOAD_BYTE_CAP * 2) / 600),
+    "Z".repeat(500),
+  );
+  insertSessionRow(designDb, {
+    id: "design-fresh",
+    startedAt: "2026-05-20T13:00:00.000Z",
+    updatedAt: "2026-05-20T13:05:00.000Z",
+  });
+
+  let monitorEnabled = true;
+  let source: "legacy" | "design" = "legacy";
+  const sentSessionIds: string[] = [];
+  const service = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => monitorEnabled,
+    isRelayReady: () => true,
+    isChunkedSyncEnabled: () => true,
+    getSandboxBaseDirectory: () => "/",
+    getConnection: () => (source === "design" ? designDb : null),
+    getUserDataPath: () => path.join(legacyRootDir, "user-data"),
+    sendBatch: async (batch) => {
+      sentSessionIds.push(batch.sessions[0]?.externalSessionId ?? "");
+      return { accepted: true };
+    },
+  });
+
+  service.start();
+  await flushAgentSessionSync();
+  assert.deepEqual(sentSessionIds, ["legacy-chunked"]);
+
+  monitorEnabled = false;
+  service.stop();
+  source = "design";
+  monitorEnabled = true;
+  service.start();
+  await flushAgentSessionSync();
+  assert.deepEqual(
+    sentSessionIds,
+    ["legacy-chunked", "design-fresh"],
+    "source re-enable must not resume pending chunks from the prior DB",
+  );
+
+  service.stop();
+  legacyDb.close();
+  designDb.close();
+});
 
 test("agent-session payload-aware batcher keeps each batch at or below SESSION_PAYLOAD_BYTE_CAP", async () => {
   // Create sessions whose combined size exceeds the cap so the batcher must

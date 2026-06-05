@@ -1,9 +1,13 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "dist"
+    "outDir": "dist",
+    "verbatimModuleSyntax": true
   },
   "include": [
     "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/renderer"
   ]
 }

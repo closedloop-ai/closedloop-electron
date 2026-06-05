@@ -74,6 +74,11 @@ import {
 import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
+import {
+  type AgentDashboardMode,
+  resolveAgentDashboardMode,
+} from "./agent-dashboard-mode.js";
+import type { AgentDashboardDesignSystemRuntime } from "./agent-dashboard-design-system-runtime.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
 import {
   AgentSessionSyncService,
@@ -91,12 +96,15 @@ import {
 import {
   loadMeteredUsageRowsFromDisk,
   reconciliationCutoffIso,
+  type MeteredUsageRow,
 } from "./reconciliation-worker.js";
 import { CostReconciliationService } from "./cost-reconciliation-service.js";
 import { ClaudeCodeAnalyticsService } from "./claude-code-analytics-service.js";
 import {
   isAgentMonitorHooksEnabled,
+  isAgentMonitorCodexHooksOptIn,
   setAgentMonitorHooksEnabled,
+  setAgentMonitorCodexHooksOptIn,
   syncAgentMonitorHooksOnBoot,
 } from "./agent-monitor-hooks.js";
 import { DesktopGatewayServer } from "../server/server.js";
@@ -299,7 +307,9 @@ export class DesktopApplication {
   private readonly server: DesktopGatewayServer;
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
-  private readonly agentMonitor: AgentMonitorSidecar;
+  private readonly agentDashboardMode: AgentDashboardMode;
+  private readonly agentMonitor: AgentMonitorSidecar | null;
+  private agentDashboardDesignSystem: AgentDashboardDesignSystemRuntime | null = null;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly costReconciliation: CostReconciliationService;
   private readonly claudeCodeAnalytics: ClaudeCodeAnalyticsService;
@@ -403,24 +413,30 @@ export class DesktopApplication {
     this.loopTokenStore = new LoopTokenStore();
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
-    this.desktopWindow = new DesktopWindow();
-    this.agentMonitor = new AgentMonitorSidecar({
-      onTerminalFailure: (reason: string) => {
-        const notification = new Notification({
-          title: "ClosedLoop Agent Monitor",
-          body: reason,
-        });
-        notification.show();
-        // Latch the failure and route through refreshTrayState() — the single
-        // owner of tray state — so the degraded indicator survives subsequent
-        // refreshes. A direct tray.setState here would be stomped by the next
-        // refreshTrayState() call (cloud heartbeat, gateway recheck).
-        this.agentMonitorFailed = true;
-        this.agentMonitorFailureReason = reason;
-        this.refreshTrayState();
-      },
+    this.agentDashboardMode = resolveAgentDashboardMode(this.settingsStore);
+    this.desktopWindow = new DesktopWindow({
+      agentDashboardMode: this.agentDashboardMode,
     });
-    this.agentMonitor.setSandboxBaseDirectory(
+    this.agentMonitor =
+      this.agentDashboardMode === "legacy"
+        ? new AgentMonitorSidecar({
+            onTerminalFailure: (reason: string) => {
+              const notification = new Notification({
+                title: "ClosedLoop Agent Monitor",
+                body: reason,
+              });
+              notification.show();
+              // Latch the failure and route through refreshTrayState() — the
+              // single owner of tray state — so the degraded indicator survives
+              // subsequent refreshes. A direct tray.setState here would be
+              // stomped by the next refreshTrayState() call.
+              this.agentMonitorFailed = true;
+              this.agentMonitorFailureReason = reason;
+              this.refreshTrayState();
+            },
+          })
+        : null;
+    this.agentMonitor?.setSandboxBaseDirectory(
       this.settingsStore.getSandboxBaseDirectory(),
     );
     this.activityLog = new ActivityLogStore();
@@ -675,7 +691,7 @@ export class DesktopApplication {
       },
     });
     this.agentSessionSync = new AgentSessionSyncService({
-      isAgentMonitorEnabled: () => this.settingsStore.getAgentMonitorEnabled(),
+      isAgentMonitorEnabled: () => this.isAgentMonitorEnabled(),
       isRelayReady: () =>
         this.serverAgentSessionSyncSupported &&
         this.cloudStatus.state === "online",
@@ -684,16 +700,21 @@ export class DesktopApplication {
         this.settingsStore.getSandboxBaseDirectory(),
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
       getUserDataPath: () => app.getPath("userData"),
+      getConnection: () =>
+        this.agentDashboardMode === "design-system"
+          ? this.agentDashboardDesignSystem?.connection ?? null
+          : null,
       onBatchOutcome: (event) => {
         Observability.agentSessionSyncBatchFailed(event);
       },
     });
     // FEA-1435/1436: nightly cost reconciliation lives entirely in main. It owns
     // the org-level vendor Admin key stores (safeStorage, never exposed to the
-    // sidecar or renderer) and the reconciliation store, and reconciles the local
-    // genai-prices estimate (read from dashboard.db READ-ONLY) against what each
-    // vendor actually billed. loadUsageRows re-opens the live DB each run, scoped
-    // to the recent window, and returns [] when the sidecar has not created it.
+    // renderer) and the reconciliation store, and reconciles the local
+    // genai-prices estimate against what each vendor actually billed.
+    // Agent Dashboard usage rows are mode-owned: legacy reads dashboard.db from
+    // disk, design-system reads the in-process connection, and disabled returns
+    // no rows so the dashboard code path stays inert.
     // One Anthropic Admin key store, shared by reconciliation (compares the local
     // estimate against the billed cost_report) and Claude Code analytics (reads
     // Anthropic's own per-user usage estimate). Sharing the store means a key
@@ -703,11 +724,7 @@ export class DesktopApplication {
       anthropicKeyStore,
       openaiKeyStore: createOpenAiAdminKeyStore(),
       store: new ReconciliationStore(),
-      loadUsageRows: () =>
-        loadMeteredUsageRowsFromDisk(
-          resolveAgentMonitorDatabasePath(app.getPath("userData")),
-          reconciliationCutoffIso(new Date()),
-        ),
+      loadUsageRows: () => this.loadAgentDashboardMeteredUsageRows(),
       log: (message) => gatewayLog.info("cost-reconciliation", message),
     });
     // FEA-1436: Claude Code per-user usage view. Read-only, main-only, and uses
@@ -774,6 +791,9 @@ export class DesktopApplication {
     this.tray.setAgentMonitorEnabled(this.settingsStore.getAgentMonitorEnabled());
     this.tray.setPaused(this.cloudCommandsPaused);
     this.syncPendingApprovalsToTray();
+    if (this.agentDashboardMode === "design-system") {
+      await this.ensureAgentDashboardDesignSystemRuntime();
+    }
     this.desktopWindow.init();
     this.bootReadyForOnboarding = true;
     void this.drainQueuedOnboardingHandoffs();
@@ -800,21 +820,19 @@ export class DesktopApplication {
     loopSleepRecovery.init();
 
     // Independent of the gateway, but fully feature-gated. When enabled, start
-    // the sidecar fire-and-forget BEFORE the gateway try-block so a
-    // gateway-start failure never prevents it from running, and a sidecar
-    // failure never blocks or fails app boot. The relay sync service follows
-    // the same flag, so disabling Agent Monitor leaves only dormant wiring in
-    // the desktop shell and no background sync loop. Hook repair remains
-    // opt-in and self-healing.
-    if (this.settingsStore.getAgentMonitorEnabled()) {
-      void this.agentMonitor.start();
-      syncAgentMonitorHooksOnBoot();
-      this.agentSessionSync.start();
+    // the selected capture stack BEFORE the gateway try-block so gateway-start
+    // failures do not prevent it from running, and dashboard failures never
+    // block or fail app boot. The relay sync service follows the same flag, so
+    // disabling Agent Monitor leaves only dormant wiring in the desktop shell
+    // and no background sync loop. Hook repair remains opt-in and self-healing.
+    if (this.isAgentMonitorEnabled()) {
+      await this.startAgentCapture();
     }
 
     // FEA-1435/1436: schedule nightly cost reconciliation. Independent of the
     // Agent Monitor toggle — the scheduled tick no-ops unless a vendor Admin key
-    // is configured, and loadUsageRows returns [] when there is no dashboard.db.
+    // is configured, and loadUsageRows returns [] when the selected dashboard
+    // source is disabled or has no metered rows in the window.
     this.costReconciliation.start();
 
     try {
@@ -1444,13 +1462,131 @@ export class DesktopApplication {
     return this.settingsStore.getPlanExtractionEnabled();
   }
 
+  private getAgentMonitorUrl(): string | null {
+    if (this.agentDashboardMode === "legacy") {
+      return this.agentMonitor?.getUrl() ?? null;
+    }
+    if (this.agentDashboardMode === "design-system") {
+      return this.agentDashboardDesignSystem?.getUrl() ?? null;
+    }
+    return null;
+  }
+
+  private isAgentMonitorReady(): boolean {
+    if (this.agentDashboardMode === "legacy") {
+      return this.agentMonitor?.isReady() ?? false;
+    }
+    if (this.agentDashboardMode === "design-system") {
+      return this.agentDashboardDesignSystem?.isReady() ?? false;
+    }
+    return false;
+  }
+
+  private loadAgentDashboardMeteredUsageRows(): MeteredUsageRow[] {
+    if (!this.isAgentMonitorEnabled()) {
+      return [];
+    }
+
+    const cutoffIso = reconciliationCutoffIso(new Date());
+    if (this.agentDashboardMode === "design-system") {
+      return (
+        this.agentDashboardDesignSystem?.loadMeteredUsageRows(cutoffIso) ?? []
+      );
+    }
+
+    if (this.agentDashboardMode === "legacy") {
+      return loadMeteredUsageRowsFromDisk(
+        resolveAgentMonitorDatabasePath(app.getPath("userData")),
+        cutoffIso,
+      );
+    }
+
+    return [];
+  }
+
+  private async ensureAgentDashboardDesignSystemRuntime(): Promise<AgentDashboardDesignSystemRuntime | null> {
+    if (this.agentDashboardMode !== "design-system") {
+      return null;
+    }
+    if (!this.agentDashboardDesignSystem) {
+      const { createAgentDashboardDesignSystemRuntime } = await import(
+        "./agent-dashboard-design-system-runtime.js"
+      );
+      this.agentDashboardDesignSystem =
+        createAgentDashboardDesignSystemRuntime({
+          userDataPath: app.getPath("userData"),
+          getSandboxBaseDirectory: () =>
+            this.settingsStore.getSandboxBaseDirectory(),
+          getWindow: () => this.desktopWindow.getWindow(),
+          onTerminalFailure: (reason) => {
+            const notification = new Notification({
+              title: "ClosedLoop Agent Monitor",
+              body: reason,
+            });
+            notification.show();
+            this.agentMonitorFailed = true;
+            this.agentMonitorFailureReason = reason;
+            this.refreshTrayState();
+          },
+          log: (scope, message) => gatewayLog.info(scope, message),
+        });
+      this.agentDashboardDesignSystem.registerIpcHandlers();
+    }
+    return this.agentDashboardDesignSystem;
+  }
+
+  /**
+   * Start the selected Agent Dashboard capture stack. The in-process
+   * design-system runtime is dynamically imported only inside the flag-on mode.
+   */
+  private async startAgentCapture(): Promise<void> {
+    if (!this.isAgentMonitorEnabled()) {
+      return;
+    }
+
+    if (this.agentDashboardMode === "legacy") {
+      void this.agentMonitor?.start();
+      syncAgentMonitorHooksOnBoot();
+      this.agentSessionSync.start();
+      return;
+    }
+
+    const runtime = await this.ensureAgentDashboardDesignSystemRuntime();
+    if (!runtime) {
+      return;
+    }
+    runtime.start();
+    syncAgentMonitorHooksOnBoot();
+    this.agentSessionSync.start();
+  }
+
+  private async stopAgentCapture(
+    options: { closeDesignSystem?: boolean } = {},
+  ): Promise<void> {
+    if (this.agentDashboardMode === "legacy") {
+      await this.agentMonitor?.stop();
+    } else if (this.agentDashboardMode === "design-system") {
+      await this.agentDashboardDesignSystem?.stop();
+    }
+    this.agentSessionSync.stop();
+    if (
+      options.closeDesignSystem &&
+      this.agentDashboardMode === "design-system" &&
+      this.agentDashboardDesignSystem
+    ) {
+      this.agentDashboardDesignSystem.close();
+      this.agentDashboardDesignSystem = null;
+    }
+  }
+
   private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {
     this.tray.setAgentMonitorEnabled(enabled);
 
     if (enabled) {
-      void this.agentMonitor.start();
-      syncAgentMonitorHooksOnBoot();
-      this.agentSessionSync.start();
+      if (this.agentDashboardMode === "design-system") {
+        this.desktopWindow.reloadForAgentDashboardMode("design-system");
+      }
+      await this.startAgentCapture();
       return;
     }
 
@@ -1464,8 +1600,10 @@ export class DesktopApplication {
       );
     }
 
-    await this.agentMonitor.stop();
-    this.agentSessionSync.stop();
+    await this.stopAgentCapture({ closeDesignSystem: true });
+    if (this.agentDashboardMode === "design-system") {
+      this.desktopWindow.reloadForAgentDashboardMode("disabled");
+    }
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-tab", "settings");
@@ -1487,7 +1625,12 @@ export class DesktopApplication {
     }
     this.desktopWindow
       .getWindow()
-      ?.webContents.send("desktop:navigate-tab", "claude-dashboard");
+      ?.webContents.send(
+        "desktop:navigate-tab",
+        this.agentDashboardMode === "design-system"
+          ? "dashboard"
+          : "claude-dashboard",
+      );
   }
 
   private notifyCommandKeysChanged(): void {
@@ -1928,8 +2071,9 @@ export class DesktopApplication {
     this.queueStatsTelemetryDebounce.cancel();
     this.clearActiveCommandKeyTargetContext("shutdown");
     this.commandKeyReconciler.stop();
-    this.agentSessionSync.stop();
+    await this.stopAgentCapture();
     this.costReconciliation.stop();
+    this.agentDashboardDesignSystem?.close();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -1941,7 +2085,7 @@ export class DesktopApplication {
       },
       cloudSocket: this.cloudSocket,
       commandExecutor: this.commandExecutor,
-      agentMonitor: this.agentMonitor,
+      agentMonitor: { stop: () => this.stopAgentCapture() },
       server: this.server,
       desktopWindow: this.desktopWindow,
       tray: this.tray,
@@ -2679,17 +2823,16 @@ export class DesktopApplication {
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-app-version", () => app.getVersion());
     ipcMain.handle("desktop:get-agent-monitor-url", () => ({
-      url: this.agentMonitor.getUrl(),
-      ready: this.agentMonitor.isReady(),
+      url: this.getAgentMonitorUrl(),
+      ready: this.isAgentMonitorReady(),
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
-    // FEA-1334: proxy the sidecar's cold-start ingest progress so the renderer
-    // can drive the floating progress card without a cross-origin fetch.
-    // Returns null whenever the sidecar is not reachable — the renderer treats
-    // that as "keep polling, nothing to show yet".
     ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
-      const baseUrl = this.agentMonitor.getUrl();
+      if (this.agentDashboardMode !== "legacy") {
+        return null;
+      }
+      const baseUrl = this.agentMonitor?.getUrl();
       if (!baseUrl) {
         return null;
       }
@@ -2705,13 +2848,15 @@ export class DesktopApplication {
         return null;
       }
     });
-    // FEA-1334: clear the dashboard DB and restart the sidecar so it
-    // re-imports every agent session from scratch. The sidecar's empty-DB
-    // boot path clears the persisted ingest caches and re-runs the
-    // orchestrator, which the progress banner tracks.
     ipcMain.handle("desktop:reprocess-agent-logs", async () => {
       if (!this.isAgentMonitorEnabled()) {
         return { ok: false, error: "Agent Dashboard is disabled in Settings." };
+      }
+      if (this.agentDashboardMode !== "legacy" || !this.agentMonitor) {
+        return {
+          ok: false,
+          error: "Reprocessing is not available in design-system dashboard mode.",
+        };
       }
       try {
         await this.agentMonitor.stop();
@@ -2727,7 +2872,7 @@ export class DesktopApplication {
           try {
             rmSync(path.join(agentMonitorDir, name));
           } catch {
-            /* file may not exist — fine */
+            /* file may not exist */
           }
         }
         void this.agentMonitor.start();
@@ -2755,7 +2900,37 @@ export class DesktopApplication {
             error: "Agent Dashboard is disabled in Settings.",
           };
         }
-        return setAgentMonitorHooksEnabled(enabled === true);
+        const result = setAgentMonitorHooksEnabled(enabled === true);
+        if (result.ok && this.agentDashboardMode === "design-system") {
+          // Hooks own live Claude capture, so toggling them must re-evaluate
+          // the Claude file-watcher gating (`shouldWatchClaude`): hooks-on ⇒ no
+          // Claude watcher (avoid double-counting turns), hooks-off ⇒ Claude
+          // watcher resumes live capture. Restart the collectors so the frozen
+          // boot-time decision is recomputed; boot import is idempotent, so the
+          // restart is safe. (CLAUDE.md: toggles must update in-memory side
+          // effects together — no one-way restart guards.)
+          this.agentDashboardDesignSystem?.restartCollectors();
+        }
+        return result;
+      },
+    );
+    // FEA-1444 (carried into FEA-1497): opt-in Codex hook ingestion. Gated on
+    // the master Agent Dashboard toggle; the Codex hook handler uses a
+    // route-owned listener path so payload data cannot choose harness='codex'.
+    ipcMain.handle("desktop:get-agent-monitor-codex-hooks-opt-in", () =>
+      this.isAgentMonitorEnabled() && isAgentMonitorCodexHooksOptIn(),
+    );
+    ipcMain.handle(
+      "desktop:set-agent-monitor-codex-hooks-opt-in",
+      (_event, optIn: boolean) => {
+        if (!this.isAgentMonitorEnabled()) {
+          return {
+            ok: false,
+            enabled: false,
+            error: "Agent Dashboard is disabled in Settings.",
+          };
+        }
+        return setAgentMonitorCodexHooksOptIn(optIn === true);
       },
     );
     ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());
@@ -2832,6 +3007,10 @@ export class DesktopApplication {
         if (typeof partial.agentMonitorEnabled === "boolean") {
           nextPartial.agentMonitorEnabled = partial.agentMonitorEnabled;
         }
+        if (typeof partial.agentDashboardDesignSystemEnabled === "boolean") {
+          nextPartial.agentDashboardDesignSystemEnabled =
+            partial.agentDashboardDesignSystemEnabled;
+        }
         if (typeof partial.planExtractionEnabled === "boolean") {
           nextPartial.planExtractionEnabled = partial.planExtractionEnabled;
         }
@@ -2902,11 +3081,15 @@ export class DesktopApplication {
             normalizeScopePath(currentSettings.sandboxBaseDirectory)
         ) {
           await seedReposConfig(selectedSandbox);
-          this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
-          if (this.settingsStore.getAgentMonitorEnabled()) {
-            await this.agentMonitor.stop();
-            void this.agentMonitor.start();
+          if (this.agentDashboardMode === "legacy" && this.agentMonitor) {
+            this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
+            if (this.isAgentMonitorEnabled()) {
+              await this.agentMonitor.stop();
+              void this.agentMonitor.start();
+            }
           }
+          // Design-system mode reads the sandbox directory through a live
+          // callback on every hook/collector event, so it needs no restart.
         }
 
         // Notify renderer of flag changes so the Feature Flags panel can refresh.

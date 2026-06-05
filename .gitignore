@@ -26,6 +26,9 @@ apps/desktop/.generated/
 apps/desktop/test-results/
 apps/desktop/playwright-report/
 
+# Desktop-local workflow/debug artifacts
+apps/desktop/.closedloop-ai/
+
 # UI Numbers Audit generated reports (FEA-1415 / PLN-738)
 # These embed a timestamp; regenerate locally via `pnpm --filter desktop audit:report`
 # or `node apps/desktop/test-e2e/agent-monitor/inventory/scan-tiles.mjs`.

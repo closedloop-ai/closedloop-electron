@@ -13,11 +13,9 @@ development/build, and the desktop build generates a runtime tree under
 - **Pinned commit:** `840c518d7fa69231de049e41b893938228b67e40`
 - **Imported via:** pnpm dependencies `agent-dashboard` and
   `agent-dashboard-client`
-- **Usage:** Bundled and run as a local `127.0.0.1` sidecar process by the
-  desktop app (the embedded "Claude Dashboard" tab). The desktop build applies
-  three local host patches while generating
-  `apps/desktop/.generated/agent-monitor/`: loopback-only bind, explicit
-  `CCAM_AUTO_INSTALL_HOOKS` gating, and a hook uninstall script.
+- **Usage:** Bundled and run as the default local `127.0.0.1` legacy sidecar
+  dashboard. The desktop build applies local host patches while generating
+  `apps/desktop/.generated/agent-monitor/`.
 - **License:** MIT — © 2026 Son Nguyen.
 
 Bundled runtime dependencies remain pure JS. The generated sidecar runtime uses
@@ -57,9 +55,8 @@ SOFTWARE.
 - **Used as:** documentation/algorithm reference for the OpenAI **Codex** CLI
   rollout JSONL format — the cumulative→session token semantics and the
   `turn_context.model` attribution rule (`docs/codex.md`). No CodexBar source
-  is bundled. Our own Codex ingestion modules
-  (`apps/desktop/scripts/agent-monitor-codex/codex-*.js`, copied into the
-  generated runtime tree at build time) were merely informed by it.
+  is bundled. Our own first-party Codex ingestion modules
+  (`apps/desktop/src/main/collectors/codex/`) were merely informed by it.
 - **License:** MIT — © 2026 Peter Steinberger.
 
 ```
