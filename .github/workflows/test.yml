@@ -36,6 +36,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify Electron binary install
+        working-directory: apps/desktop
+        run: |
+          if ! node -e "require('electron')" >/dev/null 2>&1; then
+            pnpm rebuild electron
+          fi
+          node -e "require('electron')"
+
       - name: Generate build info
         run: pnpm -r prebuild
 
