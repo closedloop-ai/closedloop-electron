@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { createTokenUsageStore } from "../database/token-usage.js";
-import type { Harness, NormalizedMessage, NormalizedSession, NormalizedToolUse } from "./types.js";
+import type { Harness, NormalizedSession, NormalizedToolUse } from "./types.js";
 
 /**
  * First-party session importer (FEA-1503). Replaces the vendor `import-history.js`
