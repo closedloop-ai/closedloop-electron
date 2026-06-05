@@ -171,12 +171,12 @@ jobs:
         if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         uses: pnpm/action-setup@v4
 
-      # Node 20 (not 22) because symphony-alpha requires ^20.19 for Prisma 7.x
+      # Follow symphony-alpha's target monorepo tooling baseline: engines.node >=24.
       - name: Setup Node.js
         if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: 'pnpm'
           cache-dependency-path: symphony-checkout/pnpm-lock.yaml
 

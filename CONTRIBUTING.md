@@ -6,8 +6,8 @@ We welcome contributions! This guide covers everything you need to get started.
 
 ### Prerequisites
 
-- **Node.js** 22+
-- **pnpm** 9.15+ (`corepack enable && corepack prepare pnpm@9.15.0 --activate`)
+- **Node.js** 24+ for development, build, and test tooling; Electron's bundled runtime Node version is unchanged.
+- **pnpm** 10.32.1 (`corepack enable && corepack prepare pnpm@10.32.1 --activate`)
 - **just** command runner (`brew install just`)
 - **macOS** (Electron desktop builds target macOS only)
 
