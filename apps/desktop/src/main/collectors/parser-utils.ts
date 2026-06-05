@@ -5,7 +5,7 @@
  * dependency-free so every parser can normalize timestamps and extract error
  * text identically.
  */
-import type { NormalizedTurnDuration } from "./types.js";
+import type { NormalizedArtifacts, NormalizedTurnDuration } from "./types.js";
 
 /**
  * Normalize a timestamp to an ISO 8601 string. Handles numeric epoch (seconds or
@@ -61,6 +61,151 @@ export function extractErrorMessage(value: unknown, depth = 0): string | null {
     }
   }
   return null;
+}
+
+/** CR-1/CR-3: Cap content-bearing text to a byte limit (default 4096). */
+export function truncateText(text: string | null | undefined, maxBytes = 4096): string | null {
+  if (text == null || text.length === 0) return null;
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  const buf = Buffer.from(text, "utf8");
+  return buf.subarray(0, maxBytes).toString("utf8");
+}
+
+/** CR-4: Compute lines added/removed from old/new string comparison. */
+export function computeLineDelta(
+  oldText: string | null | undefined,
+  newText: string | null | undefined,
+): { add: number; del: number } {
+  const oldLines = oldText ? oldText.split("\n").length : 0;
+  const newLines = newText ? newText.split("\n").length : 0;
+  return {
+    add: Math.max(0, newLines - oldLines),
+    del: Math.max(0, oldLines - newLines),
+  };
+}
+
+/** CR-4: Parse a unified diff for lines added/removed (Codex apply_patch). */
+export function computeUnifiedDiffDelta(patch: string): { add: number; del: number } {
+  let add = 0;
+  let del = 0;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) add++;
+    else if (line.startsWith("-") && !line.startsWith("---")) del++;
+  }
+  return { add, del };
+}
+
+/** CR-4: Count file headers in a unified diff. */
+export function countDiffFiles(patch: string): number {
+  let count = 0;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("--- ")) count++;
+  }
+  return count;
+}
+
+/** CR-13: Extract repo name from cwd path (last path component). */
+export function extractRepoFromCwd(cwd: string | null | undefined): string | null {
+  if (!cwd) return null;
+  const parts = cwd.replace(/\/+$/, "").split("/");
+  const last = parts[parts.length - 1];
+  return last && last.length > 0 ? last : null;
+}
+
+const PR_TOOL_PATTERNS = new Set([
+  "create_pull_request",
+  "github.create_pr",
+  "mcp__github__create_pull_request",
+]);
+
+/** CR-13: Extract PR references from tool calls. */
+export function extractPrReferences(
+  toolName: string,
+  input: unknown,
+): Array<{ number: string; repo?: string }> {
+  if (!input || typeof input !== "object") return [];
+  const obj = input as Record<string, unknown>;
+
+  if (PR_TOOL_PATTERNS.has(toolName)) {
+    const repo = typeof obj.repo === "string" ? obj.repo : undefined;
+    const head = typeof obj.head === "string" ? obj.head : undefined;
+    return head ? [{ number: head, repo }] : [];
+  }
+
+  if (toolName === "Bash") {
+    const cmd = typeof obj.command === "string" ? obj.command : "";
+    const match = cmd.match(/gh\s+pr\s+create/);
+    if (match) return [{ number: "pending" }];
+  }
+  return [];
+}
+
+const ISSUE_KEY_RE = /\b([A-Z]+-\d+)\b/g;
+const ISSUE_HASH_RE = /#(\d+)\b/g;
+const ISSUE_TOOL_PATTERNS = new Set([
+  "linear.get_issue",
+  "github.get_issue",
+  "mcp__linear-server__get_issue",
+  "mcp__github__get_issue",
+]);
+
+/** CR-13: Extract issue references from tool calls and input text. */
+export function extractIssueReferences(
+  toolName: string,
+  input: unknown,
+): Array<{ key: string }> {
+  const refs: Array<{ key: string }> = [];
+  const seen = new Set<string>();
+  if (!input || typeof input !== "object") return refs;
+  const obj = input as Record<string, unknown>;
+
+  if (ISSUE_TOOL_PATTERNS.has(toolName)) {
+    const key = typeof obj.issue_id === "string" ? obj.issue_id
+      : typeof obj.issueId === "string" ? obj.issueId
+      : null;
+    if (key && !seen.has(key)) { seen.add(key); refs.push({ key }); }
+  }
+
+  const textFields = [obj.command, obj.query, obj.body, obj.prompt, obj.description];
+  for (const field of textFields) {
+    if (typeof field !== "string") continue;
+    for (const m of field.matchAll(ISSUE_KEY_RE)) {
+      if (!seen.has(m[1])) { seen.add(m[1]); refs.push({ key: m[1] }); }
+    }
+    for (const m of field.matchAll(ISSUE_HASH_RE)) {
+      const k = `#${m[1]}`;
+      if (!seen.has(k)) { seen.add(k); refs.push({ key: k }); }
+    }
+  }
+  return refs;
+}
+
+/** CR-5: Returns true for synthetic/fallback model IDs. */
+export function isSyntheticModelKey(model: string): boolean {
+  return model.endsWith("-default") || model === "gpt-codex";
+}
+
+/** CR-13: Accumulate artifact references from tool uses into an artifacts object. */
+export function collectArtifacts(
+  toolUses: Array<{ name: string; input?: unknown }>,
+  cwd: string | null | undefined,
+): NormalizedArtifacts {
+  const prs: Array<{ number: string; repo?: string }> = [];
+  const issues: Array<{ key: string }> = [];
+  const seenPr = new Set<string>();
+  const seenIssue = new Set<string>();
+
+  for (const tu of toolUses) {
+    for (const pr of extractPrReferences(tu.name, tu.input)) {
+      const k = `${pr.repo ?? ""}:${pr.number}`;
+      if (!seenPr.has(k)) { seenPr.add(k); prs.push(pr); }
+    }
+    for (const issue of extractIssueReferences(tu.name, tu.input)) {
+      if (!seenIssue.has(issue.key)) { seenIssue.add(issue.key); issues.push(issue); }
+    }
+  }
+
+  return { prs, issues, repo: extractRepoFromCwd(cwd) };
 }
 
 /** Push a turn-duration entry when both timestamps are valid and duration ≥ 0. */

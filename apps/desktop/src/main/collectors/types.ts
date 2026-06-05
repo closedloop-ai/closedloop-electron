@@ -23,6 +23,18 @@ export interface NormalizedToolUse {
   name: string;
   timestamp: string | null;
   input?: unknown;
+  /** CR-3: Tool result content (size-capped). */
+  output?: unknown;
+  /** CR-3: Whether the tool result was an error. */
+  isError?: boolean;
+  /** CR-6: MCP server name (Codex preserves from mcp_tool_call_begin). */
+  mcpServer?: string;
+  /** CR-6: MCP method name. */
+  mcpMethod?: string;
+  /** CR-8: Skill name extracted from Skill tool input.skill (Claude). */
+  skillName?: string;
+  /** CR-4: Per-edit line delta. */
+  diffDelta?: { add: number; del: number };
 }
 
 /** An API-level error parsed from a transcript → becomes an APIError event. */
@@ -42,6 +54,40 @@ export interface NormalizedToolResultError {
 export interface NormalizedTurnDuration {
   durationMs: number;
   timestamp: string | null;
+}
+
+/** CR-1: An ordered message from a session transcript. */
+export interface NormalizedMessage {
+  role: "human" | "assistant" | "system";
+  timestamp: string | null;
+  text: string | null;
+  model?: string | null;
+  tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  isThinking?: boolean;
+}
+
+/** CR-2: A per-turn token record for time-series reconstruction. */
+export interface NormalizedTokenRecord {
+  timestamp: string;
+  model: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** CR-4: Aggregate diff stats for the session. */
+export interface NormalizedDiffStats {
+  filesChanged: number;
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+/** CR-13: Structured artifact references extracted from tool calls. */
+export interface NormalizedArtifacts {
+  prs: Array<{ number: string; repo?: string }>;
+  issues: Array<{ key: string }>;
+  repo: string | null;
 }
 
 /** A plan block (Codex only today). Stored on the session metadata. */
@@ -87,11 +133,26 @@ export interface NormalizedSession {
     speeds: unknown[];
     inference_geos: unknown[];
   };
+  /** CR-1: Ordered per-message list with text content. */
+  messages: NormalizedMessage[];
+  /** CR-2: Per-turn token records for time-series reconstruction. */
+  tokenSeries: NormalizedTokenRecord[];
+  /** CR-4: Aggregate diff stats (files changed, lines +/-). Null when absent. */
+  diffStats: NormalizedDiffStats | null;
+  /** CR-7: Claude slash commands extracted from transcripts. */
+  slashCommands: Array<{ name: string; timestamp: string }>;
+  /** CR-13: Structured artifact references (PRs, issues, repo). */
+  artifacts: NormalizedArtifacts;
 }
 
 /** Empty `usageExtras` literal — parsers spread/override as needed. */
 export function emptyUsageExtras(): NormalizedSession["usageExtras"] {
   return { service_tiers: [], speeds: [], inference_geos: [] };
+}
+
+/** Empty `artifacts` literal — parsers fill as they extract references. */
+export function emptyArtifacts(): NormalizedArtifacts {
+  return { prs: [], issues: [], repo: null };
 }
 
 /**

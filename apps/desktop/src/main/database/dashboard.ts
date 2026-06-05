@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { DashboardSummary, TokenAnalytics, AnalyticsData, WorkflowQueryData } from "../../shared/agent-db-contract.js";
+import { computeTokenCost } from "../../shared/token-cost.js";
 
 export function createDashboardQueries(db: DatabaseSync) {
   const totalSessionsStmt = db.prepare("SELECT COUNT(*) as count FROM sessions");
@@ -31,6 +32,8 @@ export function createDashboardQueries(db: DatabaseSync) {
     SELECT model,
       SUM(input_tokens) as inputTokens,
       SUM(output_tokens) as outputTokens,
+      SUM(cache_read_tokens) as cacheReadTokens,
+      SUM(cache_write_tokens) as cacheWriteTokens,
       COUNT(DISTINCT session_id) as sessions
     FROM token_usage
     WHERE model IS NOT NULL
@@ -172,8 +175,25 @@ export function createDashboardQueries(db: DatabaseSync) {
 
     getTokenAnalytics(): TokenAnalytics {
       const totals = tokenAnalyticsStmt.get() as { totalInput: number; totalOutput: number; totalCacheRead: number; totalCacheWrite: number };
-      const byModel = tokenByModelStmt.all() as Array<{ model: string; inputTokens: number; outputTokens: number; sessions: number }>;
+      const byModelRaw = tokenByModelStmt.all() as Array<{ model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; sessions: number }>;
       const byDay = tokenByDayStmt.all() as Array<{ day: string; inputTokens: number; outputTokens: number }>;
+
+      const byModel = byModelRaw.map((row) => {
+        const cost = computeTokenCost({
+          model: row.model,
+          inputTokens: row.inputTokens,
+          outputTokens: row.outputTokens,
+          cacheReadTokens: row.cacheReadTokens,
+          cacheWriteTokens: row.cacheWriteTokens,
+        });
+        return {
+          model: row.model,
+          inputTokens: row.inputTokens,
+          outputTokens: row.outputTokens,
+          sessions: row.sessions,
+          ...(cost.costUsd != null ? { estimatedCostUsd: cost.costUsd } : {}),
+        };
+      });
 
       return {
         totalInputTokens: totals.totalInput,

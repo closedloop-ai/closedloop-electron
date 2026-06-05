@@ -22,11 +22,23 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
-import { pushTurnDuration, toIso, safeJson } from "../parser-utils.js";
+import {
+  pushTurnDuration,
+  toIso,
+  safeJson,
+  truncateText,
+  computeUnifiedDiffDelta,
+  countDiffFiles,
+  collectArtifacts,
+} from "../parser-utils.js";
 import type {
   NormalizedApiError,
+  NormalizedArtifacts,
+  NormalizedDiffStats,
+  NormalizedMessage,
   NormalizedPlan,
   NormalizedSession,
+  NormalizedTokenRecord,
   NormalizedToolResultError,
   NormalizedToolUse,
   NormalizedTokenCounts,
@@ -174,9 +186,15 @@ export async function parseRolloutFile(
   let thinkingBlockCount = 0;
   const toolResultErrors: NormalizedToolResultError[] = [];
   let latestTotals: Rec | null = null; // cumulative token_count totals (last wins)
+  let previousTotals: Rec | null = null; // CR-2: previous cumulative totals for delta computation
   let sawResponseItems = false;
   let lastTs: string | null = null;
   let pendingTurnStartedAt: string | null = null;
+  const messages: NormalizedMessage[] = []; // CR-1
+  const tokenSeries: NormalizedTokenRecord[] = []; // CR-2
+  let diffStats: NormalizedDiffStats | null = null; // CR-4
+  /** CR-5: per-event model from turn_context; reset on each turn_context line. */
+  let currentTurnModel: string | null = null;
 
   const noteTs = (raw: unknown): string | null => {
     const iso = toIso(raw);
@@ -200,6 +218,13 @@ export async function parseRolloutFile(
       if (role === "user") {
         userMessageCount++;
         if (explicitIso) pendingTurnStartedAt = explicitIso;
+        // CR-1: capture user message
+        messages.push({
+          role: "human",
+          timestamp: iso || firstTimestamp,
+          text: truncateText(text),
+          model: currentTurnModel ?? model,
+        });
       } else {
         assistantMessageCount++;
         if (iso) messageTimestamps.push(iso);
@@ -215,16 +240,53 @@ export async function parseRolloutFile(
             timestamp: iso || firstTimestamp,
           });
         }
+        // CR-1: capture assistant message
+        messages.push({
+          role: "assistant",
+          timestamp: iso || firstTimestamp,
+          text: truncateText(text),
+          model: currentTurnModel ?? model,
+        });
       }
-      void text;
     } else if (itype === "reasoning") {
       thinkingBlockCount++;
-    } else if (itype === "function_call" || itype === "custom_tool_call") {
-      toolUses.push({
-        name: asStr(p.name) ?? asStr(p.tool_name) ?? "function",
+      // CR-1: capture reasoning as a thinking message
+      const reasoningText = extractText(p.content) || asStr(p.text) || asStr(p.summary) || null;
+      messages.push({
+        role: "assistant",
         timestamp: iso || firstTimestamp,
-        input: safeJson(p.arguments != null ? p.arguments : p.input),
+        text: truncateText(reasoningText),
+        model: currentTurnModel ?? model,
+        isThinking: true,
       });
+    } else if (itype === "function_call" || itype === "custom_tool_call") {
+      const toolName = asStr(p.name) ?? asStr(p.tool_name) ?? "function";
+      const toolInput = safeJson(p.arguments != null ? p.arguments : p.input);
+      const tu: NormalizedToolUse = {
+        name: toolName,
+        timestamp: iso || firstTimestamp,
+        input: toolInput,
+      };
+      // CR-4: parse apply_patch input as unified diff
+      if (toolName === "apply_patch") {
+        const rawInput = typeof p.arguments === "string" ? p.arguments
+          : typeof p.input === "string" ? p.input
+          : typeof toolInput === "string" ? toolInput
+          : null;
+        if (rawInput) {
+          const delta = computeUnifiedDiffDelta(rawInput);
+          tu.diffDelta = delta;
+          const files = countDiffFiles(rawInput);
+          if (!diffStats) {
+            diffStats = { filesChanged: files, linesAdded: delta.add, linesRemoved: delta.del };
+          } else {
+            diffStats.filesChanged += files;
+            diffStats.linesAdded += delta.add;
+            diffStats.linesRemoved += delta.del;
+          }
+        }
+      }
+      toolUses.push(tu);
     } else if (itype === "local_shell_call") {
       const action = asRec(p.action) ?? {};
       toolUses.push({
@@ -242,6 +304,15 @@ export async function parseRolloutFile(
       const isErr = outRec
         ? outRec.success === false || outRec.is_error === true || !!outRec.error
         : false;
+      // CR-3: capture tool output on the most recent matching tool use
+      const outputStr =
+        typeof out === "string" ? out : JSON.stringify(out);
+      const truncatedOutput = truncateText(outputStr);
+      if (toolUses.length > 0) {
+        const lastTool = toolUses[toolUses.length - 1];
+        lastTool.output = truncatedOutput;
+        lastTool.isError = isErr;
+      }
       if (isErr) {
         const content =
           typeof out === "string"
@@ -297,11 +368,72 @@ export async function parseRolloutFile(
         asRec(info.total_token_usage) ??
         asRec(info.totalTokenUsage) ??
         asRec(info.total);
-      if (totals) latestTotals = totals;
-      const turnCtx = asRec(p.turn_context);
-      const m =
-        (turnCtx && asStr(turnCtx.model)) || asStr(info.model) || asStr(p.model);
-      if (m) model = m;
+      if (totals) {
+        // CR-2: compute per-turn delta from cumulative totals
+        const curInput = num(totals, "input_tokens") || num(totals, "inputTokens");
+        const curCached =
+          num(totals, "cached_input_tokens") || num(totals, "cachedInputTokens");
+        const curOutput =
+          num(totals, "output_tokens") || num(totals, "outputTokens");
+        const curReasoning =
+          num(totals, "reasoning_output_tokens") || num(totals, "reasoningOutputTokens");
+        const curCacheWrite =
+          num(totals, "cache_write_tokens") ||
+          num(totals, "cacheWriteTokens") ||
+          num(totals, "cache_creation_input_tokens") ||
+          num(totals, "cacheCreationInputTokens");
+
+        let deltaInput = curInput;
+        let deltaOutput = curOutput + curReasoning;
+        let deltaCacheRead = curCached;
+        let deltaCacheWrite = curCacheWrite;
+
+        if (previousTotals) {
+          const prevInput = num(previousTotals, "input_tokens") || num(previousTotals, "inputTokens");
+          const prevCached =
+            num(previousTotals, "cached_input_tokens") || num(previousTotals, "cachedInputTokens");
+          const prevOutput =
+            num(previousTotals, "output_tokens") || num(previousTotals, "outputTokens");
+          const prevReasoning =
+            num(previousTotals, "reasoning_output_tokens") || num(previousTotals, "reasoningOutputTokens");
+          const prevCacheWrite =
+            num(previousTotals, "cache_write_tokens") ||
+            num(previousTotals, "cacheWriteTokens") ||
+            num(previousTotals, "cache_creation_input_tokens") ||
+            num(previousTotals, "cacheCreationInputTokens");
+
+          deltaInput = Math.max(0, curInput - prevInput);
+          deltaOutput = Math.max(0, (curOutput + curReasoning) - (prevOutput + prevReasoning));
+          deltaCacheRead = Math.max(0, curCached - prevCached);
+          deltaCacheWrite = Math.max(0, curCacheWrite - prevCacheWrite);
+        }
+        previousTotals = totals;
+        latestTotals = totals;
+
+        // CR-5: read per-event model from turn_context
+        const turnCtx = asRec(p.turn_context);
+        const m =
+          (turnCtx && asStr(turnCtx.model)) || asStr(info.model) || asStr(p.model);
+        if (m) model = m;
+        const eventModel = m ?? model ?? "gpt-codex";
+
+        if (iso && (deltaInput || deltaOutput || deltaCacheRead || deltaCacheWrite)) {
+          tokenSeries.push({
+            timestamp: iso,
+            model: eventModel,
+            input: deltaInput,
+            output: deltaOutput,
+            cacheRead: deltaCacheRead,
+            cacheWrite: deltaCacheWrite,
+          });
+        }
+      } else {
+        // No totals object — still extract model if present
+        const turnCtx = asRec(p.turn_context);
+        const m =
+          (turnCtx && asStr(turnCtx.model)) || asStr(info.model) || asStr(p.model);
+        if (m) model = m;
+      }
     } else if (et === "error" || et === "stream_error") {
       apiErrors.push({
         type: et,
@@ -318,17 +450,78 @@ export async function parseRolloutFile(
         et === "mcp_tool_call_begin")
     ) {
       // Fallback only for older event-only logs with no response_item items.
-      const name =
-        et === "exec_command_begin"
-          ? "shell"
-          : et === "patch_apply_begin"
-            ? "apply_patch"
-            : asStr(p.tool) ?? asStr(p.server) ?? "mcp_tool";
-      toolUses.push({
-        name,
-        timestamp: iso || firstTimestamp,
-        input: p.command ?? p.changes ?? p.arguments ?? null,
-      });
+      if (et === "mcp_tool_call_begin") {
+        // CR-6: preserve MCP server and method from the event payload
+        const server = asStr(p.server) ?? asStr(p.mcp_server) ?? undefined;
+        const method = asStr(p.method) ?? asStr(p.tool) ?? asStr(p.tool_name) ?? undefined;
+        const displayName = server && method ? `${server}__${method}` : (method ?? server ?? "mcp_tool");
+        toolUses.push({
+          name: displayName,
+          timestamp: iso || firstTimestamp,
+          input: p.arguments ?? p.input ?? null,
+          mcpServer: server,
+          mcpMethod: method,
+        });
+      } else if (et === "patch_apply_begin") {
+        // CR-4: parse the patch input for diff stats
+        const patchInput = typeof p.changes === "string"
+          ? p.changes
+          : typeof p.patch === "string"
+            ? p.patch
+            : typeof p.arguments === "string"
+              ? p.arguments
+              : null;
+        const tu: NormalizedToolUse = {
+          name: "apply_patch",
+          timestamp: iso || firstTimestamp,
+          input: p.changes ?? p.patch ?? p.arguments ?? null,
+        };
+        if (patchInput) {
+          const delta = computeUnifiedDiffDelta(patchInput);
+          tu.diffDelta = delta;
+          const files = countDiffFiles(patchInput);
+          // Aggregate into session-level diffStats
+          if (!diffStats) {
+            diffStats = { filesChanged: files, linesAdded: delta.add, linesRemoved: delta.del };
+          } else {
+            diffStats.filesChanged += files;
+            diffStats.linesAdded += delta.add;
+            diffStats.linesRemoved += delta.del;
+          }
+        }
+        toolUses.push(tu);
+      } else {
+        toolUses.push({
+          name: "shell",
+          timestamp: iso || firstTimestamp,
+          input: p.command ?? p.arguments ?? null,
+        });
+      }
+    } else if (et === "mcp_tool_call_end") {
+      // CR-6: match MCP end event to the most recent MCP tool use and capture output
+      const out = p.output ?? p.result ?? undefined;
+      const outRec = asRec(out);
+      const isErr = outRec
+        ? outRec.success === false || outRec.is_error === true || !!outRec.error
+        : false;
+      // Find the last MCP tool use to attach output
+      for (let i = toolUses.length - 1; i >= 0; i--) {
+        if (toolUses[i].mcpServer != null || toolUses[i].mcpMethod != null) {
+          if (out !== undefined) {
+            const outputStr = typeof out === "string" ? out : JSON.stringify(out);
+            toolUses[i].output = truncateText(outputStr);
+            toolUses[i].isError = isErr;
+          }
+          break;
+        }
+      }
+      if (isErr) {
+        const content =
+          typeof out === "string"
+            ? out.slice(0, 500)
+            : JSON.stringify(out ?? {}).slice(0, 500);
+        toolResultErrors.push({ content, timestamp: iso });
+      }
     }
   };
 
@@ -359,7 +552,11 @@ export async function parseRolloutFile(
       if (!model && p.model) model = asStr(p.model);
     } else if (c.kind === "turn_context") {
       const p = c.p;
-      if (p.model) model = asStr(p.model); // authoritative
+      // CR-5: turn_context.model is authoritative per CodexBar docs
+      if (p.model) {
+        model = asStr(p.model);
+        currentTurnModel = asStr(p.model);
+      }
       if (!cwd && p.cwd) cwd = asStr(p.cwd);
     } else if (c.kind === "response_item") {
       handleResponseItem(c.p, iso, explicitIso);
@@ -402,6 +599,9 @@ export async function parseRolloutFile(
     }
   }
 
+  // CR-13: collect artifact references from all tool uses
+  const artifacts: NormalizedArtifacts = collectArtifacts(toolUses, cwd);
+
   let fileModifiedAt: number | null = null;
   try {
     fileModifiedAt = fs.statSync(filePath).mtimeMs;
@@ -439,5 +639,10 @@ export async function parseRolloutFile(
     thinkingBlockCount,
     toolResultErrors,
     usageExtras: { service_tiers: [], speeds: [], inference_geos: [] },
+    messages, // CR-1
+    tokenSeries, // CR-2
+    diffStats, // CR-4
+    slashCommands: [], // CR-7: Codex has no slash commands
+    artifacts, // CR-13
   };
 }

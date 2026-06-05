@@ -833,7 +833,7 @@ export function sanitizeSessionForSync(
   };
 }
 
-const STRIPPED_LEAF_KEYS = new Set(["prompt", "content", "stdout", "stderr"]);
+const STRIPPED_LEAF_KEYS = new Set(["prompt", "content", "stdout", "stderr", "text", "output", "reasoning"]);
 
 function stripDataContent(data: SyncJsonValue | undefined): SyncJsonValue | undefined {
   if (data === undefined || data === null) {

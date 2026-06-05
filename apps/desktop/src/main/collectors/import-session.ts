@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { createTokenUsageStore } from "../database/token-usage.js";
-import type { Harness, NormalizedSession, NormalizedToolUse } from "./types.js";
+import type { Harness, NormalizedMessage, NormalizedSession, NormalizedToolUse } from "./types.js";
 
 /**
  * First-party session importer (FEA-1503). Replaces the vendor `import-history.js`
@@ -132,6 +132,10 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
         speeds: [],
         inference_geos: [],
       },
+      diffStats: session.diffStats ?? null,
+      slashCommands: session.slashCommands ?? [],
+      artifacts: session.artifacts ?? { prs: [], issues: [], repo: null },
+      tokenSeries: session.tokenSeries ?? [],
     });
   }
 
@@ -274,7 +278,19 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
         addEvent("Stop", mainId, ts, null, null, null);
       }
 
+      for (const msg of session.messages ?? []) {
+        const eventType = msg.role === "human" ? "UserMessage" : "AssistantMessage";
+        addEvent(eventType, mainId, msg.timestamp, null, null, eventData({
+          text: msg.text,
+          role: msg.role,
+          ...(msg.model ? { model: msg.model } : {}),
+          ...(msg.tokens ? { tokens: msg.tokens } : {}),
+          ...(msg.isThinking ? { isThinking: true } : {}),
+        }));
+      }
+
       (session.toolUses ?? []).forEach((tu, idx) => {
+        const enrichedData = buildToolEventData(tu);
         if (tu.name === "Agent" || tu.name === "Task") {
           const subId = `${session.sessionId}-sub-${idx}`;
           const input = (tu.input ?? {}) as Record<string, unknown>;
@@ -290,9 +306,9 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
             tu.timestamp ?? session.endedAt ?? now,
             mainId,
           );
-          addEvent("PreToolUse", subId, tu.timestamp, tu.name, "Spawned subagent", eventData(tu.input));
+          addEvent("PreToolUse", subId, tu.timestamp, tu.name, "Spawned subagent", eventData(enrichedData));
         } else {
-          addEvent("PostToolUse", mainId, tu.timestamp, tu.name, null, eventData(tu.input));
+          addEvent("PostToolUse", mainId, tu.timestamp, tu.name, null, eventData(enrichedData));
         }
       });
 
@@ -329,6 +345,18 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
   }
 
   return { importSession };
+}
+
+function buildToolEventData(tu: NormalizedToolUse): Record<string, unknown> {
+  const data: Record<string, unknown> = {};
+  if (tu.input != null) data.input = tu.input;
+  if (tu.output != null) data.output = tu.output;
+  if (tu.isError != null) data.isError = tu.isError;
+  if (tu.mcpServer != null) data.mcpServer = tu.mcpServer;
+  if (tu.mcpMethod != null) data.mcpMethod = tu.mcpMethod;
+  if (tu.skillName != null) data.skillName = tu.skillName;
+  if (tu.diffDelta != null) data.diffDelta = tu.diffDelta;
+  return data;
 }
 
 function strOf(value: unknown): string | undefined {
