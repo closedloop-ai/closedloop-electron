@@ -64,6 +64,8 @@ export interface NormalizedMessage {
   model?: string | null;
   tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
   isThinking?: boolean;
+  /** CR-5: True when the model key is a synthetic fallback (e.g. *-default). */
+  isSynthetic?: boolean;
 }
 
 /** CR-2: A per-turn token record for time-series reconstruction. */

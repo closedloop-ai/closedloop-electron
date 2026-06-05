@@ -71,17 +71,24 @@ export function truncateText(text: string | null | undefined, maxBytes = 4096): 
   return buf.subarray(0, maxBytes).toString("utf8");
 }
 
-/** CR-4: Compute lines added/removed from old/new string comparison. */
+/** CR-4: Compute lines added/removed by diffing old/new line arrays. */
 export function computeLineDelta(
   oldText: string | null | undefined,
   newText: string | null | undefined,
 ): { add: number; del: number } {
-  const oldLines = oldText ? oldText.split("\n").length : 0;
-  const newLines = newText ? newText.split("\n").length : 0;
-  return {
-    add: Math.max(0, newLines - oldLines),
-    del: Math.max(0, oldLines - newLines),
-  };
+  const oldLines = oldText ? oldText.split("\n") : [];
+  const newLines = newText ? newText.split("\n") : [];
+  const oldSet = new Set(oldLines);
+  const newSet = new Set(newLines);
+  let del = 0;
+  for (const line of oldLines) {
+    if (!newSet.has(line)) del++;
+  }
+  let add = 0;
+  for (const line of newLines) {
+    if (!oldSet.has(line)) add++;
+  }
+  return { add, del };
 }
 
 /** CR-4: Parse a unified diff for lines added/removed (Codex apply_patch). */
@@ -133,8 +140,7 @@ export function extractPrReferences(
 
   if (PR_TOOL_PATTERNS.has(toolName)) {
     const repo = typeof obj.repo === "string" ? obj.repo : undefined;
-    const head = typeof obj.head === "string" ? obj.head : undefined;
-    return head ? [{ number: head, repo }] : [];
+    return [{ number: "pending", repo }];
   }
 
   if (toolName === "Bash") {

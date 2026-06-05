@@ -22,6 +22,7 @@ import {
   pushTurnDuration,
   truncateText,
   collectArtifacts,
+  isSyntheticModelKey,
 } from "../parser-utils.js";
 import type {
   NormalizedSession,
@@ -101,7 +102,7 @@ function extractText(payload: unknown): string | null {
   if (typeof payload !== "object") return null;
   const obj = payload as Record<string, unknown>;
   // Direct text/content fields
-  for (const key of ["text", "content", "body", "value", "message"]) {
+  for (const key of ["text", "content", "markdown", "body", "value", "message"]) {
     const v = obj[key];
     if (typeof v === "string" && v.trim().length > 0) return v;
   }
@@ -291,29 +292,7 @@ export function parseChatSessionFile(
     dataObj.sessionId || dataObj.id || path.basename(filePath, ".json"),
   );
 
-  // P1 Fix: extract token usage from raw requests BEFORE normalization,
-  // since normalizeChatMessages reduces each request to {role, timestamp}
-  // and drops the original usage/response payloads.
   const rawRequests = Array.isArray(dataObj.requests) ? dataObj.requests : [];
-  const requestTokenFields: TokenFields = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  for (const req of rawRequests) {
-    if (!req || typeof req !== "object") continue;
-    const reqObj = req as Record<string, unknown>;
-    const usageInfo =
-      reqObj.usage || reqObj.tokenUsage || reqObj.token_count ||
-      get(reqObj.response, "usage") || get(reqObj.result, "usage") || null;
-    if (usageInfo && typeof usageInfo === "object") {
-      const u = usageInfo as Record<string, unknown>;
-      if (u.input_tokens != null) requestTokenFields.input += Number(u.input_tokens);
-      if (u.output_tokens != null) requestTokenFields.output += Number(u.output_tokens);
-      if (u.prompt_tokens != null) requestTokenFields.input += Number(u.prompt_tokens);
-      if (u.completion_tokens != null) requestTokenFields.output += Number(u.completion_tokens);
-      if (u.cache_read_tokens != null) requestTokenFields.cacheRead += Number(u.cache_read_tokens);
-      if (u.cached_input_tokens != null) requestTokenFields.cacheRead += Number(u.cached_input_tokens);
-      if (u.cache_write_tokens != null) requestTokenFields.cacheWrite += Number(u.cache_write_tokens);
-      if (u.cache_creation_input_tokens != null) requestTokenFields.cacheWrite += Number(u.cache_creation_input_tokens);
-    }
-  }
 
   const messages = normalizeChatMessages(dataObj);
   if (!Array.isArray(messages) || messages.length === 0) return null;
@@ -354,6 +333,8 @@ export function parseChatSessionFile(
 
     // CR-5: Per-message model
     const msgModel = (msgObj.model as string | null) || null;
+    const resolvedModel = msgModel || model || "copilot-default";
+    const synthetic = isSyntheticModelKey(resolvedModel) ? true : undefined;
 
     if (role === "user" || role === "human") {
       userMessageCount++;
@@ -364,6 +345,7 @@ export function parseChatSessionFile(
         timestamp: iso,
         text: truncateText(msgObj.text as string | null ?? extractText(msgObj)),
         model: msgModel,
+        ...(synthetic ? { isSynthetic: true } : {}),
       });
     } else if (role === "assistant" || role === "copilot" || role === "bot") {
       assistantMessageCount++;
@@ -381,6 +363,7 @@ export function parseChatSessionFile(
           text: null,
           model: msgModel,
           isThinking: true,
+          ...(synthetic ? { isSynthetic: true } : {}),
         });
       } else {
         normalizedMessages.push({
@@ -388,6 +371,7 @@ export function parseChatSessionFile(
           timestamp: iso,
           text: truncateText(msgObj.text as string | null ?? extractText(msgObj)),
           model: msgModel,
+          ...(synthetic ? { isSynthetic: true } : {}),
         });
       }
 
@@ -521,13 +505,6 @@ export function parseChatSessionFile(
       });
     }
   }
-
-  // Merge request-level tokens (from raw requests before normalization)
-  // with message-level tokens. Use summation since each request is unique.
-  tokenFields.input += requestTokenFields.input;
-  tokenFields.output += requestTokenFields.output;
-  tokenFields.cacheRead += requestTokenFields.cacheRead;
-  tokenFields.cacheWrite += requestTokenFields.cacheWrite;
 
   // Token usage from top-level session data
   const topUsage = dataObj.usage || dataObj.tokenUsage || dataObj.token_count || null;
@@ -674,6 +651,8 @@ export async function parseCliEventFile(
 
     // CR-5: Per-event model
     const eventModel = (payload.model || recObj.model || null) as string | null;
+    const cliResolvedModel = eventModel || model || "copilot-default";
+    const cliSynthetic = isSyntheticModelKey(cliResolvedModel) ? true : undefined;
 
     // Messages
     if (type === "user_message" || type === "user_input" || type === "prompt") {
@@ -686,6 +665,7 @@ export async function parseCliEventFile(
         timestamp: iso,
         text: truncateText(userText),
         model: eventModel,
+        ...(cliSynthetic ? { isSynthetic: true } : {}),
       });
     }
     if (type === "assistant_message" || type === "response" || type === "completion") {
@@ -700,6 +680,7 @@ export async function parseCliEventFile(
         timestamp: iso,
         text: truncateText(assistantText),
         model: eventModel,
+        ...(cliSynthetic ? { isSynthetic: true } : {}),
       });
     }
 
@@ -779,6 +760,7 @@ export async function parseCliEventFile(
         text: null,
         model: eventModel,
         isThinking: true,
+        ...(cliSynthetic ? { isSynthetic: true } : {}),
       });
     }
   }

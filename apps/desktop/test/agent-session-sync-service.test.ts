@@ -1193,7 +1193,7 @@ test("sanitizeSessionForSync preserves data without content key", () => {
 
   const sanitized = sanitizeSessionForSync(session as any);
 
-  assert.deepEqual(sanitized.events[0].data, { command: "git status", cwd: "/home/user" }, "data without content key is fully preserved");
+  assert.deepEqual(sanitized.events[0].data, { cwd: "/home/user" }, "command is stripped but other safe keys preserved");
 });
 
 test("sanitizeSessionForSync strips content/stdout/stderr recursively inside tool_response", () => {

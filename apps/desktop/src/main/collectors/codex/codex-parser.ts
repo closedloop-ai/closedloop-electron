@@ -30,6 +30,7 @@ import {
   computeUnifiedDiffDelta,
   countDiffFiles,
   collectArtifacts,
+  isSyntheticModelKey,
 } from "../parser-utils.js";
 import type {
   NormalizedApiError,
@@ -220,11 +221,13 @@ export async function parseRolloutFile(
         userMessageCount++;
         if (explicitIso) pendingTurnStartedAt = explicitIso;
         // CR-1: capture user message
+        const userModel = currentTurnModel ?? model;
         messages.push({
           role: "human",
           timestamp: iso || firstTimestamp,
           text: truncateText(text),
-          model: currentTurnModel ?? model,
+          model: userModel,
+          ...(userModel && isSyntheticModelKey(userModel) ? { isSynthetic: true } : {}),
         });
       } else {
         assistantMessageCount++;
@@ -242,23 +245,27 @@ export async function parseRolloutFile(
           });
         }
         // CR-1: capture assistant message
+        const assistantModel = currentTurnModel ?? model;
         messages.push({
           role: "assistant",
           timestamp: iso || firstTimestamp,
           text: truncateText(text),
-          model: currentTurnModel ?? model,
+          model: assistantModel,
+          ...(assistantModel && isSyntheticModelKey(assistantModel) ? { isSynthetic: true } : {}),
         });
       }
     } else if (itype === "reasoning") {
       thinkingBlockCount++;
       // CR-1: capture reasoning as a thinking message
       const reasoningText = extractText(p.content) || asStr(p.text) || asStr(p.summary) || null;
+      const thinkingModel = currentTurnModel ?? model;
       messages.push({
         role: "assistant",
         timestamp: iso || firstTimestamp,
         text: truncateText(reasoningText),
-        model: currentTurnModel ?? model,
+        model: thinkingModel,
         isThinking: true,
+        ...(thinkingModel && isSyntheticModelKey(thinkingModel) ? { isSynthetic: true } : {}),
       });
     } else if (itype === "function_call" || itype === "custom_tool_call") {
       const toolName = asStr(p.name) ?? asStr(p.tool_name) ?? "function";
@@ -512,9 +519,14 @@ export async function parseRolloutFile(
       const isErr = outRec
         ? outRec.success === false || outRec.is_error === true || !!outRec.error
         : false;
-      // Find the last MCP tool use to attach output
+      // Find the last MCP tool use that hasn't been matched yet (no output set).
+      // This guards against interleaved MCP calls (A begin, B begin, A end, B end)
+      // where a naive backward scan would attach A's output to B.
       for (let i = toolUses.length - 1; i >= 0; i--) {
-        if (toolUses[i].mcpServer != null || toolUses[i].mcpMethod != null) {
+        if (
+          (toolUses[i].mcpServer != null || toolUses[i].mcpMethod != null) &&
+          toolUses[i].output === undefined
+        ) {
           if (out !== undefined) {
             const outputStr = typeof out === "string" ? out : JSON.stringify(out);
             toolUses[i].output = truncateText(outputStr);

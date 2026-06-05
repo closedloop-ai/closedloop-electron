@@ -31,6 +31,7 @@ import {
   computeUnifiedDiffDelta,
   countDiffFiles,
   extractErrorMessage,
+  isSyntheticModelKey,
   pushTurnDuration,
   safeJson,
   toIso,
@@ -215,7 +216,12 @@ function parseSessionRow(
     }
 
     // CR-5: Per-message modelID from data JSON.
-    const msgModel = modelIdFromValue(data.model ?? data.modelID) || sessionModel;
+    // CR-9: Also check data.tokens.modelID for per-message model attribution.
+    const tokensObj = isObject(data.tokens) ? data.tokens
+      : typeof data.tokens === "string" ? (parseJsonCell(data.tokens) as Record<string, unknown> | null)
+      : null;
+    const tokensModelID = isObject(tokensObj) ? tokensObj.modelID : undefined;
+    const msgModel = modelIdFromValue(data.model ?? data.modelID ?? tokensModelID) || sessionModel;
 
     // CR-2: Per-message token counts.
     const msgTokens = extractMessageTokens(data);
@@ -233,6 +239,7 @@ function parseSessionRow(
         text: truncateText(userText),
         model: msgModel,
         tokens: msgTokens ?? undefined,
+        ...(msgModel && isSyntheticModelKey(msgModel) ? { isSynthetic: true } : {}),
       });
 
       // CR-2: Token series for user messages (if tokens present).
@@ -260,6 +267,7 @@ function parseSessionRow(
         text: truncateText(assistantText),
         model: msgModel,
         tokens: msgTokens ?? undefined,
+        ...(msgModel && isSyntheticModelKey(msgModel) ? { isSynthetic: true } : {}),
       });
 
       // CR-2: Token series for assistant messages.
@@ -300,6 +308,7 @@ function parseSessionRow(
         text: null,
         model: sessionModel,
         isThinking: true,
+        ...(sessionModel && isSyntheticModelKey(sessionModel) ? { isSynthetic: true } : {}),
       });
     } else if (part.type === "text") {
       // CR-1: Text parts contribute to messages. These are typically
@@ -313,6 +322,7 @@ function parseSessionRow(
           timestamp: iso,
           text: truncateText(textContent),
           model: sessionModel,
+          ...(sessionModel && isSyntheticModelKey(sessionModel) ? { isSynthetic: true } : {}),
         });
       }
     } else if (part.type === "tool") {
@@ -403,7 +413,25 @@ function parseSessionRow(
     const summaryAdds = Number(sessionRow.summary_additions || 0);
     const summaryDels = Number(sessionRow.summary_deletions || 0);
     const summaryFiles = Number(sessionRow.summary_files || 0);
-    if (summaryAdds || summaryDels || summaryFiles) {
+    // Parse summary_diffs for additional diff context (unified diff text).
+    const summaryDiffsRaw = sessionRow.summary_diffs;
+    if (typeof summaryDiffsRaw === "string" && summaryDiffsRaw.length > 0) {
+      const diffDelta = computeUnifiedDiffDelta(summaryDiffsRaw);
+      const diffFiles = countDiffFiles(summaryDiffsRaw);
+      // Prefer summary_diffs line counts when they provide data and the
+      // explicit summary columns are zeroed out; otherwise the explicit
+      // columns are authoritative.
+      const effectiveAdds = summaryAdds || diffDelta.add;
+      const effectiveDels = summaryDels || diffDelta.del;
+      const effectiveFiles = summaryFiles || diffFiles;
+      if (effectiveAdds || effectiveDels || effectiveFiles) {
+        diffStats = {
+          filesChanged: effectiveFiles,
+          linesAdded: effectiveAdds,
+          linesRemoved: effectiveDels,
+        };
+      }
+    } else if (summaryAdds || summaryDels || summaryFiles) {
       diffStats = {
         filesChanged: summaryFiles,
         linesAdded: summaryAdds,
@@ -498,7 +526,8 @@ function hasSummaryColumns(db: DatabaseSync): boolean {
     return (
       names.has("summary_additions") &&
       names.has("summary_deletions") &&
-      names.has("summary_files")
+      names.has("summary_files") &&
+      names.has("summary_diffs")
     );
   } catch {
     return false;
@@ -537,7 +566,8 @@ export function loadSessionsFromDb(
           tokens_cache_write,
           summary_additions,
           summary_deletions,
-          summary_files
+          summary_files,
+          summary_diffs
         FROM session
         ORDER BY time_updated DESC, id DESC
       `

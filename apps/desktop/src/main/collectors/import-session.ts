@@ -68,6 +68,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   // Fill only missing fields on an existing row; never clobber a live status.
+  // Always refresh metadata so new fields (diffStats, artifacts, etc.) are populated.
   const coalesceSessionStmt = db.prepare(`
     UPDATE sessions SET
       name = COALESCE(name, ?),
@@ -75,6 +76,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       cwd = COALESCE(cwd, ?),
       harness = CASE WHEN COALESCE(harness, '') = '' THEN ? ELSE harness END,
       billing_mode = CASE WHEN COALESCE(billing_mode, '') IN ('', 'unknown') THEN ? ELSE billing_mode END,
+      metadata = ?,
       updated_at = ?
     WHERE id = ?
   `);
@@ -227,6 +229,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           session.cwd ?? null,
           harness,
           billingMode,
+          buildMetadata(session, harness),
           now,
           session.sessionId,
         );

@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
-import { toIso, safeJson, pushTurnDuration, truncateText, collectArtifacts } from "../parser-utils.js";
+import { toIso, safeJson, pushTurnDuration, truncateText, collectArtifacts, isSyntheticModelKey } from "../parser-utils.js";
 import type {
   NormalizedApiError,
   NormalizedMessage,
@@ -155,12 +155,15 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
     ) {
       userMessageCount++;
       if (iso) pendingTurnStartedAt = iso;
-      const rawText = asStringOrNull(payload.content) ?? asStringOrNull(payload.text);
+      const rawText = asStringOrNull(payload.content) ?? asStringOrNull(payload.text) ?? asStringOrNull(payload.message);
+      const msgModel = currentTurnModel ?? model;
+      const cursorResolved = msgModel || "cursor-default";
       messages.push({
         role: "human",
         timestamp: iso,
         text: truncateText(rawText),
-        model: currentTurnModel ?? model,
+        model: msgModel,
+        ...(isSyntheticModelKey(cursorResolved) ? { isSynthetic: true } : {}),
       });
     }
 
@@ -175,11 +178,14 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
       pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
       pendingTurnStartedAt = null;
       const rawText = asStringOrNull(payload.content) ?? asStringOrNull(payload.text);
+      const msgModel = currentTurnModel ?? model;
+      const cursorResolved = msgModel || "cursor-default";
       messages.push({
         role: "assistant",
         timestamp: iso,
         text: truncateText(rawText),
-        model: currentTurnModel ?? model,
+        model: msgModel,
+        ...(isSyntheticModelKey(cursorResolved) ? { isSynthetic: true } : {}),
       });
     }
 

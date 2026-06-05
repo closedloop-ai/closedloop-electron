@@ -88,14 +88,14 @@ test("computeLineDelta computes del when old has more lines", () => {
   assert.deepEqual(result, { add: 0, del: 3 });
 });
 
-test("computeLineDelta handles mixed add/del via net difference", () => {
-  // old has 3 lines, new has 5 lines -> net add:2, del:0
+test("computeLineDelta handles mixed add/del via set-based comparison", () => {
+  // old {a,b,c} -> new {x,y,z,w,v}: all 3 old lines removed, all 5 new lines added
   const result = computeLineDelta("a\nb\nc", "x\ny\nz\nw\nv");
-  assert.deepEqual(result, { add: 2, del: 0 });
+  assert.deepEqual(result, { add: 5, del: 3 });
 
-  // old has 5 lines, new has 2 lines -> net add:0, del:3
+  // old {a,b,c,d,e} -> new {x,y}: all 5 old removed, 2 new added
   const result2 = computeLineDelta("a\nb\nc\nd\ne", "x\ny");
-  assert.deepEqual(result2, { add: 0, del: 3 });
+  assert.deepEqual(result2, { add: 2, del: 5 });
 });
 
 test("computeLineDelta with one null side", () => {
@@ -220,7 +220,7 @@ test("extractPrReferences finds PR from create_pull_request tool", () => {
     repo: "closedloop-ai/symphony",
   });
   assert.equal(refs.length, 1);
-  assert.equal(refs[0].number, "feat/my-branch");
+  assert.equal(refs[0].number, "pending");
   assert.equal(refs[0].repo, "closedloop-ai/symphony");
 });
 
@@ -230,7 +230,7 @@ test("extractPrReferences finds PR from mcp__github__create_pull_request", () =>
     repo: "org/repo",
   });
   assert.equal(refs.length, 1);
-  assert.equal(refs[0].number, "fix/bug-123");
+  assert.equal(refs[0].number, "pending");
 });
 
 test("extractPrReferences finds PR from Bash tool gh pr create command", () => {
@@ -257,9 +257,10 @@ test("extractPrReferences returns empty for null input", () => {
   assert.deepEqual(extractPrReferences("create_pull_request", null), []);
 });
 
-test("extractPrReferences returns empty when head is missing", () => {
+test("extractPrReferences records pending when head is missing", () => {
   const refs = extractPrReferences("create_pull_request", { repo: "org/repo" });
-  assert.equal(refs.length, 0);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].number, "pending");
 });
 
 // ---------------------------------------------------------------------------
@@ -357,7 +358,7 @@ test("collectArtifacts combines PR and issue refs from multiple tool uses", () =
   ];
   const result = collectArtifacts(toolUses, "/home/user/my-project");
   assert.equal(result.prs.length, 1);
-  assert.equal(result.prs[0].number, "feat/x");
+  assert.equal(result.prs[0].number, "pending");
   assert.equal(result.prs[0].repo, "org/repo");
   assert.ok(result.issues.some((i) => i.key === "ENG-42"));
   assert.ok(result.issues.some((i) => i.key === "ENG-99"));
