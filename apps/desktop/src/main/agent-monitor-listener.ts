@@ -9,12 +9,20 @@ import type { createLifecycle, HookData } from "./database/lifecycle.js";
 // Fixed-port hook transport (127.0.0.1:4820). The first-party hook handlers
 // (resources/hooks/hook-handler.js, codex-hook-handler.js) POST the
 // `{ hook_type, data }` envelope to /api/hooks/event (Codex:
-// /api/hooks/codex/event); this in-process listener serves it. Port + path +
-// envelope must stay in sync with those handlers, but both ship in the same app
-// build and refresh together (refreshHandlerCopy rewrites the userData handler
-// copy on boot), so this is an INTERNAL contract — not externally pinned. 4820 is
-// fixed and outside PORT_PROBE_ORDER so hooks need zero per-hook env. This
-// loopback-HTTP transport is the accepted permanent design; a unix-socket
+// /api/hooks/codex/event). This in-process listener serves that route in
+// design-system mode; in default mode the legacy AgentMonitorSidecar serves the
+// same route, so /api/hooks/event has two receivers across modes.
+//
+// COMPATIBILITY REQUIREMENT — the route + payload envelope must stay
+// backward-compatible; do NOT treat it as freely changeable. The handler is a
+// persisted userData copy that Claude/Codex settings keep invoking;
+// refreshHandlerCopy() only refreshes it best-effort on boot (failures are
+// caught and logged), so a stale copy can outlive an app upgrade. Any route or
+// envelope change therefore needs backward-compatible receiver support until all
+// persisted handler copies are known refreshed.
+//
+// 4820 is fixed and outside PORT_PROBE_ORDER so hooks need zero per-hook env.
+// This loopback-HTTP transport is the accepted permanent design; a unix-socket
 // alternative was considered and declined (FEA-1500, obsoleted).
 
 const HOST = "127.0.0.1";

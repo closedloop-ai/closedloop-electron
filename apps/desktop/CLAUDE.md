@@ -177,12 +177,17 @@ Gateway section remains.
   all five agent CLIs, writing through the first-party `importSession` into the
   same in-process DB.
 - **Fixed port (differs from the gateway):** `127.0.0.1:4820`
-  (`AGENT_MONITOR_PORT` in `src/shared/contracts.ts`). It MUST be fixed — the
-  hook handler POSTs to `127.0.0.1:${CLAUDE_DASHBOARD_PORT||4820}`, baked into
-  `~/.claude/settings.json` at install time, so 4820 means hooks need zero
-  per-hook env. 4820 is outside `PORT_PROBE_ORDER`, so it never collides with
-  the gateway. This loopback-HTTP transport is the accepted permanent design; a
-  unix-socket alternative was considered and declined (FEA-1500, obsoleted).
+  (`AGENT_MONITOR_PORT` in `src/shared/contracts.ts`). It MUST be fixed —
+  `~/.claude/settings.json` pins only the Electron-as-Node command pointing at the
+  userData `hook-handler.js` copy; that copied handler owns the
+  `CLAUDE_DASHBOARD_PORT || 4820` fallback, the route, and the payload envelope, so
+  hooks need zero per-hook env. 4820 is outside `PORT_PROBE_ORDER`, so it never
+  collides with the gateway. The route + envelope must stay backward-compatible
+  across handler/receiver changes — a persisted handler copy refreshes only
+  best-effort on boot, and `/api/hooks/event` is served by **both** the legacy
+  sidecar (default mode) and the in-process listener (design-system mode). This
+  loopback-HTTP transport is the accepted permanent design; a unix-socket
+  alternative was considered and declined (FEA-1500, obsoleted).
 - **Durable DB:** `app.getPath("userData")/agent-dashboard.sqlite` (schema in
   `src/main/database/schema.ts`), Node's built-in `node:sqlite`. Persisted
   collector caches live under `<userData>/agent-monitor/`.
