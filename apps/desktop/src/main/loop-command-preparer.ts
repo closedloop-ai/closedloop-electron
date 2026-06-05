@@ -6,13 +6,11 @@ import {
   fetchLoopExecutionCredentials,
   type FetchLoopExecutionCredentialsOptions,
 } from "./loop-execution-credentials-client.js";
+import { SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR } from "./signed-loop-launch-error.js";
 
 type FetchExecutionCredentials = (
   options: FetchLoopExecutionCredentialsOptions,
 ) => Promise<Record<string, unknown>>;
-
-export const SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR =
-  "Signed loop launch requires a desktop-managed key with request signing; the active config uses a manually configured key or cannot load its signing key. Re-run managed onboarding.";
 
 export type ManagedPopSigningReadinessReason =
   | "ready"
@@ -30,7 +28,7 @@ export interface LoopCommandPreparationOptions {
   getApiOrigin: () => string;
   getApiKey: () => string | null;
   getApiKeyProvenance: () => ApiKeyProvenance | null;
-  getManagedPopSigningReadiness?: () => ManagedPopSigningReadiness;
+  getManagedPopSigningReadiness: () => ManagedPopSigningReadiness;
   getComputeTargetId: () => string | null;
   signDesktopRequest?: DesktopPopSigner;
   onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
@@ -77,28 +75,10 @@ export async function prepareLoopCommandForExecution(
   };
 }
 
-function getDefaultReadiness(
-  options: LoopCommandPreparationOptions,
-): ManagedPopSigningReadiness {
-  const provenance = options.getApiKeyProvenance() ?? "USER_CREATED";
-  const signingReady =
-    provenance === "DESKTOP_MANAGED" && options.signDesktopRequest !== undefined;
-  return {
-    provenance,
-    signingReady,
-    reason: signingReady
-      ? "ready"
-      : provenance === "DESKTOP_MANAGED"
-        ? "missing_signer"
-        : "user_created_key",
-  };
-}
-
 function assertManagedSigningReady(
   options: LoopCommandPreparationOptions,
 ): void {
-  const readiness =
-    options.getManagedPopSigningReadiness?.() ?? getDefaultReadiness(options);
+  const readiness = options.getManagedPopSigningReadiness();
   if (readiness.provenance === "DESKTOP_MANAGED" && readiness.signingReady) {
     return;
   }

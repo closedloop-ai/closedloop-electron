@@ -6,7 +6,7 @@ import {
   CloudCommandExecutor,
   type CloudCommandExecutorOptions,
 } from "../src/main/cloud-command-executor.js";
-import { SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR } from "../src/main/loop-command-preparer.js";
+import { SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR } from "../src/main/signed-loop-launch-error.js";
 import { COMMAND_SIGNING_REJECTION_REASONS } from "../src/shared/contracts.js";
 import type {
   DesktopCancelEvent,

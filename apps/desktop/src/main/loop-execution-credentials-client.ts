@@ -1,9 +1,12 @@
-import {
-  buildManagedDesktopPopHeaders,
-  type DesktopPopUnavailableReporter,
-} from "./desktop-pop-sign-utils.js";
 import type { ApiKeyProvenance } from "./api-key-store.js";
-import type { DesktopPopSigner } from "./desktop-pop.js";
+import {
+  getDesktopPopUnavailableReason,
+  type DesktopPopHeaders,
+  type DesktopPopSigner,
+  type DesktopPopSigningRequest,
+} from "./desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "./desktop-pop-sign-utils.js";
+import { SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR } from "./signed-loop-launch-error.js";
 
 export interface FetchLoopExecutionCredentialsOptions {
   apiOrigin: string;
@@ -20,9 +23,40 @@ type ApiResult<T> =
   | { success: true; data: T }
   | { success: false; error: string };
 
+const LOOP_EXECUTION_CREDENTIALS_SURFACE = "loop_execution_credentials";
+
+async function buildRequiredManagedDesktopPopHeaders(input: {
+  apiKeyProvenance: ApiKeyProvenance;
+  signDesktopRequest?: DesktopPopSigner;
+  request: DesktopPopSigningRequest;
+  onUnavailable?: DesktopPopUnavailableReporter;
+}): Promise<DesktopPopHeaders> {
+  if (input.apiKeyProvenance !== "DESKTOP_MANAGED") {
+    throw new Error(SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR);
+  }
+  if (!input.signDesktopRequest) {
+    input.onUnavailable?.(LOOP_EXECUTION_CREDENTIALS_SURFACE, "missing_signer");
+    throw new Error(SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR);
+  }
+
+  let reason = "sign_failed_or_null";
+  try {
+    const headers = await input.signDesktopRequest(input.request);
+    if (headers) {
+      return headers;
+    }
+  } catch (error) {
+    reason = getDesktopPopUnavailableReason(error);
+  }
+
+  input.onUnavailable?.(LOOP_EXECUTION_CREDENTIALS_SURFACE, reason);
+  throw new Error(SIGNED_LOOP_LAUNCH_MANAGED_KEY_ERROR);
+}
+
 /**
  * Fetches the one-shot Desktop loop execution body after command signature
- * verification. The browser never receives this payload.
+ * verification. This route requires Desktop-managed PoP headers; request-time
+ * signing failures are hard failures so Desktop does not fall back to bearer-only.
  */
 export async function fetchLoopExecutionCredentials(
   options: FetchLoopExecutionCredentialsOptions
@@ -31,16 +65,13 @@ export async function fetchLoopExecutionCredentials(
     `/compute-targets/${encodeURIComponent(options.computeTargetId)}/loops/${encodeURIComponent(options.loopId)}/execution-credentials`,
     options.apiOrigin
   );
-  const popHeaders = await buildManagedDesktopPopHeaders({
+  const popHeaders = await buildRequiredManagedDesktopPopHeaders({
     apiKeyProvenance: options.apiKeyProvenance,
     signDesktopRequest: options.signDesktopRequest,
     request: {
       method: "POST",
       pathname: url.pathname,
     },
-    surface: url.pathname,
-    unavailableMessage:
-      "PoP signing unavailable for loop execution credentials; continuing bearer-only compatibility mode",
     onUnavailable: options.onDesktopPopUnavailable,
   });
   const response = await fetch(url, {
@@ -48,7 +79,7 @@ export async function fetchLoopExecutionCredentials(
     headers: {
       Authorization: `Bearer ${options.apiKey}`,
       "Content-Type": "application/json",
-      ...(popHeaders ?? {}),
+      ...popHeaders,
     },
     body: JSON.stringify({ commandId: options.commandId }),
   });
