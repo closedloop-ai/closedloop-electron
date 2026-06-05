@@ -180,6 +180,7 @@ export async function parseRolloutFile(
   let assistantMessageCount = 0;
   const messageTimestamps: string[] = [];
   const toolUses: NormalizedToolUse[] = [];
+  const toolCallIndex = new Map<string, number>();
   const turnDurations: NormalizedTurnDuration[] = [];
   const plans: NormalizedPlan[] = []; // CLOSEDLOOP plan-extraction (FEA-1189)
   const apiErrors: NormalizedApiError[] = [];
@@ -262,6 +263,7 @@ export async function parseRolloutFile(
     } else if (itype === "function_call" || itype === "custom_tool_call") {
       const toolName = asStr(p.name) ?? asStr(p.tool_name) ?? "function";
       const toolInput = safeJson(p.arguments != null ? p.arguments : p.input);
+      const callId = asStr(p.call_id) ?? asStr(p.id) ?? null;
       const tu: NormalizedToolUse = {
         name: toolName,
         timestamp: iso || firstTimestamp,
@@ -286,14 +288,18 @@ export async function parseRolloutFile(
           }
         }
       }
+      if (callId) toolCallIndex.set(callId, toolUses.length);
       toolUses.push(tu);
     } else if (itype === "local_shell_call") {
+      const shellCallId = asStr(p.call_id) ?? asStr(p.id) ?? null;
       const action = asRec(p.action) ?? {};
-      toolUses.push({
+      const shellTu: NormalizedToolUse = {
         name: "shell",
         timestamp: iso || firstTimestamp,
         input: action.command || p.action || p.input || null,
-      });
+      };
+      if (shellCallId) toolCallIndex.set(shellCallId, toolUses.length);
+      toolUses.push(shellTu);
     } else if (
       itype === "function_call_output" ||
       itype === "custom_tool_call_output" ||
@@ -304,14 +310,16 @@ export async function parseRolloutFile(
       const isErr = outRec
         ? outRec.success === false || outRec.is_error === true || !!outRec.error
         : false;
-      // CR-3: capture tool output on the most recent matching tool use
+      // CR-3: match tool output by call ID when available, fall back to most recent
       const outputStr =
         typeof out === "string" ? out : JSON.stringify(out);
       const truncatedOutput = truncateText(outputStr);
-      if (toolUses.length > 0) {
-        const lastTool = toolUses[toolUses.length - 1];
-        lastTool.output = truncatedOutput;
-        lastTool.isError = isErr;
+      const outputCallId = asStr(p.call_id) ?? asStr(p.id) ?? null;
+      const matchIdx = outputCallId != null ? toolCallIndex.get(outputCallId) : undefined;
+      const matchedTool = matchIdx != null ? toolUses[matchIdx] : toolUses[toolUses.length - 1];
+      if (matchedTool) {
+        matchedTool.output = truncatedOutput;
+        matchedTool.isError = isErr;
       }
       if (isErr) {
         const content =

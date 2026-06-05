@@ -95,11 +95,16 @@ export function computeUnifiedDiffDelta(patch: string): { add: number; del: numb
   return { add, del };
 }
 
-/** CR-4: Count file headers in a unified diff. */
+/** CR-4: Count file headers in a unified or Codex-style diff. */
 export function countDiffFiles(patch: string): number {
   let count = 0;
   for (const line of patch.split("\n")) {
-    if (line.startsWith("--- ")) count++;
+    if (
+      line.startsWith("--- ") ||
+      line.startsWith("*** Add File:") ||
+      line.startsWith("*** Update File:") ||
+      line.startsWith("*** Delete File:")
+    ) count++;
   }
   return count;
 }
