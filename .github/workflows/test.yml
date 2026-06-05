@@ -36,42 +36,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Node 24 Ubuntu runners have installed the electron package without a
+      # usable platform binary/path; verify first and repair only if needed.
       - name: Verify Electron binary install
-        working-directory: apps/desktop
-        run: |
-          unset ELECTRON_SKIP_BINARY_DOWNLOAD
-          electron_dir="$(node -p 'const path = require("node:path"); path.dirname(require.resolve("electron/package.json"))')"
-          version="$(node -p 'require("electron/package.json").version')"
-          platform="$(node -p 'process.env.npm_config_platform || process.platform')"
-          arch="$(node -p 'process.env.npm_config_arch || process.arch')"
-          platform_path="$(node -p 'const paths = { darwin: "Electron.app/Contents/MacOS/Electron", freebsd: "electron", linux: "electron", mas: "Electron.app/Contents/MacOS/Electron", openbsd: "electron", win32: "electron.exe" }; const value = paths[process.argv[1]]; if (!value) throw new Error(`Electron builds are not available on platform: ${process.argv[1]}`); value' "$platform")"
-          artifact="electron-v$version-$platform-$arch.zip"
-          checksum="$(node -p 'const path = require("node:path"); const { createRequire } = require("node:module"); const electronDir = path.dirname(require.resolve("electron/package.json")); const electronRequire = createRequire(path.join(electronDir, "install.js")); const value = electronRequire("./checksums.json")[process.argv[1]]; if (!value) throw new Error(`Missing Electron checksum for ${process.argv[1]}`); value' "$artifact")"
-
-          download_dir="${RUNNER_TEMP:-$(mktemp -d)}"
-          zip_path="$download_dir/$artifact"
-          curl --fail --location --retry 3 --output "$zip_path" \
-            "https://github.com/electron/electron/releases/download/v$version/$artifact"
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual_checksum="$(sha256sum "$zip_path" | awk '{print $1}')"
-          else
-            actual_checksum="$(shasum -a 256 "$zip_path" | awk '{print $1}')"
-          fi
-          if [ "$actual_checksum" != "$checksum" ]; then
-            echo "Electron checksum mismatch for $artifact" >&2
-            echo "expected $checksum, got $actual_checksum" >&2
-            exit 1
-          fi
-
-          rm -rf "$electron_dir/dist"
-          mkdir -p "$electron_dir/dist"
-          unzip -q "$zip_path" -d "$electron_dir/dist"
-          if [ -f "$electron_dir/dist/electron.d.ts" ]; then
-            mv "$electron_dir/dist/electron.d.ts" "$electron_dir/electron.d.ts"
-          fi
-          printf "%s" "$platform_path" > "$electron_dir/path.txt"
-
-          node -e 'const fs = require("node:fs"); const electronBinary = require("electron"); if (!fs.existsSync(electronBinary)) throw new Error(`Electron binary missing after install at ${electronBinary}`); console.log(`Electron verified at ${electronBinary}`)'
+        run: pnpm -C apps/desktop verify:electron-binary
 
       - name: Generate build info
         run: pnpm -r prebuild

@@ -24,6 +24,7 @@
     "assert:design-system-boundary": "tsx --test test/agent-dashboard-boundary.test.ts",
     "test:boot:design-system-off": "node --import tsx scripts/assert-design-system-boot-off.mjs",
     "measure:agent-dashboard-storage": "node scripts/measure-agent-dashboard-storage.mjs",
+    "verify:electron-binary": "node scripts/ensure-electron-binary.mjs",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts && node --test \"scripts/agent-monitor-packs/__tests__/*.test.js\" \"scripts/agent-monitor-pull-requests/__tests__/*.test.js\"",
     "pretest:contract": "pnpm build:agent-monitor",
     "test:contract": "node --test \"test-e2e/agent-monitor/specs/api-contract/*.test.mjs\"",
