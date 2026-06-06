@@ -255,9 +255,10 @@ test("design-system BrowserWindow protocol and navigation guards are fail-closed
   assert.match(windowSource, /url\.hostname !== "renderer"/);
   assert.match(windowSource, /decodeURIComponent\(url\.pathname\)/);
   assert.match(windowSource, /startsWith\("\/design-system\/"\)/);
+  assert.match(windowSource, /startsWith\("\/assets\/"\)/);
   assert.match(windowSource, /pathParts\.includes\("\.\."\)/);
   assert.match(windowSource, /APP_PROTOCOL_EXTENSIONS\.has\(ext\)/);
-  assert.match(windowSource, /realpathSync\(DESIGN_RENDERER_DIR\)/);
+  assert.match(windowSource, /realpathSync\(assetRoot\)/);
   assert.match(windowSource, /statSync\(realFile\)\.isFile\(\)/);
   assert.match(windowSource, /isPathInside\(realFile, realRoot\)/);
   assert.match(windowSource, /new URL\(url\)\.href === this\.allowedRendererUrl/);
