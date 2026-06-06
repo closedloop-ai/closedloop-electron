@@ -52,6 +52,11 @@ export interface LifecycleDeps {
   log?: (message: string) => void;
   /** Minutes of inactivity after which a still-active session is abandoned. */
   staleMinutes?: number;
+  /**
+   * FEA-1548: resolve the current authenticated user's identity for stamping
+   * on new sessions. Returns null when no user is signed in.
+   */
+  getUserIdentity?: () => { userId: string; organizationId: string | null } | null;
 }
 
 const COMPACTION_RE = /compact|compress|context.*(reduc|truncat|summar)/i;
@@ -85,8 +90,8 @@ export function createLifecycle(db: DatabaseSync, deps: LifecycleDeps) {
     "SELECT id, status, harness, billing_mode, model FROM sessions WHERE id = ?",
   );
   const insertSessionStmt = db.prepare(`
-    INSERT INTO sessions (id, name, status, cwd, model, started_at, updated_at, harness, billing_mode)
-    VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, name, status, cwd, model, started_at, updated_at, harness, billing_mode, user_id, organization_id)
+    VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const setSessionStatusStmt = db.prepare(
     "UPDATE sessions SET status = ?, updated_at = ?, ended_at = ? WHERE id = ?",
@@ -169,6 +174,7 @@ export function createLifecycle(db: DatabaseSync, deps: LifecycleDeps) {
       return existing;
     }
     const billingMode = safe(() => deps.detectBillingMode(harness)) ?? "unknown";
+    const identity = safe(() => deps.getUserIdentity?.()) ?? null;
     insertSessionStmt.run(
       sessionId,
       data.session_name ?? null,
@@ -178,6 +184,8 @@ export function createLifecycle(db: DatabaseSync, deps: LifecycleDeps) {
       now,
       harness,
       billingMode,
+      identity?.userId ?? null,
+      identity?.organizationId ?? null,
     );
     // Every session has a synthetic main agent.
     insertAgentStmt.run(

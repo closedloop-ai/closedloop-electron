@@ -73,6 +73,8 @@ type SessionRow = {
   metadata: string | null;
   harness: string | null;
   billing_mode: string | null;
+  user_id: string | null;
+  organization_id: string | null;
 };
 
 type AgentRow = {
@@ -932,7 +934,9 @@ export function loadSyncedSessions(
         awaiting_input_since,
         metadata,
         harness,
-        billing_mode
+        billing_mode,
+        user_id,
+        organization_id
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -1040,6 +1044,8 @@ export function loadSyncedSessions(
         awaitingInputSince: row.awaiting_input_since,
         metadata: parseJsonObjectText(row.metadata),
         ...(attribution ? { attribution } : {}),
+        userId: row.user_id,
+        organizationId: row.organization_id,
         agents: (agentsBySessionId.get(id) ?? []).map((agentRow) => ({
           externalAgentId: agentRow.id,
           name: agentRow.name,
