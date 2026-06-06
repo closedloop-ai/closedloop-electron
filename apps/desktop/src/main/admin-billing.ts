@@ -60,7 +60,7 @@ export type AdminFetchLike = (
   init: { method: "GET"; headers: Record<string, string> },
 ) => Promise<AdminFetchResponse>;
 
-/** Default fetch implementation (Electron main / Node 22 global fetch). */
+/** Default fetch implementation (Electron main / Node global fetch). */
 export const DEFAULT_ADMIN_FETCH: AdminFetchLike = async (url, init) => {
   return fetch(url, init);
 };

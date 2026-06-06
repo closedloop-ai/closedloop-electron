@@ -37,6 +37,8 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - In Desktop main/server NodeNext ESM code, dependency subpath imports must either use an exported package subpath or the concrete runtime file extension, and new subpath imports should be validated against built output before shipping.
 - Prefix intentionally unused variables/args with `_` to satisfy lint rules.
 - Do not edit `apps/desktop/src/shared/build-info.ts` manually (auto-generated in prebuild).
+- When changing the desktop Node tooling baseline or Electron runtime assumptions, keep `@types/node` pinned to the lowest supported Node runtime major so TypeScript cannot accept newer Node-only APIs.
+- For GitHub Actions jobs that run desktop tests or package/release under Node 24, verify Electron's platform binary with `pnpm -C apps/desktop verify:electron-binary` immediately after `pnpm install --frozen-lockfile`. Do not inline ad hoc Electron download logic in workflows; keep the shared verifier out of static/headless audit jobs that do not launch or import Electron.
 - Avoid unnecessary TypeScript casts. Prefer importing concrete shared types, narrowing with type guards, or shaping helper return types so call sites do not need `as` to satisfy the compiler.
 - Use shared constants, generated enums, or exported enum-like objects for statuses, reasons, protocol modes, channel names, storage keys, and other contract values. Do not duplicate hardcoded strings when a constant or enum exists.
 - Export and reuse shared TypeScript types for cross-module contracts or metadata patches instead of duplicating inline `Pick`/`Partial` shapes in callers.

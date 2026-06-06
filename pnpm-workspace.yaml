@@ -25,15 +25,18 @@ minimumReleaseAgeExclude:
 # file:, link:) introduced via transitive deps — closes the github-ref bypass.
 blockExoticSubdeps: true
 
-# pnpm 10 disables postinstall lifecycle scripts by default — also a
-# supply-chain mitigation, since malicious packages typically run their
-# payload via postinstall. Explicitly allowlist the few packages whose
-# postinstall is load-bearing for this Electron app:
-#   - electron: downloads the platform-specific Electron binary
-#   - electron-winstaller: builds the Windows installer toolchain
-#   - esbuild: installs the platform-specific native binary
-# Add to this list intentionally, after auditing the package's install script.
-onlyBuiltDependencies:
-  - electron
-  - electron-winstaller
-  - esbuild
+# pnpm 11 blocks dependency build scripts unless explicitly approved.
+# Keep this standalone allowlist limited to audited desktop install scripts.
+allowBuilds:
+  # Transitive telemetry notice script is not required for desktop installs.
+  '@scarf/scarf': false
+  # Keep transitive native database addon builds denied unless a reviewed desktop path requires them.
+  better-sqlite3: false
+  # Downloads the platform-specific Electron binary.
+  electron: true
+  # Builds the Windows installer toolchain.
+  electron-winstaller: true
+  # Installs the platform-specific esbuild native binary.
+  esbuild: true
+  # Keep transitive image tooling builds denied unless a reviewed desktop path requires them.
+  sharp: false

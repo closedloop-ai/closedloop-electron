@@ -3,8 +3,6 @@ name: Desktop Version Bump Check
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - "apps/desktop/**"
 
 jobs:
   version-bump-check:
@@ -16,17 +14,67 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Detect desktop changes
+        id: desktop_changes
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          BASE=$(git merge-base "origin/$BASE_REF" HEAD)
+
+          if git diff --quiet "$BASE" HEAD -- apps/desktop; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No apps/desktop changes detected; desktop version bump is not required."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "apps/desktop changes detected; desktop version bump is required."
+          fi
+
       - name: Check desktop version bump
+        if: steps.desktop_changes.outputs.changed == 'true'
         run: |
           BASE_REF="${{ github.event.pull_request.base.ref }}"
           BASE=$(git merge-base "origin/$BASE_REF" HEAD)
 
           OLD_VERSION=$(git show "$BASE":apps/desktop/package.json | jq -r .version)
+          CURRENT_BASE_VERSION=$(git show "origin/$BASE_REF":apps/desktop/package.json | jq -r .version)
           NEW_VERSION=$(jq -r .version apps/desktop/package.json)
+
+          version_gt() {
+            local candidate="$1"
+            local baseline="$2"
+            local candidate_major candidate_minor candidate_patch
+            local baseline_major baseline_minor baseline_patch
+
+            IFS=. read -r candidate_major candidate_minor candidate_patch <<< "$candidate"
+            IFS=. read -r baseline_major baseline_minor baseline_patch <<< "$baseline"
+
+            for part in "$candidate_major" "$candidate_minor" "$candidate_patch" "$baseline_major" "$baseline_minor" "$baseline_patch"; do
+              if [[ ! "$part" =~ ^[0-9]+$ ]]; then
+                echo "::error::Desktop versions must use numeric major.minor.patch format for comparison. Saw '$candidate' and '$baseline'."
+                exit 1
+              fi
+            done
+
+            if (( candidate_major != baseline_major )); then
+              (( candidate_major > baseline_major ))
+              return
+            fi
+
+            if (( candidate_minor != baseline_minor )); then
+              (( candidate_minor > baseline_minor ))
+              return
+            fi
+
+            (( candidate_patch > baseline_patch ))
+          }
 
           if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
             echo "::error::apps/desktop/ was modified but version in apps/desktop/package.json was not bumped (still $OLD_VERSION). Please bump the version."
             exit 1
           fi
 
-          echo "Version bumped: $OLD_VERSION -> $NEW_VERSION"
+          if ! version_gt "$NEW_VERSION" "$CURRENT_BASE_VERSION"; then
+            echo "::error::apps/desktop/package.json version ($NEW_VERSION) must be greater than the current base branch version ($CURRENT_BASE_VERSION). Fetch the latest base branch and bump the desktop version again."
+            exit 1
+          fi
+
+          echo "Version bumped: $OLD_VERSION -> $NEW_VERSION; current base branch version is $CURRENT_BASE_VERSION"
