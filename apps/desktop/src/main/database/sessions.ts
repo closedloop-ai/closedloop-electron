@@ -116,6 +116,8 @@ export function createSessionStore(db: DatabaseSync) {
     const params: SQLInputValue[] = [];
     if (status === "waiting") {
       where.push("s.status NOT IN ('completed', 'abandoned', 'error') AND s.awaiting_input_since IS NOT NULL");
+    } else if (status === "running") {
+      where.push("s.status NOT IN ('completed', 'abandoned', 'error') AND s.awaiting_input_since IS NULL");
     } else if (status && status !== "all") {
       where.push("s.status = ?");
       params.push(status);

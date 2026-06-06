@@ -166,6 +166,10 @@ test("sessions.getPage supports renderer status and search filters", () => {
     assert.deepEqual(waiting.sessions.map((session) => session.id), ["waiting-1"]);
     assert.equal(waiting.total, 1);
 
+    const running = db.sessions.getPage({ status: "running" });
+    assert.deepEqual(running.sessions.map((session) => session.id), ["active-1"]);
+    assert.equal(running.total, 1);
+
     const completed = db.sessions.getPage({ status: "completed" });
     assert.deepEqual(completed.sessions.map((session) => session.id), ["completed-1"]);
 

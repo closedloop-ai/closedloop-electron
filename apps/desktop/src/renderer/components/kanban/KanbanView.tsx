@@ -10,7 +10,7 @@ function XIcon() { return <span className="text-red-400 text-xs">&#10007;</span>
 function StopIcon() { return <span className="text-zinc-400 text-xs">&#9632;</span>; }
 
 const COLUMNS = [
-  { key: "running", label: "Running", status: "active", icon: PlayIcon(), color: "text-blue-400" },
+  { key: "running", label: "Running", status: "running", icon: PlayIcon(), color: "text-blue-400" },
   { key: "waiting", label: "Waiting", status: "waiting", icon: ClockIcon(), color: "text-yellow-400" },
   { key: "completed", label: "Completed", status: "completed", icon: CheckIcon(), color: "text-green-400" },
   { key: "failed", label: "Failed", status: "error", icon: XIcon(), color: "text-red-400" },
