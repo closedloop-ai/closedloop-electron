@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const RENDERER_DIR = path.resolve(__dirname, "..", "renderer");
 const DESIGN_RENDERER_DIR = path.join(RENDERER_DIR, "design-system");
+const ASSETS_RENDERER_DIR = path.join(RENDERER_DIR, "assets");
 const DESIGN_RENDERER_URL = "app://renderer/design-system/index.html";
 const APP_PROTOCOL = "app";
 const EXTERNAL_LINK_HOSTS = new Set([
@@ -89,11 +90,12 @@ function serveAppProtocolAsset(request: Request): Response {
     return new Response("Bad request", { status: 400 });
   }
 
-  if (
-    !decodedPathname.startsWith("/design-system/") ||
-    decodedPathname.includes("\0") ||
-    decodedPathname.includes("\\")
-  ) {
+  if (decodedPathname.includes("\0") || decodedPathname.includes("\\")) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const assetRoot = resolveAppProtocolRoot(decodedPathname);
+  if (!assetRoot) {
     return new Response("Not found", { status: 404 });
   }
 
@@ -104,7 +106,7 @@ function serveAppProtocolAsset(request: Request): Response {
   }
 
   const filePath = path.resolve(RENDERER_DIR, relativePath);
-  if (!isPathInside(filePath, DESIGN_RENDERER_DIR)) {
+  if (!isPathInside(filePath, assetRoot)) {
     return new Response("Forbidden", { status: 403 });
   }
 
@@ -120,7 +122,7 @@ function serveAppProtocolAsset(request: Request): Response {
   let realRoot: string;
   let realFile: string;
   try {
-    realRoot = realpathSync(DESIGN_RENDERER_DIR);
+    realRoot = realpathSync(assetRoot);
     realFile = realpathSync(filePath);
     if (!statSync(realFile).isFile() || !isPathInside(realFile, realRoot)) {
       return new Response("Forbidden", { status: 403 });
@@ -134,6 +136,16 @@ function serveAppProtocolAsset(request: Request): Response {
     status: 200,
     headers: { "Content-Type": mimeType(ext) },
   });
+}
+
+function resolveAppProtocolRoot(pathname: string): string | null {
+  if (pathname.startsWith("/design-system/")) {
+    return DESIGN_RENDERER_DIR;
+  }
+  if (pathname.startsWith("/assets/")) {
+    return ASSETS_RENDERER_DIR;
+  }
+  return null;
 }
 
 export class DesktopWindow {
