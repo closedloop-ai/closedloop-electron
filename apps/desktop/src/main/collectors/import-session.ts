@@ -12,10 +12,10 @@ import type { Harness, NormalizedSession, NormalizedToolUse } from "./types.js";
  * Idempotency (FEA-1503 AC): re-import adds nothing new.
  *  - session row: COALESCE-fill on conflict, never clobbers a live row.
  *  - events: per-(session, event_type) high-water-mark on `created_at` — only
- *    events with a transcript timestamp strictly greater than the stored max are
- *    inserted (the exact vendor mechanism). Hook-written events carry
- *    `created_at ≈ now`, so file events with past transcript timestamps fall under
- *    the high-water-mark and are never double-counted against the live hook path.
+ *    events with a source timestamp strictly greater than the stored max are
+ *    inserted. Backfill never stamps events with importer runtime `now`; when an
+ *    individual source event has no timestamp, it falls back to the session's
+ *    source timestamp so date windows remain tied to when work occurred.
  *  - tokens: `tokenUsage.replace` nets zero when re-applying equal cumulatives.
  *
  * Each session is applied in one `BEGIN IMMEDIATE` transaction (mirrors
@@ -75,7 +75,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       cwd = COALESCE(cwd, ?),
       harness = CASE WHEN COALESCE(harness, '') = '' THEN ? ELSE harness END,
       billing_mode = CASE WHEN COALESCE(billing_mode, '') IN ('', 'unknown') THEN ? ELSE billing_mode END,
-      updated_at = ?
+      updated_at = CASE WHEN updated_at IS NULL OR updated_at < ? THEN ? ELSE updated_at END
     WHERE id = ?
   `);
   const reactivateSessionStmt = db.prepare(
@@ -107,11 +107,18 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
     return `${sessionId}-main`;
   }
 
-  function isRecentlyActive(session: NormalizedSession, nowMs: number): boolean {
+  function isRecentlyActive(
+    session: NormalizedSession,
+    nowMs: number,
+    sourceUpdatedAt: string,
+  ): boolean {
+    const sourceUpdatedAtMs = Date.parse(sourceUpdatedAt);
     return (
       session.fileModifiedAt != null &&
       Number.isFinite(session.fileModifiedAt) &&
-      nowMs - session.fileModifiedAt < RECENT_ACTIVITY_MS
+      nowMs - session.fileModifiedAt < RECENT_ACTIVITY_MS &&
+      Number.isFinite(sourceUpdatedAtMs) &&
+      nowMs - sourceUpdatedAtMs < RECENT_ACTIVITY_MS
     );
   }
 
@@ -162,6 +169,29 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
     );
   }
 
+  function sessionSourceUpdatedAt(session: NormalizedSession, startedAt: string): string {
+    let latest = startedAt;
+    let latestMs = Date.parse(startedAt);
+    const consider = (value: string | null | undefined): void => {
+      if (!value) return;
+      const ms = Date.parse(value);
+      if (!Number.isFinite(ms)) return;
+      if (!Number.isFinite(latestMs) || ms > latestMs) {
+        latest = value;
+        latestMs = ms;
+      }
+    };
+
+    consider(session.endedAt);
+    for (const ts of session.messageTimestamps ?? []) consider(ts);
+    for (const toolUse of session.toolUses ?? []) consider(toolUse.timestamp);
+    for (const duration of session.turnDurations ?? []) consider(duration.timestamp);
+    for (const error of session.apiErrors ?? []) consider(error.timestamp);
+    for (const error of session.toolResultErrors ?? []) consider(error.timestamp);
+
+    return latest;
+  }
+
   function importSession(session: NormalizedSession, harness: Harness): ImportResult {
     if (typeof session.sessionId !== "string" || session.sessionId.length === 0) {
       return { skipped: true, reactivated: false };
@@ -170,11 +200,14 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       return { skipped: true, reactivated: false };
     }
 
+    const startedAt = session.startedAt;
     const now = nowFn();
+    const sourceUpdatedAt = sessionSourceUpdatedAt(session, startedAt);
     const nowMs = Date.parse(now);
     const recentlyActive = isRecentlyActive(
       session,
       Number.isNaN(nowMs) ? Date.now() : nowMs,
+      sourceUpdatedAt,
     );
     const mainId = mainAgentId(session.sessionId);
 
@@ -193,8 +226,8 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           status,
           session.cwd ?? null,
           session.model ?? null,
-          session.startedAt,
-          session.endedAt ?? session.startedAt,
+          startedAt,
+          sourceUpdatedAt,
           status === "completed" ? session.endedAt ?? null : null,
           harness,
           billingMode,
@@ -209,9 +242,9 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           status === "completed" ? "completed" : "waiting",
           null,
           null,
-          session.startedAt,
-          now,
-          status === "completed" ? session.endedAt ?? now : null,
+          startedAt,
+          sourceUpdatedAt,
+          status === "completed" ? sourceUpdatedAt : null,
           null,
           null,
         );
@@ -223,14 +256,15 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           session.cwd ?? null,
           harness,
           billingMode,
-          now,
+          sourceUpdatedAt,
+          sourceUpdatedAt,
           session.sessionId,
         );
         const isLive = existing.status === "active" && existing.ended_at == null;
         if (recentlyActive && !isLive) {
-          reactivateSessionStmt.run(now, session.sessionId);
+          reactivateSessionStmt.run(sourceUpdatedAt, session.sessionId);
           if (getAgentStmt.get(mainId)) {
-            reactivateMainAgentStmt.run(now, mainId);
+            reactivateMainAgentStmt.run(sourceUpdatedAt, mainId);
           }
           reactivated = true;
         }
@@ -254,9 +288,9 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
         summary: string | null,
         data: string | null,
       ): void => {
-        if (!ts) return;
+        const eventTimestamp = ts ?? startedAt;
         const prev = highWater.get(eventType);
-        if (prev != null && ts <= prev) return;
+        if (prev != null && eventTimestamp <= prev) return;
         insertEventStmt.run(
           randomUUID(),
           session.sessionId,
@@ -265,7 +299,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           toolName,
           summary,
           data,
-          ts,
+          eventTimestamp,
         );
         inserted++;
       };
@@ -285,9 +319,9 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
             subagentName(tu),
             strOf(input.subagent_type) ?? null,
             prompt ? prompt.slice(0, 500) : null,
-            tu.timestamp ?? session.startedAt,
-            now,
-            tu.timestamp ?? session.endedAt ?? now,
+            tu.timestamp ?? startedAt,
+            tu.timestamp ?? sourceUpdatedAt,
+            tu.timestamp ?? sourceUpdatedAt,
             mainId,
           );
           addEvent("PreToolUse", subId, tu.timestamp, tu.name, "Spawned subagent", eventData(tu.input));
@@ -308,7 +342,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
 
       // ── Tokens (store reconciles raw/effective; idempotent on equal counts) ───
       for (const [model, counts] of Object.entries(session.tokensByModel ?? {})) {
-        deps.tokenUsage.replace(session.sessionId, model, counts, now);
+        deps.tokenUsage.replace(session.sessionId, model, counts, sourceUpdatedAt);
       }
 
       db.exec("COMMIT");

@@ -148,6 +148,102 @@ test("a new event with a later timestamp backfills without duplicating prior eve
   }
 });
 
+test("backfill writes source timestamps instead of importer runtime", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "old-session",
+        startedAt: "2026-04-01T10:00:00.000Z",
+        endedAt: "2026-04-01T10:05:00.000Z",
+        fileModifiedAt: Date.parse("2026-06-06T11:59:00.000Z"),
+        messageTimestamps: [
+          "2026-04-01T10:01:00.000Z",
+          "2026-04-01T10:02:00.000Z",
+        ],
+        toolUses: [
+          { name: "Read", timestamp: "2026-04-01T10:01:30.000Z", input: { file: "x" } },
+        ],
+      }),
+      "codex",
+    );
+
+    const session = db.sessions.getById("old-session");
+    assert.ok(session);
+    assert.equal(session.status, "completed");
+    assert.equal(session.updatedAt, "2026-04-01T10:05:00.000Z");
+
+    const agent = db.agents.getBySession("old-session")[0];
+    assert.equal(agent.updatedAt, "2026-04-01T10:05:00.000Z");
+
+    const events = db.events.getBySession("old-session");
+    assert.equal(events.length, 3);
+    assert.deepEqual(
+      events.map((event) => event.createdAt).sort(),
+      [
+        "2026-04-01T10:01:00.000Z",
+        "2026-04-01T10:01:30.000Z",
+        "2026-04-01T10:02:00.000Z",
+      ],
+    );
+    const recentRow = db.connection.prepare(`
+      SELECT COUNT(*) AS count
+      FROM events
+      WHERE session_id = ?
+        AND created_at >= datetime(?, '-30 days')
+    `).get("old-session", "2026-06-06T12:00:00.000Z") as { count: number };
+    assert.equal(
+      recentRow.count,
+      0,
+      "historical backfill must not appear in recent event windows",
+    );
+
+    const tokenRow = db.connection.prepare(`
+      SELECT created_at AS createdAt, updated_at AS updatedAt
+      FROM token_usage
+      WHERE session_id = ? AND model = ?
+    `).get("old-session", "gpt-5") as { createdAt: string; updatedAt: string };
+    assert.equal(tokenRow.createdAt, "2026-04-01T10:05:00.000Z");
+    assert.equal(tokenRow.updatedAt, "2026-04-01T10:05:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
+test("backfill falls back missing event timestamps to the source session date", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "missing-event-ts",
+        startedAt: "2026-04-02T10:00:00.000Z",
+        endedAt: "2026-04-02T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [{ name: "Read", timestamp: null, input: { file: "x" } }],
+      }),
+      "codex",
+    );
+
+    const events = db.events.getBySession("missing-event-ts");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].createdAt, "2026-04-02T10:00:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
 test("Agent/Task tool use creates an idempotent subagent row", () => {
   const { db, cleanup } = openTempDb();
   try {
