@@ -1,29 +1,29 @@
-import type { DatabaseSync } from "node:sqlite";
-import type { SessionRow, SessionWithAgents } from "../../shared/agent-db-contract.js";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type {
+  SessionPage,
+  SessionPageRequest,
+  SessionRow,
+  SessionWithAgents,
+} from "../../shared/agent-db-contract.js";
 
 // Terminal session statuses (vendor + canonical AgentSession vocabulary). A
 // session not in this set is treated as active. Writes are owned by
 // `lifecycle.ts`; this store is read-only.
 const TERMINAL_STATUSES = "('completed', 'abandoned', 'error')";
 const TERMINAL_STATUS_SET = new Set(["completed", "abandoned", "error"]);
-const SESSION_DETAILS_CTES = `
-  WITH agent_counts AS (
-    SELECT session_id, COUNT(*) as agent_count
-    FROM agents
-    GROUP BY session_id
-  ),
-  event_counts AS (
-    SELECT session_id, COUNT(*) as event_count
-    FROM events
-    GROUP BY session_id
-  ),
-  token_totals AS (
-    SELECT
-      session_id,
-      COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) as total_tokens
-    FROM token_usage
-    GROUP BY session_id
-  )
+const MAX_SESSION_PAGE_LIMIT = 100;
+const DEFAULT_SESSION_PAGE_LIMIT = 25;
+const SESSION_DETAIL_SELECT = `
+  SELECT
+    s.*,
+    (SELECT COUNT(*) FROM agents a WHERE a.session_id = s.id) as agent_count,
+    (SELECT COUNT(*) FROM events e WHERE e.session_id = s.id) as event_count,
+    (
+      SELECT COALESCE(SUM(COALESCE(t.input_tokens, 0) + COALESCE(t.output_tokens, 0)), 0)
+      FROM token_usage t
+      WHERE t.session_id = s.id
+    ) as total_tokens
+  FROM sessions s
 `;
 
 export function createSessionStore(db: DatabaseSync) {
@@ -32,32 +32,18 @@ export function createSessionStore(db: DatabaseSync) {
   const getActiveStmt = db.prepare(
     `SELECT * FROM sessions WHERE status NOT IN ${TERMINAL_STATUSES} ORDER BY started_at DESC`,
   );
+  const getDetailsByIdStmt = db.prepare(`
+    ${SESSION_DETAIL_SELECT}
+    WHERE s.id = ?
+  `);
 
   const getActiveWithDetailsStmt = db.prepare(`
-    ${SESSION_DETAILS_CTES}
-    SELECT
-      s.*,
-      COALESCE(ac.agent_count, 0) as agent_count,
-      COALESCE(ec.event_count, 0) as event_count,
-      COALESCE(tt.total_tokens, 0) as total_tokens
-    FROM sessions s
-    LEFT JOIN agent_counts ac ON ac.session_id = s.id
-    LEFT JOIN event_counts ec ON ec.session_id = s.id
-    LEFT JOIN token_totals tt ON tt.session_id = s.id
+    ${SESSION_DETAIL_SELECT}
     WHERE s.status NOT IN ${TERMINAL_STATUSES}
     ORDER BY s.started_at DESC
   `);
   const getHistoricalWithDetailsStmt = db.prepare(`
-    ${SESSION_DETAILS_CTES}
-    SELECT
-      s.*,
-      COALESCE(ac.agent_count, 0) as agent_count,
-      COALESCE(ec.event_count, 0) as event_count,
-      COALESCE(tt.total_tokens, 0) as total_tokens
-    FROM sessions s
-    LEFT JOIN agent_counts ac ON ac.session_id = s.id
-    LEFT JOIN event_counts ec ON ec.session_id = s.id
-    LEFT JOIN token_totals tt ON tt.session_id = s.id
+    ${SESSION_DETAIL_SELECT}
     WHERE s.status IN ${TERMINAL_STATUSES}
     ORDER BY s.started_at DESC
   `);
@@ -97,6 +83,54 @@ export function createSessionStore(db: DatabaseSync) {
     });
   }
 
+  function coercePageRequest(request: SessionPageRequest | undefined): {
+    limit: number;
+    offset: number;
+    status: string | null;
+    q: string | null;
+  } {
+    const requestedLimit = request?.limit;
+    const limit = typeof requestedLimit === "number" && Number.isInteger(requestedLimit)
+      ? Math.min(Math.max(requestedLimit, 1), MAX_SESSION_PAGE_LIMIT)
+      : DEFAULT_SESSION_PAGE_LIMIT;
+    const requestedOffset = request?.offset;
+    const offset = typeof requestedOffset === "number" && Number.isInteger(requestedOffset)
+      ? Math.max(requestedOffset, 0)
+      : 0;
+    const status =
+      typeof request?.status === "string" && request.status.length > 0
+        ? request.status
+        : null;
+    const q =
+      typeof request?.q === "string" && request.q.trim().length > 0
+        ? request.q.trim()
+        : null;
+    return { limit, offset, status, q };
+  }
+
+  function pageWhereClause(status: string | null, q: string | null): {
+    whereSql: string;
+    params: SQLInputValue[];
+  } {
+    const where: string[] = [];
+    const params: SQLInputValue[] = [];
+    if (status === "waiting") {
+      where.push("s.status NOT IN ('completed', 'abandoned', 'error') AND s.awaiting_input_since IS NOT NULL");
+    } else if (status && status !== "all") {
+      where.push("s.status = ?");
+      params.push(status);
+    }
+    if (q) {
+      const like = `%${q}%`;
+      where.push("(s.id LIKE ? OR s.name LIKE ? OR s.cwd LIKE ? OR s.model LIKE ?)");
+      params.push(like, like, like, like);
+    }
+    return {
+      whereSql: where.length > 0 ? `WHERE ${where.join(" AND ")}` : "",
+      params,
+    };
+  }
+
   return {
     getById(id: string): SessionRow | undefined {
       return toRow(getByIdStmt.get(id) as Record<string, unknown> | undefined);
@@ -108,6 +142,11 @@ export function createSessionStore(db: DatabaseSync) {
 
     getActive(): SessionRow[] {
       return rowsToList(getActiveStmt.all() as Record<string, unknown>[]);
+    },
+
+    getDetailsById(id: string): SessionWithAgents | undefined {
+      const row = getDetailsByIdStmt.get(id) as Record<string, unknown> | undefined;
+      return row ? detailRowsToList([row])[0] : undefined;
     },
 
     getActiveWithDetails(): SessionWithAgents[] {
@@ -131,6 +170,27 @@ export function createSessionStore(db: DatabaseSync) {
         ...this.getActiveWithDetails(),
         ...this.getHistoricalWithDetails(),
       ];
+    },
+
+    getPage(request?: SessionPageRequest): SessionPage {
+      const { limit, offset, status, q } = coercePageRequest(request);
+      const { whereSql, params } = pageWhereClause(status, q);
+      const totalRow = db.prepare(
+        `SELECT COUNT(*) as count FROM sessions s ${whereSql}`,
+      ).get(...params) as { count: number };
+      const rows = db.prepare(`
+        ${SESSION_DETAIL_SELECT}
+        ${whereSql}
+        ORDER BY s.started_at DESC
+        LIMIT ? OFFSET ?
+      `).all(...params, limit, offset) as Record<string, unknown>[];
+
+      return {
+        sessions: detailRowsToList(rows),
+        total: totalRow.count,
+        limit,
+        offset,
+      };
     },
 
     invalidateHistoricalDetails(): void {

@@ -4,6 +4,8 @@ import type {
   EventRow,
   EventWithSession,
   EventCountByType,
+  SessionPage,
+  SessionPageRequest,
   SessionWithAgents,
   DashboardSummary,
   TokenAnalytics,
@@ -104,10 +106,12 @@ export interface DesktopApi {
   db: {
     getSessions: () => Promise<SessionRow[]>;
     getSession: (id: string) => Promise<SessionRow | undefined>;
+    getSessionDetails: (id: string) => Promise<SessionWithAgents | undefined>;
     getAgents: (sessionId: string) => Promise<AgentRow[]>;
     getEvents: (sessionId: string, agentId?: string) => Promise<EventRow[]>;
     getDashboardSummary: () => Promise<DashboardSummary>;
     getSessionsWithDetails: () => Promise<SessionWithAgents[]>;
+    getSessionsPage: (request?: SessionPageRequest) => Promise<SessionPage>;
     getEventFeed: () => Promise<EventWithSession[]>;
     getEventsWithSession: (sessionId: string) => Promise<EventWithSession[]>;
     getEventCountByType: () => Promise<EventCountByType[]>;

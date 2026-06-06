@@ -78,6 +78,20 @@ export interface SessionWithAgents extends SessionRow {
   totalTokens: number;
 }
 
+export interface SessionPageRequest {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  q?: string;
+}
+
+export interface SessionPage {
+  sessions: SessionWithAgents[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface EventWithSession extends EventRow {
   sessionName: string | null;
 }

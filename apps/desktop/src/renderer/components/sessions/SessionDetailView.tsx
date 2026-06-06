@@ -65,11 +65,9 @@ function AgentNode({ node, depth }: { node: AgentHierarchyNode; depth: number })
 }
 
 export function SessionDetailView({ sessionId, onBack }: { sessionId: string; onBack: () => void }) {
-  // Reuses the shared db:sessions-details cache (also feeding the list/kanban),
-  // so opening a detail view issues no extra round-trip for header data.
-  const { data: sessions } = useQueryCache<SessionWithAgents[]>(
-    "db:sessions-details",
-    () => window.desktopApi.db.getSessionsWithDetails(),
+  const { data: session } = useQueryCache<SessionWithAgents | undefined>(
+    `db:session-details:${sessionId}`,
+    () => window.desktopApi.db.getSessionDetails(sessionId),
   );
   const { data: hierarchy } = useQueryCache<AgentHierarchyNode[]>(
     `db:agent-hierarchy:${sessionId}`,
@@ -80,7 +78,6 @@ export function SessionDetailView({ sessionId, onBack }: { sessionId: string; on
     () => window.desktopApi.db.getEvents(sessionId),
   );
 
-  const session = (sessions ?? []).find((s) => s.id === sessionId);
   const timeline = (events ?? []).slice(-EVENT_TIMELINE_CAP).reverse();
   const truncated = (events?.length ?? 0) > EVENT_TIMELINE_CAP;
 

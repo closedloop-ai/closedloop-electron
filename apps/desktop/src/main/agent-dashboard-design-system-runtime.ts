@@ -6,6 +6,7 @@ import {
   loadMeteredUsageRows,
   type MeteredUsageRow,
 } from "./reconciliation-worker.js";
+import type { SessionPageRequest } from "../shared/agent-db-contract.js";
 import { detectBillingMode } from "./billing-mode-detector.js";
 import { openAgentDatabase, type AgentDatabase } from "./database/index.js";
 import { coerceDbId } from "./database/ipc-validation.js";
@@ -14,7 +15,9 @@ import { isAgentMonitorHooksEnabled } from "./agent-monitor-hooks.js";
 
 const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
   "desktop:db:get-sessions",
+  "desktop:db:get-sessions-page",
   "desktop:db:get-session",
+  "desktop:db:get-session-details",
   "desktop:db:get-agents",
   "desktop:db:get-events",
   "desktop:db:get-dashboard-summary",
@@ -153,10 +156,20 @@ export function createAgentDashboardDesignSystemRuntime(
 function registerDesignSystemDbIpcHandlers(agentDatabase: AgentDatabase): void {
   ipcMain.handle("desktop:db:get-sessions", () => agentDatabase.sessions.getAll());
 
+  ipcMain.handle("desktop:db:get-sessions-page", (_event, request: unknown) =>
+    agentDatabase.sessions.getPage(coerceSessionPageRequest(request)),
+  );
+
   ipcMain.handle("desktop:db:get-session", (_event, id: unknown) => {
     const sessionId = coerceDbId(id);
     if (sessionId === null) return undefined;
     return agentDatabase.sessions.getById(sessionId);
+  });
+
+  ipcMain.handle("desktop:db:get-session-details", (_event, id: unknown) => {
+    const sessionId = coerceDbId(id);
+    if (sessionId === null) return undefined;
+    return agentDatabase.sessions.getDetailsById(sessionId);
   });
 
   ipcMain.handle("desktop:db:get-agents", (_event, sessionId: unknown) => {
@@ -223,4 +236,17 @@ function unregisterDesignSystemDbIpcHandlers(): void {
   for (const channel of DESIGN_SYSTEM_DB_IPC_CHANNELS) {
     ipcMain.removeHandler(channel);
   }
+}
+
+function coerceSessionPageRequest(value: unknown): SessionPageRequest | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  return {
+    limit: typeof raw.limit === "number" ? raw.limit : undefined,
+    offset: typeof raw.offset === "number" ? raw.offset : undefined,
+    status: typeof raw.status === "string" ? raw.status : undefined,
+    q: typeof raw.q === "string" ? raw.q : undefined,
+  };
 }

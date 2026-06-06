@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
@@ -121,5 +121,14 @@ ALTER TABLE sessions ADD COLUMN billing_mode TEXT;
   `
 CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_status_started_at ON sessions(status, started_at DESC);
+`,
+
+  // Version 5 -> 6: keep the in-process dashboard waiting-session page bounded
+  // to the sessions index instead of scanning large historical databases.
+  `
+CREATE INDEX IF NOT EXISTS idx_sessions_waiting_started_at
+ON sessions(started_at DESC)
+WHERE awaiting_input_since IS NOT NULL
+  AND status NOT IN ('completed', 'abandoned', 'error');
 `,
 ];
