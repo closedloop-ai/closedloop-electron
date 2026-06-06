@@ -3,8 +3,6 @@ name: Desktop Version Bump Check
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - "apps/desktop/**"
 
 jobs:
   version-bump-check:
@@ -16,7 +14,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Detect desktop changes
+        id: desktop_changes
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          BASE=$(git merge-base "origin/$BASE_REF" HEAD)
+
+          if git diff --quiet "$BASE" HEAD -- apps/desktop; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No apps/desktop changes detected; desktop version bump is not required."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "apps/desktop changes detected; desktop version bump is required."
+          fi
+
       - name: Check desktop version bump
+        if: steps.desktop_changes.outputs.changed == 'true'
         run: |
           BASE_REF="${{ github.event.pull_request.base.ref }}"
           BASE=$(git merge-base "origin/$BASE_REF" HEAD)
