@@ -1509,9 +1509,17 @@ export class DesktopApplication {
       return null;
     }
     if (!this.agentDashboardDesignSystem) {
-      const { createAgentDashboardDesignSystemRuntime } = await import(
+      const {
+        createAgentDashboardDesignSystemRuntime,
+        prepareAgentDashboardDatabaseStartup,
+      } = await import(
         "./agent-dashboard-design-system-runtime.js"
       );
+      await prepareAgentDashboardDatabaseStartup({
+        userDataPath: app.getPath("userData"),
+        backend: "sqlite",
+        log: (scope, message) => gatewayLog.info(scope, message),
+      });
       this.agentDashboardDesignSystem =
         createAgentDashboardDesignSystemRuntime({
           userDataPath: app.getPath("userData"),

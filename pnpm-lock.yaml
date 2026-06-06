@@ -16,6 +16,9 @@ importers:
       '@closedloop-ai/loops-api':
         specifier: '>=0.3.1'
         version: 0.3.1(zod@4.3.6)
+      '@electric-sql/pglite':
+        specifier: ^0.4.6
+        version: 0.4.6
       '@pydantic/genai-prices':
         specifier: 0.0.62
         version: 0.0.62
@@ -266,6 +269,9 @@ packages:
 
   '@egjs/list-differ@1.0.1':
     resolution: {integrity: sha512-OTFTDQcWS+1ZREOdCWuk5hCBgYO4OsD30lXcOCyVOAjXMhgL5rBRDnt/otb6Nz8CzU0L/igdcaQBDLWc4t9gvg==}
+
+  '@electric-sql/pglite@0.4.6':
+    resolution: {integrity: sha512-qmlmfN8UyKCee35qkV0r/MBp+Znl8FjBz7OpoglNvww3GJpw0/DLP0o1ZymvLNmcD5DTLOQdzKPtF8Hd3mdl1w==}
 
   '@electron/asar@3.4.1':
     resolution: {integrity: sha512-i4/rNPRS84t0vSRa2HorerGRXWyF4vThfHesw0dmcWHp+cspK743UanA0suA5Q5y8kzY2y6YKrvbIUn69BCAiA==}
@@ -5288,6 +5294,8 @@ snapshots:
   '@egjs/component@3.0.5': {}
 
   '@egjs/list-differ@1.0.1': {}
+
+  '@electric-sql/pglite@0.4.6': {}
 
   '@electron/asar@3.4.1':
     dependencies:

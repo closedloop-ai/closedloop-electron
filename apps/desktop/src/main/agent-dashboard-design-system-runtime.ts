@@ -11,7 +11,10 @@ import { detectBillingMode } from "./billing-mode-detector.js";
 import { openAgentDatabase, type AgentDatabase } from "./database/index.js";
 import { coerceDbId } from "./database/ipc-validation.js";
 import { createLifecycle } from "./database/lifecycle.js";
+import { resolveAgentDashboardDatabasePathForUserData } from "./agent-dashboard-database-startup.js";
 import { isAgentMonitorHooksEnabled } from "./agent-monitor-hooks.js";
+
+export { prepareAgentDashboardDatabaseStartup } from "./agent-dashboard-database-startup.js";
 
 const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
   "desktop:db:get-sessions",
@@ -59,7 +62,7 @@ export interface AgentDashboardDesignSystemRuntime {
 export function resolveAgentDashboardDatabasePath(
   userDataPath = app.getPath("userData"),
 ): string {
-  return path.join(userDataPath, "agent-dashboard.sqlite");
+  return resolveAgentDashboardDatabasePathForUserData(userDataPath);
 }
 
 /**

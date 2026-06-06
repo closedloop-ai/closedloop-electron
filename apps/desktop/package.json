@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.117",
+  "version": "0.16.0",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -45,6 +45,7 @@
   "dependencies": {
     "@closedloop-ai/design-system": "0.1.1-dev.26892521643.1",
     "@closedloop-ai/loops-api": ">=0.3.1",
+    "@electric-sql/pglite": "^0.4.6",
     "@pydantic/genai-prices": "0.0.62",
     "agent-dashboard": "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
     "busboy": "^1.6.0",
