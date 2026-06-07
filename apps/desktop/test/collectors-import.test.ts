@@ -148,7 +148,7 @@ test("a new event with a later timestamp backfills without duplicating prior eve
   }
 });
 
-test("backfill writes source timestamps instead of importer runtime", () => {
+test("backfill source-dates analytics while preserving the sync mutation cursor", () => {
   const { db, cleanup } = openTempDb();
   try {
     const importer = createImporter(db.connection, {
@@ -177,10 +177,12 @@ test("backfill writes source timestamps instead of importer runtime", () => {
     const session = db.sessions.getById("old-session");
     assert.ok(session);
     assert.equal(session.status, "completed");
-    assert.equal(session.updatedAt, "2026-04-01T10:05:00.000Z");
+    assert.equal(session.startedAt, "2026-04-01T10:00:00.000Z");
+    assert.equal(session.endedAt, "2026-04-01T10:05:00.000Z");
+    assert.equal(session.updatedAt, "2026-06-06T12:00:00.000Z");
 
     const agent = db.agents.getBySession("old-session")[0];
-    assert.equal(agent.updatedAt, "2026-04-01T10:05:00.000Z");
+    assert.equal(agent.updatedAt, "2026-06-06T12:00:00.000Z");
 
     const events = db.events.getBySession("old-session");
     assert.equal(events.length, 3);
@@ -238,7 +240,134 @@ test("backfill falls back missing event timestamps to the source session date", 
 
     const events = db.events.getBySession("missing-event-ts");
     assert.equal(events.length, 1);
-    assert.equal(events[0].createdAt, "2026-04-02T10:00:00.000Z");
+    assert.equal(events[0].createdAt, "2026-04-02T10:05:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
+test("backfill appends new missing-timestamp events without high-water collision", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "missing-event-append",
+        startedAt: "2026-04-02T10:00:00.000Z",
+        endedAt: "2026-04-02T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [{ name: "Read", timestamp: null, input: { file: "a" } }],
+      }),
+      "codex",
+    );
+
+    importer.importSession(
+      makeSession({
+        sessionId: "missing-event-append",
+        startedAt: "2026-04-02T10:00:00.000Z",
+        endedAt: "2026-04-02T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [
+          { name: "Read", timestamp: null, input: { file: "a" } },
+          { name: "Read", timestamp: null, input: { file: "b" } },
+        ],
+      }),
+      "codex",
+    );
+
+    const events = db.events.getBySession("missing-event-append");
+    assert.equal(events.length, 2);
+    assert.deepEqual(
+      events.map((event) => event.createdAt),
+      [
+        "2026-04-02T10:05:00.000Z",
+        "2026-04-02T10:05:00.001Z",
+      ],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("historical backfill imported after sync cursor remains visible to incremental sync", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    db.connection.prepare(`
+      INSERT INTO sessions (id, name, status, started_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      "cursor-sentinel",
+      "Cursor sentinel",
+      "completed",
+      "2026-06-06T11:59:00.000Z",
+      "2026-06-06T12:00:00.000Z",
+    );
+
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:01:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "old-after-cursor",
+        startedAt: "2026-04-01T10:00:00.000Z",
+        endedAt: "2026-04-01T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [],
+      }),
+      "codex",
+    );
+
+    const rows = db.connection.prepare(`
+      SELECT id
+      FROM sessions
+      WHERE updated_at >= ?
+      ORDER BY updated_at DESC, id DESC
+    `).all("2026-06-06T12:00:00.000Z") as Array<{ id: string }>;
+    assert.ok(
+      rows.some((row) => row.id === "old-after-cursor"),
+      "new historical imports must remain visible to updated_at cursor sync",
+    );
+    const session = db.sessions.getById("old-after-cursor");
+    assert.equal(session?.startedAt, "2026-04-01T10:00:00.000Z");
+    assert.equal(session?.updatedAt, "2026-06-06T12:01:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
+test("future-dated source activity does not mark a backfilled session active", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "future-source",
+        startedAt: "2026-06-06T12:30:00.000Z",
+        endedAt: "2026-06-06T12:35:00.000Z",
+        fileModifiedAt: Date.parse("2026-06-06T11:59:00.000Z"),
+        messageTimestamps: [],
+        toolUses: [],
+      }),
+      "codex",
+    );
+
+    const session = db.sessions.getById("future-source");
+    assert.ok(session);
+    assert.equal(session.status, "completed");
+    assert.equal(session.updatedAt, "2026-06-06T12:00:00.000Z");
   } finally {
     cleanup();
   }

@@ -11,6 +11,8 @@ import type { Harness, NormalizedSession, NormalizedToolUse } from "./types.js";
  *
  * Idempotency (FEA-1503 AC): re-import adds nothing new.
  *  - session row: COALESCE-fill on conflict, never clobbers a live row.
+ *    `updated_at` stays an ingest-time mutation cursor for cloud sync; source
+ *    dates live on `started_at`, `ended_at`, events, and token usage analytics.
  *  - events: per-(session, event_type) high-water-mark on `created_at` — only
  *    events with a source timestamp strictly greater than the stored max are
  *    inserted. Backfill never stamps events with importer runtime `now`; when an
@@ -74,10 +76,12 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       model = COALESCE(model, ?),
       cwd = COALESCE(cwd, ?),
       harness = CASE WHEN COALESCE(harness, '') = '' THEN ? ELSE harness END,
-      billing_mode = CASE WHEN COALESCE(billing_mode, '') IN ('', 'unknown') THEN ? ELSE billing_mode END,
-      updated_at = CASE WHEN updated_at IS NULL OR updated_at < ? THEN ? ELSE updated_at END
+      billing_mode = CASE WHEN COALESCE(billing_mode, '') IN ('', 'unknown') THEN ? ELSE billing_mode END
     WHERE id = ?
   `);
+  const touchSessionStmt = db.prepare(
+    "UPDATE sessions SET updated_at = CASE WHEN updated_at IS NULL OR updated_at < ? THEN ? ELSE updated_at END WHERE id = ?",
+  );
   const reactivateSessionStmt = db.prepare(
     "UPDATE sessions SET status = 'active', ended_at = NULL, updated_at = ? WHERE id = ?",
   );
@@ -228,8 +232,8 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           session.cwd ?? null,
           session.model ?? null,
           startedAt,
-          sourceUpdatedAt,
-          status === "completed" ? session.endedAt ?? null : null,
+          now,
+          status === "completed" ? sourceUpdatedAt : null,
           harness,
           billingMode,
           buildMetadata(session, harness),
@@ -244,7 +248,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           null,
           null,
           startedAt,
-          sourceUpdatedAt,
+          now,
           status === "completed" ? sourceUpdatedAt : null,
           null,
           null,
@@ -257,15 +261,13 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           session.cwd ?? null,
           harness,
           billingMode,
-          sourceUpdatedAt,
-          sourceUpdatedAt,
           session.sessionId,
         );
         const isLive = existing.status === "active" && existing.ended_at == null;
         if (recentlyActive && !isLive) {
-          reactivateSessionStmt.run(sourceUpdatedAt, session.sessionId);
+          reactivateSessionStmt.run(now, session.sessionId);
           if (getAgentStmt.get(mainId)) {
-            reactivateMainAgentStmt.run(sourceUpdatedAt, mainId);
+            reactivateMainAgentStmt.run(now, mainId);
           }
           reactivated = true;
         }
@@ -327,7 +329,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
             strOf(input.subagent_type) ?? null,
             prompt ? prompt.slice(0, 500) : null,
             tu.timestamp ?? startedAt,
-            tu.timestamp ?? sourceUpdatedAt,
+            tu.timestamp ?? now,
             tu.timestamp ?? sourceUpdatedAt,
             mainId,
           );
@@ -350,6 +352,10 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       // ── Tokens (store reconciles raw/effective; idempotent on equal counts) ───
       for (const [model, counts] of Object.entries(session.tokensByModel ?? {})) {
         deps.tokenUsage.replace(session.sessionId, model, counts, sourceUpdatedAt);
+      }
+
+      if (existing != null && inserted > 0 && !reactivated) {
+        touchSessionStmt.run(now, now, session.sessionId);
       }
 
       db.exec("COMMIT");
