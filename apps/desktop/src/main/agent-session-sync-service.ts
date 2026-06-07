@@ -919,6 +919,12 @@ export function loadSyncedSessions(
     return [];
   }
 
+  const hasIdentityCols =
+    columnExists(db, "sessions", "user_id")
+    && columnExists(db, "sessions", "organization_id");
+  const identityColsSql = hasIdentityCols
+    ? "user_id, organization_id"
+    : "NULL AS user_id, NULL AS organization_id";
   const sessionRows = selectRowsByIds<SessionRow>(
     db,
     `
@@ -935,8 +941,7 @@ export function loadSyncedSessions(
         metadata,
         harness,
         billing_mode,
-        user_id,
-        organization_id
+        ${identityColsSql}
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -1044,8 +1049,8 @@ export function loadSyncedSessions(
         awaitingInputSince: row.awaiting_input_since,
         metadata: parseJsonObjectText(row.metadata),
         ...(attribution ? { attribution } : {}),
-        userId: row.user_id,
-        organizationId: row.organization_id,
+        ...(row.user_id != null ? { userId: row.user_id } : {}),
+        ...(row.organization_id != null ? { organizationId: row.organization_id } : {}),
         agents: (agentsBySessionId.get(id) ?? []).map((agentRow) => ({
           externalAgentId: agentRow.id,
           name: agentRow.name,
@@ -1109,6 +1114,17 @@ export function resolveBillingModeForRow(row: SessionRow): BillingMode {
     billingMode: row.billing_mode,
     harness: row.harness,
   });
+}
+
+function columnExists(
+  db: DatabaseSync,
+  table: string,
+  column: string,
+): boolean {
+  const rows = db
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
 }
 
 function selectRowsByIds<T>(
