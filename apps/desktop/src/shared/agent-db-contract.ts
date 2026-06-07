@@ -92,6 +92,8 @@ export interface SessionPage {
   offset: number;
 }
 
+export type KanbanPages = Record<string, SessionPage>;
+
 export interface EventWithSession extends EventRow {
   sessionName: string | null;
 }

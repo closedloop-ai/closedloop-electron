@@ -1,5 +1,6 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type {
+  KanbanPages,
   SessionPage,
   SessionPageRequest,
   SessionRow,
@@ -13,6 +14,7 @@ const TERMINAL_STATUSES = "('completed', 'abandoned', 'error')";
 const TERMINAL_STATUS_SET = new Set(["completed", "abandoned", "error"]);
 const MAX_SESSION_PAGE_LIMIT = 100;
 const DEFAULT_SESSION_PAGE_LIMIT = 25;
+// Correlated subqueries — efficient for bounded queries (LIMIT/single-row).
 const SESSION_DETAIL_SELECT = `
   SELECT
     s.*,
@@ -24,6 +26,26 @@ const SESSION_DETAIL_SELECT = `
       WHERE t.session_id = s.id
     ) as total_tokens
   FROM sessions s
+`;
+// CTE-based join — efficient for unbounded multi-row queries (active/historical).
+const SESSION_DETAILS_CTES = `
+  WITH agent_counts AS (
+    SELECT session_id, COUNT(*) as agent_count
+    FROM agents
+    GROUP BY session_id
+  ),
+  event_counts AS (
+    SELECT session_id, COUNT(*) as event_count
+    FROM events
+    GROUP BY session_id
+  ),
+  token_totals AS (
+    SELECT
+      session_id,
+      COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) as total_tokens
+    FROM token_usage
+    GROUP BY session_id
+  )
 `;
 
 export function createSessionStore(db: DatabaseSync) {
@@ -38,12 +60,30 @@ export function createSessionStore(db: DatabaseSync) {
   `);
 
   const getActiveWithDetailsStmt = db.prepare(`
-    ${SESSION_DETAIL_SELECT}
+    ${SESSION_DETAILS_CTES}
+    SELECT
+      s.*,
+      COALESCE(ac.agent_count, 0) as agent_count,
+      COALESCE(ec.event_count, 0) as event_count,
+      COALESCE(tt.total_tokens, 0) as total_tokens
+    FROM sessions s
+    LEFT JOIN agent_counts ac ON ac.session_id = s.id
+    LEFT JOIN event_counts ec ON ec.session_id = s.id
+    LEFT JOIN token_totals tt ON tt.session_id = s.id
     WHERE s.status NOT IN ${TERMINAL_STATUSES}
     ORDER BY s.started_at DESC
   `);
   const getHistoricalWithDetailsStmt = db.prepare(`
-    ${SESSION_DETAIL_SELECT}
+    ${SESSION_DETAILS_CTES}
+    SELECT
+      s.*,
+      COALESCE(ac.agent_count, 0) as agent_count,
+      COALESCE(ec.event_count, 0) as event_count,
+      COALESCE(tt.total_tokens, 0) as total_tokens
+    FROM sessions s
+    LEFT JOIN agent_counts ac ON ac.session_id = s.id
+    LEFT JOIN event_counts ec ON ec.session_id = s.id
+    LEFT JOIN token_totals tt ON tt.session_id = s.id
     WHERE s.status IN ${TERMINAL_STATUSES}
     ORDER BY s.started_at DESC
   `);
@@ -81,6 +121,18 @@ export function createSessionStore(db: DatabaseSync) {
         totalTokens: raw.total_tokens as number,
       };
     });
+  }
+
+  // Statement cache for dynamically-built page queries. Avoids re-preparing
+  // on every IPC call while keeping the WHERE clause flexible.
+  const stmtCache = new Map<string, ReturnType<typeof db.prepare>>();
+  function getOrPrepare(key: string, sql: string) {
+    let stmt = stmtCache.get(key);
+    if (!stmt) {
+      stmt = db.prepare(sql);
+      stmtCache.set(key, stmt);
+    }
+    return stmt;
   }
 
   function coercePageRequest(request: SessionPageRequest | undefined): {
@@ -179,15 +231,13 @@ export function createSessionStore(db: DatabaseSync) {
     getPage(request?: SessionPageRequest): SessionPage {
       const { limit, offset, status, q } = coercePageRequest(request);
       const { whereSql, params } = pageWhereClause(status, q);
-      const totalRow = db.prepare(
-        `SELECT COUNT(*) as count FROM sessions s ${whereSql}`,
-      ).get(...params) as { count: number };
-      const rows = db.prepare(`
-        ${SESSION_DETAIL_SELECT}
-        ${whereSql}
-        ORDER BY s.started_at DESC, s.id DESC
-        LIMIT ? OFFSET ?
-      `).all(...params, limit, offset) as Record<string, unknown>[];
+      const countStmt = getOrPrepare(`page-count:${whereSql}`,
+        `SELECT COUNT(*) as count FROM sessions s ${whereSql}`);
+      const selectStmt = getOrPrepare(`page-select:${whereSql}`,
+        `${SESSION_DETAIL_SELECT} ${whereSql} ORDER BY s.started_at DESC, s.id DESC LIMIT ? OFFSET ?`);
+
+      const totalRow = countStmt.get(...params) as { count: number };
+      const rows = selectStmt.all(...params, limit, offset) as Record<string, unknown>[];
 
       return {
         sessions: detailRowsToList(rows),
@@ -195,6 +245,14 @@ export function createSessionStore(db: DatabaseSync) {
         limit,
         offset,
       };
+    },
+
+    getKanbanPages(statuses: string[], limit: number): KanbanPages {
+      const result: KanbanPages = {};
+      for (const status of statuses) {
+        result[status] = this.getPage({ limit, status });
+      }
+      return result;
     },
 
     invalidateHistoricalDetails(): void {

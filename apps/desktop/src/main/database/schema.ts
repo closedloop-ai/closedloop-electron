@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /**
  * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
@@ -123,7 +123,18 @@ CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_status_started_at ON sessions(status, started_at DESC);
 `,
 
-  // Version 5 -> 6: keep the in-process dashboard waiting-session page bounded
+  // Version 5 -> 6 (FEA-1548 Phase 1): multi-tenant identity columns.
+  // Nullable because sessions created before account signup have no user/org
+  // context. Backfilled when the user creates an account and joins an org.
+  `
+ALTER TABLE sessions ADD COLUMN user_id TEXT;
+ALTER TABLE sessions ADD COLUMN organization_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_organization_id ON sessions(organization_id) WHERE organization_id IS NOT NULL;
+`,
+
+  // Version 6 -> 7: keep the in-process dashboard waiting-session page bounded
   // to the sessions index instead of scanning large historical databases.
   `
 CREATE INDEX IF NOT EXISTS idx_sessions_waiting_started_at

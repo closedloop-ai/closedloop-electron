@@ -4,6 +4,7 @@ import type {
   EventRow,
   EventWithSession,
   EventCountByType,
+  KanbanPages,
   SessionPage,
   SessionPageRequest,
   SessionWithAgents,
@@ -112,6 +113,7 @@ export interface DesktopApi {
     getDashboardSummary: () => Promise<DashboardSummary>;
     getSessionsWithDetails: () => Promise<SessionWithAgents[]>;
     getSessionsPage: (request?: SessionPageRequest) => Promise<SessionPage>;
+    getKanbanPages: (statuses: string[], limit: number) => Promise<KanbanPages>;
     getEventFeed: () => Promise<EventWithSession[]>;
     getEventsWithSession: (sessionId: string) => Promise<EventWithSession[]>;
     getEventCountByType: () => Promise<EventCountByType[]>;

@@ -36,25 +36,32 @@ interface SessionsViewProps {
 
 export function SessionsView({ showOverview = true }: SessionsViewProps) {
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [page, setPage] = useState(0);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   const { data: summary } = useQueryCache<DashboardSummary>(
     "db:summary",
     () => window.desktopApi.db.getDashboardSummary(),
   );
   const { data: sessionPage, loading } = useQueryCache<SessionPage>(
-    `db:sessions-page:${page}:${statusFilter}:${search}`,
+    `db:sessions-page:${page}:${statusFilter}:${debouncedSearch}`,
     () => window.desktopApi.db.getSessionsPage({
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
       status: statusFilter === "all" ? undefined : statusFilter,
-      q: search || undefined,
+      q: debouncedSearch || undefined,
     }),
   );
 
   useEffect(() => {
     setPage(0);
-  }, [search, statusFilter]);
+  }, [debouncedSearch, statusFilter]);
 
   const sessions = sessionPage?.sessions ?? [];
   const total = sessionPage?.total ?? 0;

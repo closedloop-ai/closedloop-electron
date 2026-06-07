@@ -179,3 +179,91 @@ test("sessions.getPage supports renderer status and search filters", () => {
     cleanup();
   }
 });
+
+test("sessions.getPage escapes LIKE wildcards in search queries", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    insertSession(db, "s-percent", {
+      name: "100% done",
+      startedAt: "2024-03-09T16:03:00.000Z",
+    });
+    insertSession(db, "s-underscore", {
+      name: "task_runner",
+      startedAt: "2024-03-09T16:02:00.000Z",
+    });
+    insertSession(db, "s-normal", {
+      name: "normal session",
+      startedAt: "2024-03-09T16:01:00.000Z",
+    });
+
+    // "%" should match only the session with a literal percent, not all sessions
+    const percentSearch = db.sessions.getPage({ q: "%" });
+    assert.deepEqual(percentSearch.sessions.map((s) => s.id), ["s-percent"]);
+    assert.equal(percentSearch.total, 1);
+
+    // "_" should match only the session with a literal underscore, not single-char wildcards
+    const underscoreSearch = db.sessions.getPage({ q: "_" });
+    assert.deepEqual(underscoreSearch.sessions.map((s) => s.id), ["s-underscore"]);
+    assert.equal(underscoreSearch.total, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("sessions.getPage paginates deterministically with tied timestamps", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    // All sessions share the same started_at — tiebreaker is s.id DESC
+    const sharedTime = "2024-03-09T16:00:00.000Z";
+    for (const id of ["aaa", "bbb", "ccc", "ddd", "eee"]) {
+      insertSession(db, id, { startedAt: sharedTime });
+    }
+
+    const page1 = db.sessions.getPage({ limit: 2, offset: 0 });
+    const page2 = db.sessions.getPage({ limit: 2, offset: 2 });
+    const page3 = db.sessions.getPage({ limit: 2, offset: 4 });
+
+    const allPaged = [
+      ...page1.sessions.map((s) => s.id),
+      ...page2.sessions.map((s) => s.id),
+      ...page3.sessions.map((s) => s.id),
+    ];
+
+    // Should have 5 unique IDs with no duplicates or skips
+    assert.equal(new Set(allPaged).size, 5, "no duplicates across pages");
+    assert.equal(allPaged.length, 5, "no skipped sessions");
+
+    // ORDER BY id DESC means: eee, ddd, ccc, bbb, aaa
+    assert.deepEqual(allPaged, ["eee", "ddd", "ccc", "bbb", "aaa"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("sessions.getKanbanPages returns all status pages in a single call", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    insertSession(db, "run-1", {
+      status: "active",
+      startedAt: "2024-03-09T16:03:00.000Z",
+    });
+    insertSession(db, "wait-1", {
+      status: "active",
+      startedAt: "2024-03-09T16:02:00.000Z",
+      awaitingInputSince: "2024-03-09T16:02:30.000Z",
+    });
+    insertSession(db, "done-1", {
+      status: "completed",
+      startedAt: "2024-03-09T16:01:00.000Z",
+    });
+
+    const pages = db.sessions.getKanbanPages(["running", "waiting", "completed"], 25);
+
+    assert.deepEqual(Object.keys(pages).sort(), ["completed", "running", "waiting"]);
+    assert.deepEqual(pages.running.sessions.map((s) => s.id), ["run-1"]);
+    assert.deepEqual(pages.waiting.sessions.map((s) => s.id), ["wait-1"]);
+    assert.deepEqual(pages.completed.sessions.map((s) => s.id), ["done-1"]);
+  } finally {
+    cleanup();
+  }
+});

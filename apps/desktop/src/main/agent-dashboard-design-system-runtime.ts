@@ -16,6 +16,7 @@ import { isAgentMonitorHooksEnabled } from "./agent-monitor-hooks.js";
 const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
   "desktop:db:get-sessions",
   "desktop:db:get-sessions-page",
+  "desktop:db:get-kanban-pages",
   "desktop:db:get-session",
   "desktop:db:get-session-details",
   "desktop:db:get-agents",
@@ -159,6 +160,12 @@ function registerDesignSystemDbIpcHandlers(agentDatabase: AgentDatabase): void {
   ipcMain.handle("desktop:db:get-sessions-page", (_event, request: unknown) =>
     agentDatabase.sessions.getPage(coerceSessionPageRequest(request)),
   );
+
+  ipcMain.handle("desktop:db:get-kanban-pages", (_event, statuses: unknown, limit: unknown) => {
+    const safeStatuses = Array.isArray(statuses) ? statuses.filter((s): s is string => typeof s === "string") : [];
+    const safeLimit = typeof limit === "number" && Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 25;
+    return agentDatabase.sessions.getKanbanPages(safeStatuses, safeLimit);
+  });
 
   ipcMain.handle("desktop:db:get-session", (_event, id: unknown) => {
     const sessionId = coerceDbId(id);
