@@ -130,5 +130,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_waiting_started_at
 ON sessions(started_at DESC)
 WHERE awaiting_input_since IS NOT NULL
   AND status NOT IN ('completed', 'abandoned', 'error');
+
+CREATE INDEX IF NOT EXISTS idx_sessions_running_started_at
+ON sessions(started_at DESC)
+WHERE awaiting_input_since IS NULL
+  AND status NOT IN ('completed', 'abandoned', 'error');
 `,
 ];

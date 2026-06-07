@@ -123,8 +123,10 @@ export function createSessionStore(db: DatabaseSync) {
       params.push(status);
     }
     if (q) {
-      const like = `%${q}%`;
-      where.push("(s.id LIKE ? OR s.name LIKE ? OR s.cwd LIKE ? OR s.model LIKE ?)");
+      // Escape SQLite LIKE wildcards so user search for "%" or "_" does literal matching
+      const escaped = q.replace(/[%_]/g, (ch) => `\\${ch}`);
+      const like = `%${escaped}%`;
+      where.push("(s.id LIKE ? ESCAPE '\\' OR s.name LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\' OR s.model LIKE ? ESCAPE '\\')");
       params.push(like, like, like, like);
     }
     return {
@@ -183,7 +185,7 @@ export function createSessionStore(db: DatabaseSync) {
       const rows = db.prepare(`
         ${SESSION_DETAIL_SELECT}
         ${whereSql}
-        ORDER BY s.started_at DESC
+        ORDER BY s.started_at DESC, s.id DESC
         LIMIT ? OFFSET ?
       `).all(...params, limit, offset) as Record<string, unknown>[];
 
