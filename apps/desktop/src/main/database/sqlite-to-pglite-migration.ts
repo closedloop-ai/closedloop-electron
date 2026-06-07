@@ -221,7 +221,6 @@ export async function migrateSqliteToPglite(
   }
 
   if (backupExists && pgdataExists) {
-    await rm(sqlitePath, { force: true });
     return {
       status: "skipped",
       reason: "already_migrated",
@@ -240,12 +239,14 @@ export async function migrateSqliteToPglite(
     );
     try {
       sqlite = new DatabaseSync(sqlitePath);
+      sqlite.exec("BEGIN");
       assertAllTablesManaged(sqlite);
       pglite = await PGlite.create(stagingDir);
 
       const sourceSchema = readSqliteSchema(sqlite);
       const sourceCounts = readSourceCounts(sqlite, sourceSchema);
       await initializeAndCopy(sqlite, pglite, sourceSchema, sourceCounts);
+      sqlite.exec("COMMIT");
 
       sqlite.close();
       sqlite = null;
@@ -285,8 +286,13 @@ export async function migrateSqliteToPglite(
       );
     }
   } catch (error) {
+    try {
+      sqlite?.exec("ROLLBACK");
+    } catch {
+      /* ignore rollback failure */
+    }
     log(
-      `SQLite to PGlite migration failed: sqlite=${sqlitePath}, pglite=${sanitizePath(pgliteDataDir)}, error=${sanitizeError(error)}`,
+      `SQLite to PGlite migration failed: sqlite=${sanitizePath(sqlitePath)}, pglite=${sanitizePath(pgliteDataDir)}, error=${sanitizeError(error)}`,
     );
     return {
       status: "failed",
@@ -344,12 +350,19 @@ async function initializeAndCopy(
       if (columns.length === 0) {
         continue;
       }
-      const rows = sqlite
-        .prepare(`SELECT ${columns.join(", ")} FROM ${table.name}`)
-        .all() as Record<string, unknown>[];
 
-      for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-        const batch = rows.slice(i, i + BATCH_SIZE);
+      const selectBatchStmt = sqlite.prepare(
+        `SELECT ${columns.join(", ")} FROM ${table.name} ORDER BY rowid LIMIT ? OFFSET ?`,
+      );
+      let offset = 0;
+      while (true) {
+        const batch = selectBatchStmt.all(BATCH_SIZE, offset) as Record<
+          string,
+          unknown
+        >[];
+        if (batch.length === 0) {
+          break;
+        }
         await batchInsertRows(
           tx,
           table.name,
@@ -357,6 +370,7 @@ async function initializeAndCopy(
           columns,
           batch,
         );
+        offset += batch.length;
       }
     }
 

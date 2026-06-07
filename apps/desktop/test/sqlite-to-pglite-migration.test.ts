@@ -175,6 +175,42 @@ function seedSqlite(dbPath: string): void {
   }
 }
 
+function insertAdditionalEvents(dbPath: string, count: number): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    const insert = db.prepare(`
+      INSERT INTO events (
+        id, session_id, agent_id, event_type, tool_name, summary, data,
+        created_at, user_id, organization_id
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    db.exec("BEGIN");
+    try {
+      for (let i = 0; i < count; i += 1) {
+        insert.run(
+          `event-extra-${i}`,
+          "session-1",
+          "session-1-main",
+          "PostToolUse",
+          "Read",
+          `Batch event ${i}`,
+          JSON.stringify({ index: i }),
+          `2026-06-01T00:${String(i % 60).padStart(2, "0")}:00.000Z`,
+          "user-1",
+          "org-1",
+        );
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.close();
+  }
+}
+
 test("migrateSqliteToPglite copies rows, preserves attribution columns, and renames SQLite to .bak", async () => {
   const dir = makeTempDir();
   try {
@@ -216,6 +252,32 @@ test("migrateSqliteToPglite copies rows, preserves attribution columns, and rena
   }
 });
 
+test("migrateSqliteToPglite copies large tables in multiple bounded batches", async () => {
+  const dir = makeTempDir();
+  try {
+    const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
+    seedSqlite(sqlitePath);
+    insertAdditionalEvents(sqlitePath, 1000);
+
+    const result = await migrateSqliteToPglite({ sqlitePath });
+
+    assert.equal(result.status, "migrated");
+    assert.equal(result.status === "migrated" ? result.rowCounts.events : 0, 1001);
+
+    const pg = await PGlite.create(resolvePgliteDataDir(sqlitePath));
+    try {
+      const eventCount = await pg.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM events",
+      );
+      assert.equal(Number(eventCount.rows[0]?.count), 1001);
+    } finally {
+      await pg.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("migrateSqliteToPglite returns failed and leaves SQLite intact with unmanaged source tables", async () => {
   const dir = makeTempDir();
   try {
@@ -223,10 +285,20 @@ test("migrateSqliteToPglite returns failed and leaves SQLite intact with unmanag
     const db = new DatabaseSync(sqlitePath);
     db.exec("CREATE TABLE compute_target (id TEXT PRIMARY KEY)");
     db.close();
+    const messages: string[] = [];
 
-    const result = await migrateSqliteToPglite({ sqlitePath });
+    const result = await migrateSqliteToPglite({
+      sqlitePath,
+      log: (message) => messages.push(message),
+    });
 
     assert.equal(result.status, "failed");
+    assert.ok(messages.length > 0);
+    assert.equal(
+      messages.some((message) => message.includes(sqlitePath)),
+      false,
+      "failure logs must not include absolute SQLite paths",
+    );
     assert.equal(
       existsSync(sqlitePath),
       true,
@@ -254,6 +326,34 @@ test("migrateSqliteToPglite skips when backup and pgdata exist", async () => {
 
     assert.equal(result.status, "skipped");
     assert.equal(result.status === "skipped" ? result.reason : "", "already_migrated");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migrateSqliteToPglite does not delete live SQLite when backup and pgdata already exist", async () => {
+  const dir = makeTempDir();
+  try {
+    const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
+    seedSqlite(sqlitePath);
+    writeFileSync(`${sqlitePath}.bak`, "backup");
+    mkdirSync(resolvePgliteDataDir(sqlitePath));
+
+    const result = await migrateSqliteToPglite({ sqlitePath });
+
+    assert.equal(result.status, "skipped");
+    assert.equal(result.status === "skipped" ? result.reason : "", "already_migrated");
+    assert.equal(existsSync(sqlitePath), true, "live SQLite must not be deleted");
+
+    const db = new DatabaseSync(sqlitePath);
+    try {
+      const row = db.prepare("SELECT id FROM sessions WHERE id = ?").get("session-1") as
+        | { id: string }
+        | undefined;
+      assert.equal(row?.id, "session-1");
+    } finally {
+      db.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
