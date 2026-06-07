@@ -148,6 +148,231 @@ test("a new event with a later timestamp backfills without duplicating prior eve
   }
 });
 
+test("backfill source-dates analytics while preserving the sync mutation cursor", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "old-session",
+        startedAt: "2026-04-01T10:00:00.000Z",
+        endedAt: "2026-04-01T10:05:00.000Z",
+        fileModifiedAt: Date.parse("2026-06-06T11:59:00.000Z"),
+        messageTimestamps: [
+          "2026-04-01T10:01:00.000Z",
+          "2026-04-01T10:02:00.000Z",
+        ],
+        toolUses: [
+          { name: "Read", timestamp: "2026-04-01T10:01:30.000Z", input: { file: "x" } },
+        ],
+      }),
+      "codex",
+    );
+
+    const session = db.sessions.getById("old-session");
+    assert.ok(session);
+    assert.equal(session.status, "completed");
+    assert.equal(session.startedAt, "2026-04-01T10:00:00.000Z");
+    assert.equal(session.endedAt, "2026-04-01T10:05:00.000Z");
+    assert.equal(session.updatedAt, "2026-06-06T12:00:00.000Z");
+
+    const agent = db.agents.getBySession("old-session")[0];
+    assert.equal(agent.updatedAt, "2026-06-06T12:00:00.000Z");
+
+    const events = db.events.getBySession("old-session");
+    assert.equal(events.length, 3);
+    assert.deepEqual(
+      events.map((event) => event.createdAt).sort(),
+      [
+        "2026-04-01T10:01:00.000Z",
+        "2026-04-01T10:01:30.000Z",
+        "2026-04-01T10:02:00.000Z",
+      ],
+    );
+    const recentRow = db.connection.prepare(`
+      SELECT COUNT(*) AS count
+      FROM events
+      WHERE session_id = ?
+        AND created_at >= datetime(?, '-30 days')
+    `).get("old-session", "2026-06-06T12:00:00.000Z") as { count: number };
+    assert.equal(
+      recentRow.count,
+      0,
+      "historical backfill must not appear in recent event windows",
+    );
+
+    const tokenRow = db.connection.prepare(`
+      SELECT created_at AS createdAt, updated_at AS updatedAt
+      FROM token_usage
+      WHERE session_id = ? AND model = ?
+    `).get("old-session", "gpt-5") as { createdAt: string; updatedAt: string };
+    assert.equal(tokenRow.createdAt, "2026-04-01T10:05:00.000Z");
+    assert.equal(tokenRow.updatedAt, "2026-04-01T10:05:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
+test("backfill falls back missing event timestamps to the source session date", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "missing-event-ts",
+        startedAt: "2026-04-02T10:00:00.000Z",
+        endedAt: "2026-04-02T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [{ name: "Read", timestamp: null, input: { file: "x" } }],
+      }),
+      "codex",
+    );
+
+    const events = db.events.getBySession("missing-event-ts");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].createdAt, "2026-04-02T10:05:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
+test("backfill appends new missing-timestamp events without high-water collision", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "missing-event-append",
+        startedAt: "2026-04-02T10:00:00.000Z",
+        endedAt: "2026-04-02T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [{ name: "Read", timestamp: null, input: { file: "a" } }],
+      }),
+      "codex",
+    );
+
+    importer.importSession(
+      makeSession({
+        sessionId: "missing-event-append",
+        startedAt: "2026-04-02T10:00:00.000Z",
+        endedAt: "2026-04-02T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [
+          { name: "Read", timestamp: null, input: { file: "a" } },
+          { name: "Read", timestamp: null, input: { file: "b" } },
+        ],
+      }),
+      "codex",
+    );
+
+    const events = db.events.getBySession("missing-event-append");
+    assert.equal(events.length, 2);
+    assert.deepEqual(
+      events.map((event) => event.createdAt),
+      [
+        "2026-04-02T10:05:00.000Z",
+        "2026-04-02T10:05:00.001Z",
+      ],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("historical backfill imported after sync cursor remains visible to incremental sync", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    db.connection.prepare(`
+      INSERT INTO sessions (id, name, status, started_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      "cursor-sentinel",
+      "Cursor sentinel",
+      "completed",
+      "2026-06-06T11:59:00.000Z",
+      "2026-06-06T12:00:00.000Z",
+    );
+
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:01:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "old-after-cursor",
+        startedAt: "2026-04-01T10:00:00.000Z",
+        endedAt: "2026-04-01T10:05:00.000Z",
+        messageTimestamps: [],
+        toolUses: [],
+      }),
+      "codex",
+    );
+
+    const rows = db.connection.prepare(`
+      SELECT id
+      FROM sessions
+      WHERE updated_at >= ?
+      ORDER BY updated_at DESC, id DESC
+    `).all("2026-06-06T12:00:00.000Z") as Array<{ id: string }>;
+    assert.ok(
+      rows.some((row) => row.id === "old-after-cursor"),
+      "new historical imports must remain visible to updated_at cursor sync",
+    );
+    const session = db.sessions.getById("old-after-cursor");
+    assert.equal(session?.startedAt, "2026-04-01T10:00:00.000Z");
+    assert.equal(session?.updatedAt, "2026-06-06T12:01:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
+test("future-dated source activity does not mark a backfilled session active", () => {
+  const { db, cleanup } = openTempDb();
+  try {
+    const importer = createImporter(db.connection, {
+      tokenUsage: db.tokenUsage,
+      detectBillingMode: () => "api",
+      now: () => "2026-06-06T12:00:00.000Z",
+    });
+
+    importer.importSession(
+      makeSession({
+        sessionId: "future-source",
+        startedAt: "2026-06-06T12:30:00.000Z",
+        endedAt: "2026-06-06T12:35:00.000Z",
+        fileModifiedAt: Date.parse("2026-06-06T11:59:00.000Z"),
+        messageTimestamps: [],
+        toolUses: [],
+      }),
+      "codex",
+    );
+
+    const session = db.sessions.getById("future-source");
+    assert.ok(session);
+    assert.equal(session.status, "completed");
+    assert.equal(session.updatedAt, "2026-06-06T12:00:00.000Z");
+  } finally {
+    cleanup();
+  }
+});
+
 test("Agent/Task tool use creates an idempotent subagent row", () => {
   const { db, cleanup } = openTempDb();
   try {
