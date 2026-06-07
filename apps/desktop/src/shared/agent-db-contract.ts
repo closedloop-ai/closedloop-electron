@@ -25,6 +25,8 @@ export interface SessionRow {
   metadata: string | null;
   harness: string | null;
   billingMode: string | null;
+  userId: string | null;
+  organizationId: string | null;
 }
 
 export interface AgentRow {
