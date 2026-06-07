@@ -212,7 +212,7 @@ test("loadSyncedSessions includes userId and organizationId in payload", () => {
   }
 });
 
-test("loadSyncedSessions includes null userId/organizationId for pre-signup sessions", () => {
+test("loadSyncedSessions omits userId/organizationId for pre-signup sessions", () => {
   const { db, dir } = makeTmpDb();
   try {
     db.connection.exec(`
@@ -222,8 +222,8 @@ test("loadSyncedSessions includes null userId/organizationId for pre-signup sess
 
     const sessions = loadSyncedSessions(db.connection, ["s-sync-anon"]);
     assert.equal(sessions.length, 1);
-    assert.equal(sessions[0].userId, null);
-    assert.equal(sessions[0].organizationId, null);
+    assert.equal(sessions[0].userId, undefined);
+    assert.equal(sessions[0].organizationId, undefined);
   } finally {
     cleanup(db, dir);
   }
