@@ -104,6 +104,8 @@ export function createSessionStore(db: DatabaseSync) {
       metadata: (raw.metadata as string) ?? null,
       harness: (raw.harness as string) ?? null,
       billingMode: (raw.billing_mode as string) ?? null,
+      userId: (raw.user_id as string) ?? null,
+      organizationId: (raw.organization_id as string) ?? null,
     };
   }
 

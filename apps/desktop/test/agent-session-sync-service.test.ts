@@ -73,7 +73,9 @@ test("agent-session sync loads normalized session payloads with attribution and 
       awaiting_input_since TEXT,
       metadata TEXT,
       harness TEXT NOT NULL,
-      billing_mode TEXT NOT NULL DEFAULT 'unknown'
+      billing_mode TEXT NOT NULL DEFAULT 'unknown',
+      user_id TEXT,
+      organization_id TEXT
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -1193,7 +1195,7 @@ test("sanitizeSessionForSync preserves data without content key", () => {
 
   const sanitized = sanitizeSessionForSync(session as any);
 
-  assert.deepEqual(sanitized.events[0].data, { command: "git status", cwd: "/home/user" }, "data without content key is fully preserved");
+  assert.deepEqual(sanitized.events[0].data, { cwd: "/home/user" }, "command is stripped but other safe keys preserved");
 });
 
 test("sanitizeSessionForSync strips content/stdout/stderr recursively inside tool_response", () => {
@@ -1237,4 +1239,177 @@ test("sanitizeSessionForSync strips content/stdout/stderr recursively inside too
     tool_name: "Bash",
     tool_response: { interrupted: false, isImage: false },
   }, "Bash: stdout/stderr stripped, structural keys preserved");
+});
+
+// ---------------------------------------------------------------------------
+// FEA-1554: sanitizeSessionForSync strips text, output, reasoning
+// ---------------------------------------------------------------------------
+
+test("sanitizeSessionForSync strips 'text' key from event data", () => {
+  const session = {
+    externalSessionId: "sess-text",
+    status: "completed",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    agents: [],
+    events: [
+      {
+        externalEventId: "1",
+        eventType: "UserMessage",
+        toolName: null,
+        summary: "user message",
+        data: { text: "hello world", role: "human" },
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+      {
+        externalEventId: "2",
+        eventType: "AssistantMessage",
+        toolName: null,
+        summary: "assistant reply",
+        data: { text: "I can help with that", role: "assistant", model: "claude-opus-4-6" },
+        createdAt: "2026-01-01T00:02:00Z",
+      },
+    ],
+    tokenUsageByModel: [],
+  };
+
+  const sanitized = sanitizeSessionForSync(session as any);
+
+  assert.deepEqual(
+    sanitized.events[0].data,
+    { role: "human" },
+    "UserMessage: text stripped, role preserved",
+  );
+  assert.deepEqual(
+    sanitized.events[1].data,
+    { role: "assistant", model: "claude-opus-4-6" },
+    "AssistantMessage: text stripped, role and model preserved",
+  );
+});
+
+test("sanitizeSessionForSync strips 'output' key from event data", () => {
+  const session = {
+    externalSessionId: "sess-output",
+    status: "completed",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    agents: [],
+    events: [
+      {
+        externalEventId: "1",
+        eventType: "PostToolUse",
+        toolName: "Search",
+        summary: "search completed",
+        data: { input: { query: "agent sessions" }, output: "found 42 results with sensitive data" },
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+    ],
+    tokenUsageByModel: [],
+  };
+
+  const sanitized = sanitizeSessionForSync(session as any);
+
+  assert.deepEqual(
+    sanitized.events[0].data,
+    { input: { query: "agent sessions" } },
+    "PostToolUse: output stripped, input preserved",
+  );
+});
+
+test("sanitizeSessionForSync strips 'reasoning' key from event data", () => {
+  const session = {
+    externalSessionId: "sess-reasoning",
+    status: "completed",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    agents: [],
+    events: [
+      {
+        externalEventId: "1",
+        eventType: "AssistantMessage",
+        toolName: null,
+        summary: "assistant reasoning",
+        data: { reasoning: "Let me think about this step by step...", model: "claude-opus-4-6" },
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+    ],
+    tokenUsageByModel: [],
+  };
+
+  const sanitized = sanitizeSessionForSync(session as any);
+
+  assert.deepEqual(
+    sanitized.events[0].data,
+    { model: "claude-opus-4-6" },
+    "reasoning stripped, model preserved",
+  );
+});
+
+test("sanitizeSessionForSync round-trip: all content-bearing keys stripped in one payload", () => {
+  const session = {
+    externalSessionId: "sess-all-keys",
+    status: "completed",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    agents: [],
+    events: [
+      {
+        externalEventId: "1",
+        eventType: "PostToolUse",
+        toolName: "Bash",
+        summary: "all keys present",
+        data: {
+          prompt: "run the build",
+          content: "file contents here",
+          stdout: "build output",
+          stderr: "build warnings",
+          text: "assistant message body",
+          output: "tool result payload",
+          reasoning: "chain of thought",
+          tool_name: "Bash",
+          exitCode: 0,
+          nested: {
+            prompt: "nested prompt leak",
+            content: "nested content leak",
+            stdout: "nested stdout",
+            stderr: "nested stderr",
+            text: "nested text",
+            output: "nested output",
+            reasoning: "nested reasoning",
+            safe: "preserved-value",
+          },
+        },
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+    ],
+    tokenUsageByModel: [],
+  };
+
+  const sanitized = sanitizeSessionForSync(session as any);
+  const data = sanitized.events[0].data as Record<string, unknown>;
+
+  // Top-level content-bearing keys must be absent
+  const strippedKeys = ["prompt", "content", "stdout", "stderr", "text", "output", "reasoning"];
+  for (const key of strippedKeys) {
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(data, key),
+      false,
+      `top-level '${key}' must be stripped`,
+    );
+  }
+
+  // Structural keys must survive
+  assert.strictEqual(data.tool_name, "Bash", "tool_name preserved");
+  assert.strictEqual(data.exitCode, 0, "exitCode preserved");
+
+  // Nested content-bearing keys must also be stripped
+  const nested = data.nested as Record<string, unknown>;
+  for (const key of strippedKeys) {
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(nested, key),
+      false,
+      `nested '${key}' must be stripped`,
+    );
+  }
+  assert.strictEqual(nested.safe, "preserved-value", "nested safe key preserved");
 });

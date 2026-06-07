@@ -17,17 +17,25 @@ import { getOpenCodeDbPath } from "./opencode-home.js";
 import {
   emptyUsageExtras,
   type NormalizedApiError,
+  type NormalizedDiffStats,
+  type NormalizedMessage,
   type NormalizedSession,
   type NormalizedTokenCounts,
+  type NormalizedTokenRecord,
   type NormalizedToolResultError,
   type NormalizedToolUse,
   type NormalizedTurnDuration,
 } from "../types.js";
 import {
+  collectArtifacts,
+  computeUnifiedDiffDelta,
+  countDiffFiles,
   extractErrorMessage,
+  isSyntheticModelKey,
   pushTurnDuration,
   safeJson,
   toIso,
+  truncateText,
 } from "../parser-utils.js";
 
 type Row = Record<string, unknown>;
@@ -67,6 +75,24 @@ function partTimestamp(partRow: Row, part: Record<string, unknown>): unknown {
   );
 }
 
+/** CR-2: Extract per-message token counts from the message data JSON. */
+function extractMessageTokens(
+  data: Record<string, unknown>,
+): { input: number; output: number; cacheRead: number; cacheWrite: number } | null {
+  // OpenCode stores tokens in data.tokens as an object or JSON string.
+  const raw = parseJsonCell(data.tokens);
+  if (!isObject(raw)) return null;
+  const input = Number(raw.input || raw.inputTokens || 0);
+  const output = Number(raw.output || raw.outputTokens || 0) +
+    Number(raw.reasoning || raw.reasoningTokens || 0);
+  const cacheRead = Number(raw.cacheRead || raw.cache_read || raw.cacheReadTokens || 0);
+  const cacheWrite = Number(raw.cacheWrite || raw.cache_write || raw.cacheWriteTokens || 0);
+  if (input || output || cacheRead || cacheWrite) {
+    return { input, output, cacheRead, cacheWrite };
+  }
+  return null;
+}
+
 function collectToolUse(
   toolUses: NormalizedToolUse[],
   toolResultErrors: NormalizedToolResultError[],
@@ -77,6 +103,37 @@ function collectToolUse(
   const timestamp = toIso(partTimestamp(partRow, part)) || firstTimestamp;
   const state = isObject(part.state) ? part.state : undefined;
   const input = state?.input ?? part.input ?? part.parameters ?? null;
+  const status = state?.status;
+  const stateOutput = state?.output;
+
+  // CR-3: Capture output for all completions (success and error).
+  let output: unknown = undefined;
+  let isError = false;
+  const errorMessage = extractErrorMessage(state?.error ?? part.error);
+
+  if (status === "failed" || status === "error" || errorMessage) {
+    isError = true;
+    const outputStr =
+      typeof stateOutput === "string"
+        ? stateOutput
+        : JSON.stringify(stateOutput ?? part.state ?? part).slice(0, 500);
+    output = truncateText(
+      errorMessage || outputStr || "OpenCode tool error",
+      4096,
+    );
+    toolResultErrors.push({
+      content: (errorMessage || outputStr || "OpenCode tool error").slice(0, 500),
+      timestamp,
+    });
+  } else if (stateOutput != null) {
+    // CR-3: Successful tool output — truncate at 4KB.
+    const outputStr =
+      typeof stateOutput === "string"
+        ? stateOutput
+        : JSON.stringify(stateOutput);
+    output = truncateText(outputStr, 4096);
+  }
+
   toolUses.push({
     name:
       (typeof part.tool === "string" ? part.tool : null) ||
@@ -84,27 +141,16 @@ function collectToolUse(
       "opencode_tool",
     timestamp,
     input: safeJson(input),
+    output,
+    isError: isError || undefined,
   });
-
-  const status = state?.status;
-  const errorMessage = extractErrorMessage(state?.error ?? part.error);
-  if (status === "failed" || status === "error" || errorMessage) {
-    const stateOutput = state?.output;
-    const output =
-      typeof stateOutput === "string"
-        ? stateOutput
-        : JSON.stringify(stateOutput ?? part.state ?? part).slice(0, 500);
-    toolResultErrors.push({
-      content: (errorMessage || output || "OpenCode tool error").slice(0, 500),
-      timestamp,
-    });
-  }
 }
 
 function parseSessionRow(
   sessionRow: Row,
   getMessages: StatementSync,
   getParts: StatementSync,
+  hasSummaryCols: boolean,
 ): NormalizedSession | null {
   const sessionId = sessionRow.id as string | number | bigint | null;
   const messageRows = getMessages.all(sessionId) as Row[];
@@ -112,7 +158,7 @@ function parseSessionRow(
 
   let cwd: string | null =
     typeof sessionRow.directory === "string" ? sessionRow.directory : null;
-  const model = modelIdFromValue(sessionRow.model);
+  const sessionModel = modelIdFromValue(sessionRow.model);
   let firstTimestamp: string | null = null;
   let lastTimestamp: string | null = null;
   let userMessageCount = 0;
@@ -124,6 +170,17 @@ function parseSessionRow(
   let thinkingBlockCount = 0;
   const toolResultErrors: NormalizedToolResultError[] = [];
   let pendingTurnStartedAt: string | null = null;
+
+  // CR-1: ordered messages
+  const messages: NormalizedMessage[] = [];
+  // CR-2: per-turn token time-series
+  const tokenSeries: NormalizedTokenRecord[] = [];
+  // CR-4: aggregate diff stats from patch parts
+  let totalAdded = 0;
+  let totalRemoved = 0;
+  let totalFilesChanged = 0;
+  // CR-7: slash commands (OpenCode does not have these; keep empty)
+  const slashCommands: Array<{ name: string; timestamp: string }> = [];
 
   const noteTs = (raw: unknown): string | null => {
     const iso = toIso(raw);
@@ -158,14 +215,72 @@ function parseSessionRow(
       cwd = pathCwd || pathRoot || cwd;
     }
 
+    // CR-5: Per-message modelID from data JSON.
+    // CR-9: Also check data.tokens.modelID for per-message model attribution.
+    const tokensObj = isObject(data.tokens) ? data.tokens
+      : typeof data.tokens === "string" ? (parseJsonCell(data.tokens) as Record<string, unknown> | null)
+      : null;
+    const tokensModelID = isObject(tokensObj) ? tokensObj.modelID : undefined;
+    const msgModel = modelIdFromValue(data.model ?? data.modelID ?? tokensModelID) || sessionModel;
+
+    // CR-2: Per-message token counts.
+    const msgTokens = extractMessageTokens(data);
+
     if (role === "user" || role === "human") {
       userMessageCount++;
       if (iso) pendingTurnStartedAt = iso;
+
+      // CR-1: Build NormalizedMessage for user messages.
+      // User message text is in data.content (string or array of parts).
+      const userText = extractMessageText(data);
+      messages.push({
+        role: "human",
+        timestamp: iso,
+        text: truncateText(userText),
+        model: msgModel,
+        tokens: msgTokens ?? undefined,
+        ...(msgModel && isSyntheticModelKey(msgModel) ? { isSynthetic: true } : {}),
+      });
+
+      // CR-2: Token series for user messages (if tokens present).
+      if (msgTokens && iso && msgModel) {
+        tokenSeries.push({
+          timestamp: iso,
+          model: msgModel,
+          input: msgTokens.input,
+          output: msgTokens.output,
+          cacheRead: msgTokens.cacheRead,
+          cacheWrite: msgTokens.cacheWrite,
+        });
+      }
     } else if (role === "assistant" || role === "ai" || role === "model") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
       pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
       pendingTurnStartedAt = null;
+
+      // CR-1: Build NormalizedMessage for assistant messages.
+      const assistantText = extractMessageText(data);
+      messages.push({
+        role: "assistant",
+        timestamp: iso,
+        text: truncateText(assistantText),
+        model: msgModel,
+        tokens: msgTokens ?? undefined,
+        ...(msgModel && isSyntheticModelKey(msgModel) ? { isSynthetic: true } : {}),
+      });
+
+      // CR-2: Token series for assistant messages.
+      if (msgTokens && iso && msgModel) {
+        tokenSeries.push({
+          timestamp: iso,
+          model: msgModel,
+          input: msgTokens.input,
+          output: msgTokens.output,
+          cacheRead: msgTokens.cacheRead,
+          cacheWrite: msgTokens.cacheWrite,
+        });
+      }
     }
 
     const errorMessage = extractErrorMessage(data.error);
@@ -186,6 +301,30 @@ function parseSessionRow(
     const iso = noteTs(partTimestamp(partRow, part));
     if (part.type === "reasoning") {
       thinkingBlockCount++;
+      // CR-1: Thinking block as a message entry.
+      messages.push({
+        role: "assistant",
+        timestamp: iso,
+        text: null,
+        model: sessionModel,
+        isThinking: true,
+        ...(sessionModel && isSyntheticModelKey(sessionModel) ? { isSynthetic: true } : {}),
+      });
+    } else if (part.type === "text") {
+      // CR-1: Text parts contribute to messages. These are typically
+      // content sub-parts within assistant turns.
+      const textContent =
+        typeof part.text === "string" ? part.text :
+        typeof part.content === "string" ? part.content : null;
+      if (textContent) {
+        messages.push({
+          role: "assistant",
+          timestamp: iso,
+          text: truncateText(textContent),
+          model: sessionModel,
+          ...(sessionModel && isSyntheticModelKey(sessionModel) ? { isSynthetic: true } : {}),
+        });
+      }
     } else if (part.type === "tool") {
       collectToolUse(toolUses, toolResultErrors, partRow, part, firstTimestamp);
     } else if (part.type === "error") {
@@ -196,6 +335,48 @@ function parseSessionRow(
           message: errorMessage,
           timestamp: iso,
         });
+      }
+    } else if (part.type === "patch") {
+      // CR-4: Patch parts contain unified diff data.
+      const patchContent =
+        typeof part.content === "string" ? part.content :
+        typeof part.patch === "string" ? part.patch :
+        typeof part.diff === "string" ? part.diff : null;
+      if (patchContent) {
+        const delta = computeUnifiedDiffDelta(patchContent);
+        totalAdded += delta.add;
+        totalRemoved += delta.del;
+        totalFilesChanged += countDiffFiles(patchContent);
+        // Attach diff delta to the most recent tool use if applicable.
+        if (toolUses.length > 0) {
+          const lastTool = toolUses[toolUses.length - 1];
+          if (!lastTool.diffDelta) {
+            lastTool.diffDelta = delta;
+          }
+        }
+      }
+    } else if (part.type === "step-finish" || part.type === "step_finish") {
+      // CR-2: Step-finish parts may contain per-step token data.
+      const stepData = isObject(part.usage) ? part.usage :
+        isObject(part.tokens) ? part.tokens : null;
+      if (stepData && iso) {
+        const stepModel =
+          modelIdFromValue(part.model ?? part.modelID) || sessionModel || "opencode-default";
+        const input = Number(stepData.input || stepData.inputTokens || 0);
+        const output = Number(stepData.output || stepData.outputTokens || 0) +
+          Number(stepData.reasoning || stepData.reasoningTokens || 0);
+        const cacheRead = Number(stepData.cacheRead || stepData.cache_read || 0);
+        const cacheWrite = Number(stepData.cacheWrite || stepData.cache_write || 0);
+        if (input || output || cacheRead || cacheWrite) {
+          tokenSeries.push({
+            timestamp: iso,
+            model: stepModel,
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
+          });
+        }
       }
     }
   }
@@ -216,7 +397,7 @@ function parseSessionRow(
     tokenCacheWrite
   ) {
     const agent = typeof sessionRow.agent === "string" ? sessionRow.agent : null;
-    const key = model || agent || "opencode-default";
+    const key = sessionModel || agent || "opencode-default";
     tokensByModel[key] = {
       input: tokenInput,
       output: tokenOutput + tokenReasoning,
@@ -224,6 +405,50 @@ function parseSessionRow(
       cacheWrite: tokenCacheWrite,
     };
   }
+
+  // CR-4: Build aggregate diffStats. Prefer summary columns from the session
+  // row when available (CR-9), fall back to patch-part accumulation.
+  let diffStats: NormalizedDiffStats | null = null;
+  if (hasSummaryCols) {
+    const summaryAdds = Number(sessionRow.summary_additions || 0);
+    const summaryDels = Number(sessionRow.summary_deletions || 0);
+    const summaryFiles = Number(sessionRow.summary_files || 0);
+    // Parse summary_diffs for additional diff context (unified diff text).
+    const summaryDiffsRaw = sessionRow.summary_diffs;
+    if (typeof summaryDiffsRaw === "string" && summaryDiffsRaw.length > 0) {
+      const diffDelta = computeUnifiedDiffDelta(summaryDiffsRaw);
+      const diffFiles = countDiffFiles(summaryDiffsRaw);
+      // Prefer summary_diffs line counts when they provide data and the
+      // explicit summary columns are zeroed out; otherwise the explicit
+      // columns are authoritative.
+      const effectiveAdds = summaryAdds || diffDelta.add;
+      const effectiveDels = summaryDels || diffDelta.del;
+      const effectiveFiles = summaryFiles || diffFiles;
+      if (effectiveAdds || effectiveDels || effectiveFiles) {
+        diffStats = {
+          filesChanged: effectiveFiles,
+          linesAdded: effectiveAdds,
+          linesRemoved: effectiveDels,
+        };
+      }
+    } else if (summaryAdds || summaryDels || summaryFiles) {
+      diffStats = {
+        filesChanged: summaryFiles,
+        linesAdded: summaryAdds,
+        linesRemoved: summaryDels,
+      };
+    }
+  }
+  if (!diffStats && (totalAdded || totalRemoved || totalFilesChanged)) {
+    diffStats = {
+      filesChanged: totalFilesChanged,
+      linesAdded: totalAdded,
+      linesRemoved: totalRemoved,
+    };
+  }
+
+  // CR-13: Collect artifact references from tool uses.
+  const artifacts = collectArtifacts(toolUses, cwd);
 
   const sessionIdStr = String(sessionId);
   const title = typeof sessionRow.title === "string" ? sessionRow.title : null;
@@ -241,7 +466,7 @@ function parseSessionRow(
     sessionId: `opencode-${sessionIdStr}`,
     name: projectName,
     cwd,
-    model,
+    model: sessionModel,
     version,
     slug,
     gitBranch: null,
@@ -262,7 +487,51 @@ function parseSessionRow(
     thinkingBlockCount,
     toolResultErrors,
     usageExtras: emptyUsageExtras(),
+    messages,
+    tokenSeries,
+    diffStats,
+    slashCommands,
+    artifacts,
   };
+}
+
+/** Extract text content from a message data object. Handles both string and
+ *  array-of-parts content shapes. */
+function extractMessageText(data: Record<string, unknown>): string | null {
+  const content = data.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const textParts: string[] = [];
+    for (const item of content) {
+      if (typeof item === "string") {
+        textParts.push(item);
+      } else if (isObject(item)) {
+        if (item.type === "text" && typeof item.text === "string") {
+          textParts.push(item.text);
+        }
+      }
+    }
+    return textParts.length > 0 ? textParts.join("\n") : null;
+  }
+  // Fallback: try data.text directly.
+  if (typeof data.text === "string") return data.text;
+  return null;
+}
+
+/** CR-9: Detect whether the session table has summary_* columns. */
+function hasSummaryColumns(db: DatabaseSync): boolean {
+  try {
+    const cols = db.prepare("PRAGMA table_info(session)").all() as Row[];
+    const names = new Set(cols.map((c) => c.name));
+    return (
+      names.has("summary_additions") &&
+      names.has("summary_deletions") &&
+      names.has("summary_files") &&
+      names.has("summary_diffs")
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function loadSessionsFromDb(
@@ -273,9 +542,36 @@ export function loadSessionsFromDb(
   const db = new DatabaseSync(dbPath);
   try {
     db.exec("PRAGMA busy_timeout = 1000");
-    const sessionRows = db
-      .prepare(
-        `
+
+    // CR-9: Detect optional summary columns before building the SELECT.
+    const hasSummaryCols = hasSummaryColumns(db);
+
+    const sessionSelect = hasSummaryCols
+      ? `
+        SELECT
+          id,
+          slug,
+          directory,
+          title,
+          version,
+          agent,
+          model,
+          permission,
+          time_created,
+          time_updated,
+          tokens_input,
+          tokens_output,
+          tokens_reasoning,
+          tokens_cache_read,
+          tokens_cache_write,
+          summary_additions,
+          summary_deletions,
+          summary_files,
+          summary_diffs
+        FROM session
+        ORDER BY time_updated DESC, id DESC
+      `
+      : `
         SELECT
           id,
           slug,
@@ -294,9 +590,9 @@ export function loadSessionsFromDb(
           tokens_cache_write
         FROM session
         ORDER BY time_updated DESC, id DESC
-      `,
-      )
-      .all() as Row[];
+      `;
+
+    const sessionRows = db.prepare(sessionSelect).all() as Row[];
     const getMessages = db.prepare(`
       SELECT id, time_created, time_updated, data
       FROM message
@@ -312,7 +608,7 @@ export function loadSessionsFromDb(
 
     const out: NormalizedSession[] = [];
     for (const row of sessionRows) {
-      const session = parseSessionRow(row, getMessages, getParts);
+      const session = parseSessionRow(row, getMessages, getParts, hasSummaryCols);
       if (session) out.push(session);
     }
     return out;
