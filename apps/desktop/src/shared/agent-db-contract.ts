@@ -76,6 +76,7 @@ export interface SessionWithAgents extends SessionRow {
   agentCount: number;
   eventCount: number;
   totalTokens: number;
+  estimatedCostUsd?: number;
 }
 
 export interface EventWithSession extends EventRow {
@@ -92,6 +93,7 @@ export interface TokenAnalytics {
     inputTokens: number;
     outputTokens: number;
     sessions: number;
+    estimatedCostUsd?: number;
   }>;
   byDay: Array<{
     day: string;
