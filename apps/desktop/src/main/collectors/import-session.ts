@@ -39,6 +39,11 @@ export interface ImporterDeps {
   now?: () => string;
   /** Key-free diagnostic sink. */
   log?: (message: string) => void;
+  /**
+   * FEA-1548: resolve the current authenticated user's identity for stamping
+   * on new sessions. Returns null when no user is signed in.
+   */
+  getUserIdentity?: () => { userId: string; organizationId: string | null } | null;
 }
 
 export interface ImportResult {
@@ -66,17 +71,19 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
     "SELECT id, status, ended_at FROM sessions WHERE id = ?",
   );
   const insertSessionStmt = db.prepare(`
-    INSERT INTO sessions (id, name, status, cwd, model, started_at, updated_at, ended_at, harness, billing_mode, metadata)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, name, status, cwd, model, started_at, updated_at, ended_at, harness, billing_mode, metadata, user_id, organization_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   // Fill only missing fields on an existing row; never clobber a live status.
+  // Always refresh metadata so new fields (diffStats, artifacts, etc.) are populated.
   const coalesceSessionStmt = db.prepare(`
     UPDATE sessions SET
       name = COALESCE(name, ?),
       model = COALESCE(model, ?),
       cwd = COALESCE(cwd, ?),
       harness = CASE WHEN COALESCE(harness, '') = '' THEN ? ELSE harness END,
-      billing_mode = CASE WHEN COALESCE(billing_mode, '') IN ('', 'unknown') THEN ? ELSE billing_mode END
+      billing_mode = CASE WHEN COALESCE(billing_mode, '') IN ('', 'unknown') THEN ? ELSE billing_mode END,
+      metadata = ?
     WHERE id = ?
   `);
   const touchSessionStmt = db.prepare(
@@ -144,6 +151,10 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
         speeds: [],
         inference_geos: [],
       },
+      diffStats: session.diffStats ?? null,
+      slashCommands: session.slashCommands ?? [],
+      artifacts: session.artifacts ?? { prs: [], issues: [], repo: null },
+      tokenSeries: session.tokenSeries ?? [],
     });
   }
 
@@ -225,6 +236,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       if (!existing) {
         const status = recentlyActive ? "active" : "completed";
         const billingMode = safe(() => deps.detectBillingMode(harness)) ?? "unknown";
+        const identity = safe(() => deps.getUserIdentity?.()) ?? null;
         insertSessionStmt.run(
           session.sessionId,
           session.name ?? null,
@@ -237,6 +249,8 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           harness,
           billingMode,
           buildMetadata(session, harness),
+          identity?.userId ?? null,
+          identity?.organizationId ?? null,
         );
         insertAgentStmt.run(
           mainId,
@@ -261,6 +275,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
           session.cwd ?? null,
           harness,
           billingMode,
+          buildMetadata(session, harness),
           session.sessionId,
         );
         const isLive = existing.status === "active" && existing.ended_at == null;
@@ -317,7 +332,19 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
         addEvent("Stop", mainId, ts, null, null, null);
       }
 
+      for (const msg of session.messages ?? []) {
+        const eventType = msg.role === "human" ? "UserMessage" : "AssistantMessage";
+        addEvent(eventType, mainId, msg.timestamp, null, null, eventData({
+          text: msg.text,
+          role: msg.role,
+          ...(msg.model ? { model: msg.model } : {}),
+          ...(msg.tokens ? { tokens: msg.tokens } : {}),
+          ...(msg.isThinking ? { isThinking: true } : {}),
+        }));
+      }
+
       (session.toolUses ?? []).forEach((tu, idx) => {
+        const enrichedData = buildToolEventData(tu);
         if (tu.name === "Agent" || tu.name === "Task") {
           const subId = `${session.sessionId}-sub-${idx}`;
           const input = (tu.input ?? {}) as Record<string, unknown>;
@@ -333,9 +360,9 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
             tu.timestamp ?? sourceUpdatedAt,
             mainId,
           );
-          addEvent("PreToolUse", subId, tu.timestamp, tu.name, "Spawned subagent", eventData(tu.input));
+          addEvent("PreToolUse", subId, tu.timestamp, tu.name, "Spawned subagent", eventData(enrichedData));
         } else {
-          addEvent("PostToolUse", mainId, tu.timestamp, tu.name, null, eventData(tu.input));
+          addEvent("PostToolUse", mainId, tu.timestamp, tu.name, null, eventData(enrichedData));
         }
       });
 
@@ -376,6 +403,18 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
   }
 
   return { importSession };
+}
+
+function buildToolEventData(tu: NormalizedToolUse): Record<string, unknown> {
+  const data: Record<string, unknown> = {};
+  if (tu.input != null) data.input = tu.input;
+  if (tu.output != null) data.output = tu.output;
+  if (tu.isError != null) data.isError = tu.isError;
+  if (tu.mcpServer != null) data.mcpServer = tu.mcpServer;
+  if (tu.mcpMethod != null) data.mcpMethod = tu.mcpMethod;
+  if (tu.skillName != null) data.skillName = tu.skillName;
+  if (tu.diffDelta != null) data.diffDelta = tu.diffDelta;
+  return data;
 }
 
 function strOf(value: unknown): string | undefined {

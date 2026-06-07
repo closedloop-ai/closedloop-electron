@@ -43,7 +43,9 @@ export function createAgentMonitorTestDatabase(rootDir: string): DatabaseSync {
       awaiting_input_since TEXT,
       metadata TEXT,
       harness TEXT NOT NULL,
-      billing_mode TEXT NOT NULL DEFAULT 'unknown'
+      billing_mode TEXT NOT NULL DEFAULT 'unknown',
+      user_id TEXT,
+      organization_id TEXT
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,

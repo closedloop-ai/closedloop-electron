@@ -25,6 +25,8 @@ export interface SessionRow {
   metadata: string | null;
   harness: string | null;
   billingMode: string | null;
+  userId: string | null;
+  organizationId: string | null;
 }
 
 export interface AgentRow {
@@ -76,6 +78,7 @@ export interface SessionWithAgents extends SessionRow {
   agentCount: number;
   eventCount: number;
   totalTokens: number;
+  estimatedCostUsd?: number;
 }
 
 export interface EventWithSession extends EventRow {
@@ -92,6 +95,7 @@ export interface TokenAnalytics {
     inputTokens: number;
     outputTokens: number;
     sessions: number;
+    estimatedCostUsd?: number;
   }>;
   byDay: Array<{
     day: string;

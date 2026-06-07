@@ -14,14 +14,17 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
-import { toIso, safeJson, pushTurnDuration } from "../parser-utils.js";
+import { toIso, safeJson, pushTurnDuration, truncateText, collectArtifacts, isSyntheticModelKey } from "../parser-utils.js";
 import type {
   NormalizedApiError,
+  NormalizedMessage,
   NormalizedSession,
+  NormalizedTokenRecord,
   NormalizedToolResultError,
   NormalizedToolUse,
   NormalizedTurnDuration,
 } from "../types.js";
+import { emptyArtifacts } from "../types.js";
 import { sessionIdFromTranscriptPath } from "./cursor-home.js";
 
 /** Coerce an unknown JSON value to a plain object bag for tolerant field access. */
@@ -73,6 +76,13 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
   let tokenCacheRead = 0;
   let tokenCacheWrite = 0;
   let pendingTurnStartedAt: string | null = null;
+
+  // CR-1: Ordered messages with text content
+  const messages: NormalizedMessage[] = [];
+  // CR-2: Per-event token records for time-series
+  const tokenSeries: NormalizedTokenRecord[] = [];
+  // CR-5: Track per-turn model from turn_context
+  let currentTurnModel: string | null = null;
 
   const noteTs = (raw: unknown): string | null => {
     const iso = toIso(raw);
@@ -128,13 +138,16 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
       }
     }
 
-    // Model override (turn-level is authoritative)
+    // Model override (turn-level is authoritative) — CR-5: also track per-turn model
     if (type === "turn_context" || type === "turn.context" || type === "model_context") {
-      if (payload.model) model = asStringOrNull(payload.model);
+      if (payload.model) {
+        model = asStringOrNull(payload.model);
+        currentTurnModel = model;
+      }
       if (!cwd && payload.cwd) cwd = asStringOrNull(payload.cwd);
     }
 
-    // User messages
+    // User messages — CR-1: capture message text
     if (
       type === "user_message" ||
       type === "human_message" ||
@@ -142,9 +155,19 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
     ) {
       userMessageCount++;
       if (iso) pendingTurnStartedAt = iso;
+      const rawText = asStringOrNull(payload.content) ?? asStringOrNull(payload.text) ?? asStringOrNull(payload.message);
+      const msgModel = currentTurnModel ?? model;
+      const cursorResolved = msgModel || "cursor-default";
+      messages.push({
+        role: "human",
+        timestamp: iso,
+        text: truncateText(rawText),
+        model: msgModel,
+        ...(isSyntheticModelKey(cursorResolved) ? { isSynthetic: true } : {}),
+      });
     }
 
-    // Assistant messages
+    // Assistant messages — CR-1: capture message text
     if (
       type === "assistant_message" ||
       type === "agent_message" ||
@@ -154,6 +177,16 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
       if (iso) messageTimestamps.push(iso);
       pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
       pendingTurnStartedAt = null;
+      const rawText = asStringOrNull(payload.content) ?? asStringOrNull(payload.text);
+      const msgModel = currentTurnModel ?? model;
+      const cursorResolved = msgModel || "cursor-default";
+      messages.push({
+        role: "assistant",
+        timestamp: iso,
+        text: truncateText(rawText),
+        model: msgModel,
+        ...(isSyntheticModelKey(cursorResolved) ? { isSynthetic: true } : {}),
+      });
     }
 
     // Thinking/reasoning
@@ -189,7 +222,7 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
       });
     }
 
-    // Tool results with errors
+    // Tool results — CR-3: capture output content and error status
     if (type === "tool_result" || type === "tool_output" || type === "command_output") {
       const exitCode = asNumberOrNull(payload.exit_code);
       const isErr =
@@ -204,9 +237,24 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
             : JSON.stringify(payload.error || payload.output || payload).slice(0, 500);
         toolResultErrors.push({ content, timestamp: iso });
       }
+
+      // CR-3: Attach output + isError to the most recent tool use
+      const lastTool = toolUses.length > 0 ? toolUses[toolUses.length - 1] : null;
+      if (lastTool) {
+        const rawOutput =
+          typeof payload.output === "string"
+            ? payload.output
+            : typeof payload.content === "string"
+              ? payload.content
+              : payload.result != null
+                ? JSON.stringify(payload.result)
+                : null;
+        lastTool.output = truncateText(rawOutput, 4096);
+        if (isErr) lastTool.isError = true;
+      }
     }
 
-    // Token usage
+    // Token usage — CR-2: push per-event token record for time-series
     if (type === "token_count" || type === "usage" || type === "token_usage") {
       const info = asRecord(payload.usage ?? payload.token_count ?? payload);
       if (info.input_tokens != null) tokenInput = info.input_tokens as number;
@@ -218,6 +266,19 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
         tokenCacheWrite = info.cache_creation_input_tokens as number;
       }
       if (payload.model) model = asStringOrNull(payload.model);
+
+      // CR-2: Record this token event for time-series reconstruction
+      const tokenTs = iso || lastTimestamp || firstTimestamp;
+      if (tokenTs) {
+        tokenSeries.push({
+          timestamp: tokenTs,
+          model: currentTurnModel ?? model ?? "cursor-default",
+          input: tokenInput,
+          output: tokenOutput,
+          cacheRead: tokenCacheRead,
+          cacheWrite: tokenCacheWrite,
+        });
+      }
     }
 
     // Errors
@@ -255,6 +316,9 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
 
   const projectName = cwd ? path.basename(cwd) : `Cursor Session ${sessionId.slice(0, 8)}`;
 
+  // CR-13: Extract artifact references (PRs, issues, repo) from tool calls
+  const artifacts = toolUses.length > 0 ? collectArtifacts(toolUses, cwd) : emptyArtifacts();
+
   return {
     sessionId,
     name: projectName,
@@ -280,5 +344,15 @@ export async function parseTranscriptFile(filePath: string): Promise<NormalizedS
     thinkingBlockCount,
     toolResultErrors,
     usageExtras: { service_tiers: [], speeds: [], inference_geos: [] },
+    // CR-1: Ordered messages with text content
+    messages,
+    // CR-2: Per-event token records for time-series
+    tokenSeries,
+    // CR-4: Cursor edit tools don't carry diff data in args [absent]
+    diffStats: null,
+    // CR-7: Cursor has no slash commands
+    slashCommands: [],
+    // CR-13: Structured artifact references
+    artifacts,
   };
 }

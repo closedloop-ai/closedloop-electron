@@ -79,6 +79,13 @@ export type SyncedAgentSession = {
   awaitingInputSince?: string | null;
   metadata?: SyncJsonObject | null;
   attribution?: SyncedAgentSessionAttribution;
+  /**
+   * FEA-1548: multi-tenant identity columns. Nullable — sessions created before
+   * account signup have no user/org context. Optional + additive; the relay
+   * already ignores unknown fields, so this is backward-compatible.
+   */
+  userId?: string | null;
+  organizationId?: string | null;
   agents: SyncedAgentSessionAgent[];
   events: SyncedAgentSessionEvent[];
   tokenUsageByModel: SyncedAgentSessionTokenUsage[];

@@ -20,12 +20,17 @@ import {
   toIso,
   safeJson,
   pushTurnDuration,
+  truncateText,
+  collectArtifacts,
+  isSyntheticModelKey,
 } from "../parser-utils.js";
 import type {
   NormalizedSession,
   NormalizedToolUse,
   NormalizedApiError,
   NormalizedTurnDuration,
+  NormalizedMessage,
+  NormalizedTokenRecord,
 } from "../types.js";
 
 /** True when `value` is a non-null object (and not an array). */
@@ -78,8 +83,72 @@ interface ChatEntry {
   role: "user" | "assistant";
   timestamp: unknown;
   toolCalls?: unknown[];
+  /** CR-1: User prompt or assistant response text. */
+  text?: string | null;
   thinking?: boolean;
   error?: string | null;
+  /** CR-5: Per-request model identifier. */
+  model?: string | null;
+  /** CR-2: Raw usage object for building tokenSeries. */
+  usage?: Record<string, unknown> | null;
+  /** CR-3: Tool result content keyed by tool call index/name. */
+  toolResults?: Array<{ name: string; content: unknown; isError?: boolean }>;
+}
+
+/** CR-1: Best-effort extraction of displayable text from a Copilot message payload. */
+function extractText(payload: unknown): string | null {
+  if (payload == null) return null;
+  if (typeof payload === "string") return payload;
+  if (typeof payload !== "object") return null;
+  const obj = payload as Record<string, unknown>;
+  // Direct text/content fields
+  for (const key of ["text", "content", "markdown", "body", "value", "message"]) {
+    const v = obj[key];
+    if (typeof v === "string" && v.trim().length > 0) return v;
+  }
+  // Array of content parts (OpenAI-style)
+  if (Array.isArray(obj.content)) {
+    const parts = obj.content
+      .map((p: unknown) => {
+        if (typeof p === "string") return p;
+        if (p && typeof p === "object") {
+          const po = p as Record<string, unknown>;
+          if (typeof po.text === "string") return po.text;
+          if (typeof po.content === "string") return po.content;
+        }
+        return null;
+      })
+      .filter(Boolean);
+    if (parts.length > 0) return parts.join("\n");
+  }
+  return null;
+}
+
+/** CR-3: Collect tool result entries from a request's response flow. */
+function collectToolResults(
+  req: Record<string, unknown>,
+): Array<{ name: string; content: unknown; isError?: boolean }> {
+  const results: Array<{ name: string; content: unknown; isError?: boolean }> = [];
+  // Look in response.toolResults, result.toolResults, etc.
+  for (const outer of ["response", "result", "reply", "output"]) {
+    const container = req[outer];
+    if (!container || typeof container !== "object") continue;
+    const containerObj = container as Record<string, unknown>;
+    for (const key of ["toolResults", "tool_results", "functionResults"]) {
+      const arr = containerObj[key];
+      if (!Array.isArray(arr)) continue;
+      for (const entry of arr) {
+        if (!entry || typeof entry !== "object") continue;
+        const e = entry as Record<string, unknown>;
+        results.push({
+          name: String(e.name || e.toolName || e.tool || "copilot_tool"),
+          content: e.content ?? e.result ?? e.output ?? null,
+          isError: Boolean(e.isError || e.is_error || e.error),
+        });
+      }
+    }
+  }
+  return results;
 }
 
 function normalizeChatRequest(request: unknown, sessionData: Record<string, unknown>): ChatEntry[] {
@@ -121,6 +190,23 @@ function normalizeChatRequest(request: unknown, sessionData: Record<string, unkn
       get(req.response, "error"),
   );
 
+  // CR-1: Extract user and assistant text
+  const userText = extractText(userPayload);
+  const assistantText = extractText(assistantPayload);
+
+  // CR-5: Per-request model
+  const reqModel = (req.model || req.modelId ||
+    get(req.response, "model") || get(req.result, "model") || null) as string | null;
+
+  // CR-2: Per-request usage for tokenSeries
+  const usageInfo =
+    req.usage || req.tokenUsage || req.token_count ||
+    get(req.response, "usage") || get(req.result, "usage") || null;
+  const usageObj = (usageInfo && typeof usageInfo === "object") ? usageInfo as Record<string, unknown> : null;
+
+  // CR-3: Tool results from the response flow
+  const toolResults = collectToolResults(req);
+
   const entries: ChatEntry[] = [];
   if (
     hasRenderableContent(userPayload) ||
@@ -130,6 +216,8 @@ function normalizeChatRequest(request: unknown, sessionData: Record<string, unkn
     entries.push({
       role: "user",
       timestamp: requestTimestamp,
+      text: truncateText(userText),
+      model: reqModel,
     });
   }
 
@@ -142,19 +230,24 @@ function normalizeChatRequest(request: unknown, sessionData: Record<string, unkn
     req.reply != null ||
     req.output != null
   ) {
+    const isThinking = Boolean(
+      req.thinking ||
+        req.reasoning ||
+        get(req.response, "thinking") ||
+        get(req.response, "reasoning") ||
+        get(req.result, "thinking") ||
+        get(req.result, "reasoning"),
+    );
     entries.push({
       role: "assistant",
       timestamp: responseTimestamp,
       toolCalls,
-      thinking: Boolean(
-        req.thinking ||
-          req.reasoning ||
-          get(req.response, "thinking") ||
-          get(req.response, "reasoning") ||
-          get(req.result, "thinking") ||
-          get(req.result, "reasoning"),
-      ),
+      text: isThinking ? null : truncateText(assistantText),
+      thinking: isThinking,
       error: assistantError,
+      model: reqModel,
+      usage: usageObj,
+      toolResults,
     });
   }
 
@@ -199,29 +292,7 @@ export function parseChatSessionFile(
     dataObj.sessionId || dataObj.id || path.basename(filePath, ".json"),
   );
 
-  // P1 Fix: extract token usage from raw requests BEFORE normalization,
-  // since normalizeChatMessages reduces each request to {role, timestamp}
-  // and drops the original usage/response payloads.
   const rawRequests = Array.isArray(dataObj.requests) ? dataObj.requests : [];
-  const requestTokenFields: TokenFields = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  for (const req of rawRequests) {
-    if (!req || typeof req !== "object") continue;
-    const reqObj = req as Record<string, unknown>;
-    const usageInfo =
-      reqObj.usage || reqObj.tokenUsage || reqObj.token_count ||
-      get(reqObj.response, "usage") || get(reqObj.result, "usage") || null;
-    if (usageInfo && typeof usageInfo === "object") {
-      const u = usageInfo as Record<string, unknown>;
-      if (u.input_tokens != null) requestTokenFields.input += Number(u.input_tokens);
-      if (u.output_tokens != null) requestTokenFields.output += Number(u.output_tokens);
-      if (u.prompt_tokens != null) requestTokenFields.input += Number(u.prompt_tokens);
-      if (u.completion_tokens != null) requestTokenFields.output += Number(u.completion_tokens);
-      if (u.cache_read_tokens != null) requestTokenFields.cacheRead += Number(u.cache_read_tokens);
-      if (u.cached_input_tokens != null) requestTokenFields.cacheRead += Number(u.cached_input_tokens);
-      if (u.cache_write_tokens != null) requestTokenFields.cacheWrite += Number(u.cache_write_tokens);
-      if (u.cache_creation_input_tokens != null) requestTokenFields.cacheWrite += Number(u.cache_creation_input_tokens);
-    }
-  }
 
   const messages = normalizeChatMessages(dataObj);
   if (!Array.isArray(messages) || messages.length === 0) return null;
@@ -238,6 +309,12 @@ export function parseChatSessionFile(
   const toolResultErrors: NormalizedSession["toolResultErrors"] = [];
   const tokenFields: TokenFields = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let pendingTurnStartedAt: string | null = null;
+  // CR-1: Ordered messages with text content
+  const normalizedMessages: NormalizedMessage[] = [];
+  // CR-2: Per-turn token records for time-series
+  const tokenSeries: NormalizedTokenRecord[] = [];
+  // Session-level model — extracted early so tokenSeries fallback can reference it
+  const model = (dataObj.model || dataObj.modelId || null) as string | null;
 
   const noteTs = (raw: unknown): string | null => {
     const iso = toIso(raw);
@@ -254,14 +331,68 @@ export function parseChatSessionFile(
     const iso = noteTs(ts);
     const role = msgObj.role || msgObj.author || msgObj.type || "";
 
+    // CR-5: Per-message model
+    const msgModel = (msgObj.model as string | null) || null;
+    const resolvedModel = msgModel || model || "copilot-default";
+    const synthetic = isSyntheticModelKey(resolvedModel) ? true : undefined;
+
     if (role === "user" || role === "human") {
       userMessageCount++;
       if (iso) pendingTurnStartedAt = iso;
+      // CR-1: User message
+      normalizedMessages.push({
+        role: "human",
+        timestamp: iso,
+        text: truncateText(msgObj.text as string | null ?? extractText(msgObj)),
+        model: msgModel,
+        ...(synthetic ? { isSynthetic: true } : {}),
+      });
     } else if (role === "assistant" || role === "copilot" || role === "bot") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
       pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
       pendingTurnStartedAt = null;
+
+      const isThinking = Boolean(msgObj.thinking || msgObj.reasoning);
+
+      // CR-1: Assistant message (thinking indicator uses null text)
+      if (isThinking) {
+        normalizedMessages.push({
+          role: "assistant",
+          timestamp: iso,
+          text: null,
+          model: msgModel,
+          isThinking: true,
+          ...(synthetic ? { isSynthetic: true } : {}),
+        });
+      } else {
+        normalizedMessages.push({
+          role: "assistant",
+          timestamp: iso,
+          text: truncateText(msgObj.text as string | null ?? extractText(msgObj)),
+          model: msgModel,
+          ...(synthetic ? { isSynthetic: true } : {}),
+        });
+      }
+
+      // CR-2: Build tokenSeries from per-message usage
+      const msgUsage = msgObj.usage as Record<string, unknown> | null | undefined;
+      if (msgUsage && typeof msgUsage === "object" && iso) {
+        const inp = Number(msgUsage.input_tokens ?? msgUsage.prompt_tokens ?? 0);
+        const out = Number(msgUsage.output_tokens ?? msgUsage.completion_tokens ?? 0);
+        const cr = Number(msgUsage.cache_read_tokens ?? msgUsage.cached_input_tokens ?? 0);
+        const cw = Number(msgUsage.cache_write_tokens ?? msgUsage.cache_creation_input_tokens ?? 0);
+        if (inp || out || cr || cw) {
+          tokenSeries.push({
+            timestamp: iso,
+            model: msgModel || model || "copilot-default",
+            input: inp,
+            output: out,
+            cacheRead: cr,
+            cacheWrite: cw,
+          });
+        }
+      }
     }
 
     // Tool uses embedded in messages
@@ -274,11 +405,35 @@ export function parseChatSessionFile(
       for (const call of calls) {
         if (!call) continue;
         const callObj = call as Record<string, unknown>;
+        // CR-3: Capture tool result content from call-level result
+        const rawOutput = callObj.result ?? callObj.output ?? callObj.response ?? null;
+        const outputText = typeof rawOutput === "string" ? truncateText(rawOutput) : rawOutput;
+        const callIsError = Boolean(callObj.isError || callObj.is_error);
         toolUses.push({
           name: String(callObj.name || get(callObj.function, "name") || "copilot_tool"),
           timestamp: iso || firstTimestamp,
           input: safeJson(callObj.arguments || callObj.input || callObj.parameters),
+          ...(outputText != null ? { output: outputText } : {}),
+          ...(callIsError ? { isError: true } : {}),
         });
+      }
+    }
+
+    // CR-3: Tool results from the ChatEntry enrichment path
+    const toolResults = msgObj.toolResults;
+    if (Array.isArray(toolResults)) {
+      for (const tr of toolResults) {
+        if (!tr || typeof tr !== "object") continue;
+        const trObj = tr as Record<string, unknown>;
+        const rawContent = trObj.content ?? trObj.result ?? trObj.output ?? null;
+        const contentText = typeof rawContent === "string" ? truncateText(rawContent) : rawContent;
+        // Try to match to the last tool use with the same name
+        const trName = String(trObj.name || "copilot_tool");
+        const matchIdx = toolUses.findLastIndex((tu) => tu.name === trName && tu.output == null);
+        if (matchIdx >= 0) {
+          if (contentText != null) toolUses[matchIdx].output = contentText;
+          if (trObj.isError || trObj.is_error) toolUses[matchIdx].isError = true;
+        }
       }
     }
 
@@ -311,12 +466,45 @@ export function parseChatSessionFile(
     }
   }
 
-  // Merge request-level tokens (from raw requests before normalization)
-  // with message-level tokens. Use summation since each request is unique.
-  tokenFields.input += requestTokenFields.input;
-  tokenFields.output += requestTokenFields.output;
-  tokenFields.cacheRead += requestTokenFields.cacheRead;
-  tokenFields.cacheWrite += requestTokenFields.cacheWrite;
+  // CR-2: Also build tokenSeries from raw requests (for requests that go through
+  // the normalizeChatRequest path which enriches ChatEntry with usage).
+  // The normalizeChatMessages path already feeds into the message loop above,
+  // but raw requests have richer usage data. Build additional series entries
+  // from raw requests that weren't already captured.
+  for (const req of rawRequests) {
+    if (!req || typeof req !== "object") continue;
+    const reqObj = req as Record<string, unknown>;
+    const usageInfo =
+      reqObj.usage || reqObj.tokenUsage || reqObj.token_count ||
+      get(reqObj.response, "usage") || get(reqObj.result, "usage") || null;
+    if (!usageInfo || typeof usageInfo !== "object") continue;
+    const u = usageInfo as Record<string, unknown>;
+    const reqTs = toIso(
+      reqObj.responseTimestamp || reqObj.responseDate || reqObj.updatedAt ||
+      get(reqObj.response, "timestamp") || get(reqObj.result, "timestamp") ||
+      reqObj.timestamp || reqObj.created_at || reqObj.createdAt ||
+      dataObj.lastMessageDate || null,
+    );
+    if (!reqTs) continue;
+    // Skip if we already have a tokenSeries entry at this exact timestamp
+    if (tokenSeries.some((ts) => ts.timestamp === reqTs)) continue;
+    const reqModel = (reqObj.model || reqObj.modelId ||
+      get(reqObj.response, "model") || get(reqObj.result, "model") || null) as string | null;
+    const inp = Number(u.input_tokens ?? u.prompt_tokens ?? 0);
+    const out = Number(u.output_tokens ?? u.completion_tokens ?? 0);
+    const cr = Number(u.cache_read_tokens ?? u.cached_input_tokens ?? 0);
+    const cw = Number(u.cache_write_tokens ?? u.cache_creation_input_tokens ?? 0);
+    if (inp || out || cr || cw) {
+      tokenSeries.push({
+        timestamp: reqTs,
+        model: reqModel || model || "copilot-default",
+        input: inp,
+        output: out,
+        cacheRead: cr,
+        cacheWrite: cw,
+      });
+    }
+  }
 
   // Token usage from top-level session data
   const topUsage = dataObj.usage || dataObj.tokenUsage || dataObj.token_count || null;
@@ -342,7 +530,6 @@ export function parseChatSessionFile(
     } catch { return null; }
   }
 
-  const model = (dataObj.model || dataObj.modelId || null) as string | null;
   const cwd = (workspacePath || dataObj.cwd || dataObj.workspaceFolder || null) as string | null;
 
   let fileModifiedAt: number | null = null;
@@ -386,6 +573,16 @@ export function parseChatSessionFile(
     thinkingBlockCount,
     toolResultErrors,
     usageExtras: { service_tiers: [], speeds: [], inference_geos: [] },
+    // CR-1: Ordered messages with text content
+    messages: normalizedMessages,
+    // CR-2: Per-turn token records
+    tokenSeries,
+    // CR-4: Diff stats absent at source for Copilot
+    diffStats: null,
+    // CR-7: Slash commands not applicable to Copilot
+    slashCommands: [],
+    // CR-13: Artifact references extracted from tool calls
+    artifacts: collectArtifacts(toolUses, cwd),
   };
 }
 
@@ -420,6 +617,10 @@ export async function parseCliEventFile(
   let tokenCacheWrite = 0;
   let tokenReasoning = 0;
   let pendingTurnStartedAt: string | null = null;
+  // CR-1: Ordered messages with text content
+  const normalizedMessages: NormalizedMessage[] = [];
+  // CR-2: Per-turn token records for time-series
+  const tokenSeries: NormalizedTokenRecord[] = [];
 
   const noteTs = (raw: unknown): string | null => {
     const iso = toIso(raw);
@@ -448,16 +649,39 @@ export async function parseCliEventFile(
       if (!model) model = (payload.model || null) as string | null;
     }
 
+    // CR-5: Per-event model
+    const eventModel = (payload.model || recObj.model || null) as string | null;
+    const cliResolvedModel = eventModel || model || "copilot-default";
+    const cliSynthetic = isSyntheticModelKey(cliResolvedModel) ? true : undefined;
+
     // Messages
     if (type === "user_message" || type === "user_input" || type === "prompt") {
       userMessageCount++;
       if (iso) pendingTurnStartedAt = iso;
+      // CR-1: User message with text content
+      const userText = extractText(payload.content ?? payload.message ?? payload.text ?? payload.prompt ?? payload);
+      normalizedMessages.push({
+        role: "human",
+        timestamp: iso,
+        text: truncateText(userText),
+        model: eventModel,
+        ...(cliSynthetic ? { isSynthetic: true } : {}),
+      });
     }
     if (type === "assistant_message" || type === "response" || type === "completion") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
       pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
       pendingTurnStartedAt = null;
+      // CR-1: Assistant message with text content
+      const assistantText = extractText(payload.content ?? payload.message ?? payload.text ?? payload.response ?? payload);
+      normalizedMessages.push({
+        role: "assistant",
+        timestamp: iso,
+        text: truncateText(assistantText),
+        model: eventModel,
+        ...(cliSynthetic ? { isSynthetic: true } : {}),
+      });
     }
 
     // Tool calls
@@ -467,6 +691,19 @@ export async function parseCliEventFile(
         timestamp: iso || firstTimestamp,
         input: safeJson(payload.arguments || payload.input),
       });
+    }
+
+    // CR-3: Tool results — match back to the most recent unresolved tool use
+    if (type === "tool_result" || type === "function_result" || type === "command_result") {
+      const resultName = String(payload.name || payload.tool || "copilot_tool");
+      const rawContent = payload.content ?? payload.result ?? payload.output ?? null;
+      const contentText = typeof rawContent === "string" ? truncateText(rawContent) : rawContent;
+      const resultIsError = Boolean(payload.isError || payload.is_error || payload.error);
+      const matchIdx = toolUses.findLastIndex((tu) => tu.name === resultName && tu.output == null);
+      if (matchIdx >= 0) {
+        if (contentText != null) toolUses[matchIdx].output = contentText;
+        if (resultIsError) toolUses[matchIdx].isError = true;
+      }
     }
 
     // Token usage
@@ -483,6 +720,25 @@ export async function parseCliEventFile(
       if (info.reasoning_tokens != null) tokenReasoning = Number(info.reasoning_tokens);
       if (info.reasoning_output_tokens != null) tokenReasoning = Number(info.reasoning_output_tokens);
       if (payload.model) model = payload.model as string;
+
+      // CR-2: Push per-event token record for time-series
+      if (iso) {
+        const usageModel = (eventModel || model || "copilot-default");
+        const inp = Number(info.input_tokens ?? info.prompt_tokens ?? 0);
+        const out = Number(info.output_tokens ?? info.completion_tokens ?? 0);
+        const cr = Number(info.cache_read_tokens ?? info.cached_input_tokens ?? 0);
+        const cw = Number(info.cache_write_tokens ?? info.cache_creation_input_tokens ?? 0);
+        if (inp || out || cr || cw) {
+          tokenSeries.push({
+            timestamp: iso,
+            model: usageModel,
+            input: inp,
+            output: out,
+            cacheRead: cr,
+            cacheWrite: cw,
+          });
+        }
+      }
     }
 
     // Errors
@@ -494,9 +750,18 @@ export async function parseCliEventFile(
       });
     }
 
-    // Thinking
+    // Thinking — Copilot provides boolean-only thinking flag
     if (type === "reasoning" || type === "thinking") {
       thinkingBlockCount++;
+      // CR-1: Thinking indicator as message with null text
+      normalizedMessages.push({
+        role: "assistant",
+        timestamp: iso,
+        text: null,
+        model: eventModel,
+        isThinking: true,
+        ...(cliSynthetic ? { isSynthetic: true } : {}),
+      });
     }
   }
 
@@ -543,5 +808,15 @@ export async function parseCliEventFile(
     thinkingBlockCount,
     toolResultErrors,
     usageExtras: { service_tiers: [], speeds: [], inference_geos: [] },
+    // CR-1: Ordered messages with text content
+    messages: normalizedMessages,
+    // CR-2: Per-turn token records
+    tokenSeries,
+    // CR-4: Diff stats absent at source for Copilot
+    diffStats: null,
+    // CR-7: Slash commands not applicable to Copilot
+    slashCommands: [],
+    // CR-13: Artifact references extracted from tool calls
+    artifacts: collectArtifacts(toolUses, cwd),
   };
 }
