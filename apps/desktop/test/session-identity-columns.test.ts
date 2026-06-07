@@ -31,7 +31,7 @@ function cleanup(db: ReturnType<typeof openAgentDatabase>, dir: string) {
 test("schema v6 migration adds user_id and organization_id columns to sessions", () => {
   const { db, dir } = makeTmpDb();
   try {
-    assert.equal(CURRENT_SCHEMA_VERSION, 6, "schema version bumped to 6");
+    assert.ok(CURRENT_SCHEMA_VERSION >= 6, "schema includes the v6 identity-column migration");
 
     // Verify columns exist by inserting a row with user_id/organization_id
     db.connection.exec(`
@@ -270,7 +270,7 @@ test("v5 → v6 upgrade preserves existing session data", () => {
   const db = openAgentDatabase(dbPath);
   try {
     const version = (db.connection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    assert.equal(version, 6, "schema upgraded to v6");
+    assert.equal(version, CURRENT_SCHEMA_VERSION, "schema upgraded to the current version");
 
     // Verify pre-existing session still has all its data
     const session = db.sessions.getById("pre-upgrade");

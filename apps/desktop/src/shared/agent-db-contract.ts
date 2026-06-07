@@ -81,6 +81,22 @@ export interface SessionWithAgents extends SessionRow {
   estimatedCostUsd?: number;
 }
 
+export interface SessionPageRequest {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  q?: string;
+}
+
+export interface SessionPage {
+  sessions: SessionWithAgents[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export type KanbanPages = Record<string, SessionPage>;
+
 export interface EventWithSession extends EventRow {
   sessionName: string | null;
 }

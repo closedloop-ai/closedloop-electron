@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /**
  * Each migration runs against the DB when user_version < CURRENT_SCHEMA_VERSION.
@@ -132,5 +132,19 @@ ALTER TABLE sessions ADD COLUMN organization_id TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id) WHERE user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_organization_id ON sessions(organization_id) WHERE organization_id IS NOT NULL;
+`,
+
+  // Version 6 -> 7: keep the in-process dashboard waiting-session page bounded
+  // to the sessions index instead of scanning large historical databases.
+  `
+CREATE INDEX IF NOT EXISTS idx_sessions_waiting_started_at
+ON sessions(started_at DESC)
+WHERE awaiting_input_since IS NOT NULL
+  AND status NOT IN ('completed', 'abandoned', 'error');
+
+CREATE INDEX IF NOT EXISTS idx_sessions_running_started_at
+ON sessions(started_at DESC)
+WHERE awaiting_input_since IS NULL
+  AND status NOT IN ('completed', 'abandoned', 'error');
 `,
 ];

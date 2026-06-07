@@ -44,6 +44,10 @@ export function useQueryCache<T>(
         return;
       }
 
+      // No fresh cache hit; set loading so the consumer can render a loading
+      // state instead of displaying stale data from a previous key.
+      if (mounted) setLoading(true);
+
       fetcherRef.current()
         .then((result) => {
           cache.set(key, { data: result, fetchedAt: Date.now() });
@@ -54,7 +58,10 @@ export function useQueryCache<T>(
           }
         })
         .catch(() => {
-          if (mounted) setError(true);
+          if (mounted) {
+            setLoading(false);
+            setError(true);
+          }
         });
     };
 
