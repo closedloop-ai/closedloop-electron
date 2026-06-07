@@ -118,6 +118,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       Number.isFinite(session.fileModifiedAt) &&
       nowMs - session.fileModifiedAt < RECENT_ACTIVITY_MS &&
       Number.isFinite(sourceUpdatedAtMs) &&
+      sourceUpdatedAtMs <= nowMs &&
       nowMs - sourceUpdatedAtMs < RECENT_ACTIVITY_MS
     );
   }
@@ -280,6 +281,7 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
       }
 
       let inserted = 0;
+      let namelessEventCounter = 0;
       const addEvent = (
         eventType: string,
         agentId: string,
@@ -288,7 +290,12 @@ export function createImporter(db: DatabaseSync, deps: ImporterDeps): Importer {
         summary: string | null,
         data: string | null,
       ): void => {
-        const eventTimestamp = ts ?? startedAt;
+        const eventTimestamp = ts ?? (() => {
+          // Synthetic increment to distinguish no-timestamp events in the same
+          // batch so they don't all collide on the high-water-mark dedup.
+          const base = Date.parse(sourceUpdatedAt);
+          return new Date(base + namelessEventCounter++).toISOString();
+        })();
         const prev = highWater.get(eventType);
         if (prev != null && eventTimestamp <= prev) return;
         insertEventStmt.run(
