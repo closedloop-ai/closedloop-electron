@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -215,25 +216,50 @@ test("migrateSqliteToPglite copies rows, preserves attribution columns, and rena
   }
 });
 
-test("migrateSqliteToPglite returns failed and leaves SQLite intact when PGlite initialization fails", async () => {
+test("migrateSqliteToPglite returns failed and leaves SQLite intact with unmanaged source tables", async () => {
   const dir = makeTempDir();
   try {
     const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
-    const pgliteDataDir = path.join(dir, "not-a-directory");
-    seedSqlite(sqlitePath);
-    writeFileSync(pgliteDataDir, "blocks PGlite directory creation");
+    const db = new DatabaseSync(sqlitePath);
+    db.exec("CREATE TABLE compute_target (id TEXT PRIMARY KEY)");
+    db.close();
 
-    const result = await migrateSqliteToPglite({ sqlitePath, pgliteDataDir });
+    const result = await migrateSqliteToPglite({ sqlitePath });
 
     assert.equal(result.status, "failed");
-    assert.equal(existsSync(sqlitePath), true, "SQLite source must remain usable");
-    assert.equal(existsSync(`${sqlitePath}.bak`), false, "failed migration must not create backup");
+    assert.equal(
+      existsSync(sqlitePath),
+      true,
+      "SQLite source must remain usable",
+    );
+    assert.equal(
+      existsSync(`${sqlitePath}.bak`),
+      false,
+      "failed migration must not create backup",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("migrateSqliteToPglite skips when only the retained SQLite backup remains", async () => {
+test("migrateSqliteToPglite skips when backup and pgdata exist", async () => {
+  const dir = makeTempDir();
+  try {
+    const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
+    writeFileSync(`${sqlitePath}.bak`, "backup");
+    rmSync(resolvePgliteDataDir(sqlitePath), { recursive: true, force: true });
+    mkdirSync(resolvePgliteDataDir(sqlitePath));
+
+    const result = await migrateSqliteToPglite({ sqlitePath });
+
+    assert.equal(result.status, "skipped");
+    assert.equal(result.status === "skipped" ? result.reason : "", "already_migrated");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migrateSqliteToPglite returns sqlite_missing when only .bak exists without .pgdata", async () => {
   const dir = makeTempDir();
   try {
     const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
@@ -242,7 +268,45 @@ test("migrateSqliteToPglite skips when only the retained SQLite backup remains",
     const result = await migrateSqliteToPglite({ sqlitePath });
 
     assert.equal(result.status, "skipped");
-    assert.equal(result.status === "skipped" ? result.reason : "", "already_migrated");
+    assert.equal(result.status === "skipped" ? result.reason : "", "sqlite_missing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migrateSqliteToPglite with keepSource preserves the SQLite source file", async () => {
+  const dir = makeTempDir();
+  try {
+    const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
+    seedSqlite(sqlitePath);
+
+    const result = await migrateSqliteToPglite({
+      sqlitePath,
+      keepSource: true,
+    });
+
+    assert.equal(result.status, "migrated");
+    assert.equal(result.sqliteBackupPath, null);
+    assert.equal(
+      existsSync(sqlitePath),
+      true,
+      "SQLite source kept when keepSource is true",
+    );
+    assert.equal(
+      existsSync(`${sqlitePath}.bak`),
+      false,
+      "no backup created when keepSource is true",
+    );
+
+    const pg = await PGlite.create(resolvePgliteDataDir(sqlitePath));
+    try {
+      const sessions = await pg.query<{ id: string }>(
+        "SELECT id FROM sessions",
+      );
+      assert.equal(sessions.rows.length, 1);
+    } finally {
+      await pg.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -267,7 +331,7 @@ test("prepareAgentDashboardDatabaseStartup leaves SQLite live for the SQLite bac
   }
 });
 
-test("prepareAgentDashboardDatabaseStartup migrates before selecting the PGlite backend", async () => {
+test("prepareAgentDashboardDatabaseStartup kicks off background migration with PGlite backend", async () => {
   const dir = makeTempDir();
   try {
     const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
@@ -279,30 +343,38 @@ test("prepareAgentDashboardDatabaseStartup migrates before selecting the PGlite 
     });
 
     assert.equal(result.backend, "pglite");
-    assert.equal(result.migration.status, "migrated");
-    assert.equal(existsSync(sqlitePath), false);
-    assert.equal(existsSync(`${sqlitePath}.bak`), true);
+    assert.equal(result.migration, undefined);
+    assert.ok(result.migrationPromise, "migration promise exists");
+    const migration = await result.migrationPromise;
+    assert.equal(migration.status, "migrated");
+    assert.equal(
+      existsSync(sqlitePath),
+      true,
+      "SQLite preserved for sync runtime",
+    );
+    assert.equal(existsSync(`${sqlitePath}.bak`), false, "no backup created");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("prepareAgentDashboardDatabaseStartup falls back to SQLite when PGlite migration fails", async () => {
+test("prepareAgentDashboardDatabaseStartup logs failure without affecting SQLite when PGlite migration fails", async () => {
   const dir = makeTempDir();
   try {
     const sqlitePath = path.join(dir, "agent-dashboard.sqlite");
-    const pgliteDataDir = resolvePgliteDataDir(sqlitePath);
-    seedSqlite(sqlitePath);
-    writeFileSync(pgliteDataDir, "blocks PGlite directory creation");
+    const db = new DatabaseSync(sqlitePath);
+    db.exec("CREATE TABLE compute_target (id TEXT PRIMARY KEY)");
+    db.close();
 
     const result = await prepareAgentDashboardDatabaseStartup({
       userDataPath: dir,
       backend: "pglite",
     });
 
-    assert.equal(result.backend, "sqlite");
-    assert.equal(result.migration?.status, "failed");
-    assert.equal(existsSync(sqlitePath), true, "fallback keeps SQLite live");
+    assert.equal(result.backend, "pglite");
+    const migration = await result.migrationPromise!;
+    assert.equal(migration.status, "failed");
+    assert.equal(existsSync(sqlitePath), true, "failure keeps SQLite live");
     assert.equal(existsSync(`${sqlitePath}.bak`), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });

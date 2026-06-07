@@ -11,7 +11,10 @@ import { detectBillingMode } from "./billing-mode-detector.js";
 import { openAgentDatabase, type AgentDatabase } from "./database/index.js";
 import { coerceDbId } from "./database/ipc-validation.js";
 import { createLifecycle } from "./database/lifecycle.js";
-import { resolveAgentDashboardDatabasePathForUserData } from "./agent-dashboard-database-startup.js";
+import {
+  resolveAgentDashboardDatabasePathForUserData,
+  type AgentDashboardDatabaseStartupResult,
+} from "./agent-dashboard-database-startup.js";
 import { isAgentMonitorHooksEnabled } from "./agent-monitor-hooks.js";
 
 export { prepareAgentDashboardDatabaseStartup } from "./agent-dashboard-database-startup.js";
@@ -40,6 +43,7 @@ export interface AgentDashboardDesignSystemRuntimeOptions {
   onTerminalFailure: (reason: string) => void;
   userDataPath?: string;
   log?: (scope: string, message: string) => void;
+  startupResult?: AgentDashboardDatabaseStartupResult;
 }
 
 export interface AgentDashboardDesignSystemRuntime {
@@ -74,6 +78,28 @@ export function createAgentDashboardDesignSystemRuntime(
   options: AgentDashboardDesignSystemRuntimeOptions,
 ): AgentDashboardDesignSystemRuntime {
   const log = options.log ?? (() => {});
+  const startupResult = options.startupResult;
+
+  if (startupResult?.backend === "pglite") {
+    log(
+      "agent-dashboard-migration",
+      "PGlite migration kicked off in background; SQLite runtime active during migration",
+    );
+    void startupResult.migrationPromise.then((migration) => {
+      if (migration.status === "failed") {
+        log(
+          "agent-dashboard-migration",
+          `PGlite migration failed: ${migration.error}`,
+        );
+      } else {
+        log(
+          "agent-dashboard-migration",
+          `PGlite migration completed (${migration.status === "migrated" ? `${migration.rowCounts.sessions} sessions` : "skipped"})`,
+        );
+      }
+    });
+  }
+
   const agentDatabase = openAgentDatabase(
     resolveAgentDashboardDatabasePath(options.userDataPath),
   );

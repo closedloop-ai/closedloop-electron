@@ -1515,9 +1515,9 @@ export class DesktopApplication {
       } = await import(
         "./agent-dashboard-design-system-runtime.js"
       );
-      await prepareAgentDashboardDatabaseStartup({
+      const startupResult = await prepareAgentDashboardDatabaseStartup({
         userDataPath: app.getPath("userData"),
-        backend: "sqlite",
+        backend: "pglite",
         log: (scope, message) => gatewayLog.info(scope, message),
       });
       this.agentDashboardDesignSystem =
@@ -1535,6 +1535,7 @@ export class DesktopApplication {
             this.refreshTrayState();
           },
           log: (scope, message) => gatewayLog.info(scope, message),
+          startupResult,
         });
       this.agentDashboardDesignSystem.registerIpcHandlers();
     }

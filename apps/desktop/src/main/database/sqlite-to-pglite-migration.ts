@@ -2,17 +2,19 @@ import { DatabaseSync } from "node:sqlite";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
-  mkdir,
+  mkdtemp,
   readdir,
   rename,
   rm,
   stat,
+  utimes,
 } from "node:fs/promises";
 import path from "node:path";
 import { PGlite, type Results } from "@electric-sql/pglite";
 
 const BACKUP_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const PGLITE_DIRECTORY_SUFFIX = ".pgdata";
+const BATCH_SIZE = 500;
 
 const TABLES = [
   {
@@ -108,7 +110,7 @@ export type SqliteToPgliteMigrationResult =
   | {
       status: "migrated";
       sqlitePath: string;
-      sqliteBackupPath: string;
+      sqliteBackupPath: string | null;
       pgliteDataDir: string;
       rowCounts: TableCounts;
     }
@@ -125,6 +127,13 @@ export interface SqliteToPgliteMigrationOptions {
   pgliteDataDir?: string;
   now?: () => Date;
   log?: (message: string) => void;
+  /**
+   * When true, skip the final rename of the SQLite source to .bak.
+   * Used during startup migration so the existing SQLite runtime can
+   * continue serving reads and writes until the stores are migrated
+   * to PGlite.
+   */
+  keepSource?: boolean;
 }
 
 interface PgliteExecutor {
@@ -145,13 +154,15 @@ export function resolvePgliteDataDir(sqlitePath: string): string {
   return path.join(parsed.dir, `${parsed.name}${PGLITE_DIRECTORY_SUFFIX}`);
 }
 
+const BACKUP_NAME_REGEX = /^(.+\.bak)(\.\d+)?$/;
+
 export async function cleanupExpiredSqliteBackups(
   sqlitePath: string,
   now = new Date(),
   retentionMs = BACKUP_RETENTION_MS,
 ): Promise<number> {
   const dir = path.dirname(sqlitePath);
-  const backupPrefix = `${path.basename(sqlitePath)}.bak`;
+  const basename = path.basename(sqlitePath);
   let removed = 0;
 
   let entries: string[];
@@ -163,17 +174,21 @@ export async function cleanupExpiredSqliteBackups(
 
   await Promise.all(
     entries
-      .filter((entry) => entry === backupPrefix || entry.startsWith(`${backupPrefix}.`))
+      .filter(
+        (entry) =>
+          entry === `${basename}.bak` ||
+          BACKUP_NAME_REGEX.test(entry) && entry.startsWith(`${basename}.bak`),
+      )
       .map(async (entry) => {
         const backupPath = path.join(dir, entry);
         const info = await stat(backupPath).catch(() => null);
-        if (!info) {
+        if (!info?.isFile()) {
           return;
         }
         if (now.getTime() - info.mtime.getTime() < retentionMs) {
           return;
         }
-        await rm(backupPath, { force: true, recursive: true });
+        await rm(backupPath, { force: true });
         removed += 1;
       }),
   );
@@ -187,15 +202,29 @@ export async function migrateSqliteToPglite(
   const sqlitePath = options.sqlitePath;
   const pgliteDataDir = options.pgliteDataDir ?? resolvePgliteDataDir(sqlitePath);
   const log = options.log ?? (() => {});
+  const stampTime = options.now?.() ?? new Date();
 
-  await cleanupExpiredSqliteBackups(sqlitePath, options.now?.() ?? new Date());
+  await cleanupExpiredSqliteBackups(sqlitePath, stampTime);
+
+  const backupExists = await fileExists(`${sqlitePath}.bak`);
+  const pgdataExists = await fileExists(pgliteDataDir);
 
   if (!(await fileExists(sqlitePath))) {
     return {
       status: "skipped",
-      reason: (await fileExists(`${sqlitePath}.bak`))
+      reason: backupExists && pgdataExists
         ? "already_migrated"
         : "sqlite_missing",
+      sqlitePath,
+      pgliteDataDir,
+    };
+  }
+
+  if (backupExists && pgdataExists) {
+    await rm(sqlitePath, { force: true });
+    return {
+      status: "skipped",
+      reason: "already_migrated",
       sqlitePath,
       pgliteDataDir,
     };
@@ -206,41 +235,64 @@ export async function migrateSqliteToPglite(
   let sqlite: DatabaseSync | null = null;
   let pglite: PgliteClient | null = null;
   try {
-    await mkdir(pgliteDataDir, { recursive: true });
-    sqlite = new DatabaseSync(sqlitePath);
-    pglite = await PGlite.create(pgliteDataDir);
-
-    const sourceSchema = readSqliteSchema(sqlite);
-    const sourceCounts = readSourceCounts(sqlite, sourceSchema);
-    await initializeAndCopy(sqlite, pglite, sourceSchema, sourceCounts);
-
-    sqlite.close();
-    sqlite = null;
-    await pglite.close();
-    pglite = null;
-
-    await rotateExistingBackup(backupPath);
-    await rename(sqlitePath, backupPath);
-    log(
-      `SQLite to PGlite migration succeeded: sqlite=${sqlitePath}, pglite=${pgliteDataDir}`,
+    const stagingDir = await mkdtemp(
+      path.join(path.dirname(pgliteDataDir), ".pglite-staging-"),
     );
+    try {
+      sqlite = new DatabaseSync(sqlitePath);
+      assertAllTablesManaged(sqlite);
+      pglite = await PGlite.create(stagingDir);
 
-    return {
-      status: "migrated",
-      sqlitePath,
-      sqliteBackupPath: backupPath,
-      pgliteDataDir,
-      rowCounts: sourceCounts,
-    };
+      const sourceSchema = readSqliteSchema(sqlite);
+      const sourceCounts = readSourceCounts(sqlite, sourceSchema);
+      await initializeAndCopy(sqlite, pglite, sourceSchema, sourceCounts);
+
+      sqlite.close();
+      sqlite = null;
+      await pglite.close();
+      pglite = null;
+
+      let sqliteBackupPath: string | null = null;
+      if (options.keepSource) {
+        log(
+          `SQLite to PGlite migration succeeded: db=${sanitizePath(sqlitePath)}, source preserved for runtime`,
+        );
+      } else {
+        await rotateExistingBackup(backupPath);
+        await rename(sqlitePath, backupPath);
+        await utimes(backupPath, stampTime, stampTime);
+        sqliteBackupPath = backupPath;
+        log(
+          `SQLite to PGlite migration succeeded: db=${sanitizePath(sqlitePath)}, backup stamped at ${stampTime.toISOString()}`,
+        );
+      }
+
+      await rm(pgliteDataDir, { recursive: true, force: true }).catch(
+        () => {},
+      );
+      await rename(stagingDir, pgliteDataDir);
+
+      return {
+        status: "migrated",
+        sqlitePath,
+        sqliteBackupPath,
+        pgliteDataDir,
+        rowCounts: sourceCounts,
+      };
+    } finally {
+      await rm(stagingDir, { recursive: true, force: true }).catch(
+        () => {},
+      );
+    }
   } catch (error) {
     log(
-      `SQLite to PGlite migration failed: sqlite=${sqlitePath}, pglite=${pgliteDataDir}, error=${formatError(error)}`,
+      `SQLite to PGlite migration failed: sqlite=${sqlitePath}, pglite=${sanitizePath(pgliteDataDir)}, error=${sanitizeError(error)}`,
     );
     return {
       status: "failed",
       sqlitePath,
       pgliteDataDir,
-      error: formatError(error),
+      error: sanitizeError(error),
       failedAt: new Date().toISOString(),
     };
   } finally {
@@ -296,8 +348,15 @@ async function initializeAndCopy(
         .prepare(`SELECT ${columns.join(", ")} FROM ${table.name}`)
         .all() as Record<string, unknown>[];
 
-      for (const row of rows) {
-        await insertRow(tx, table.name, table.conflictTarget, columns, row);
+      for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+        const batch = rows.slice(i, i + BATCH_SIZE);
+        await batchInsertRows(
+          tx,
+          table.name,
+          table.conflictTarget,
+          columns,
+          batch,
+        );
       }
     }
 
@@ -326,22 +385,27 @@ async function initializeAndCopy(
   });
 }
 
-async function insertRow(
+async function batchInsertRows(
   pglite: PgliteExecutor,
   tableName: string,
   conflictTarget: string,
   columns: readonly string[],
-  row: Record<string, unknown>,
+  rows: Record<string, unknown>[],
 ): Promise<void> {
-  const placeholders = columns.map((_, index) => `$${index + 1}`).join(", ");
-  const values = columns.map((column) => row[column] ?? null);
+  const params: unknown[] = [];
+  const valueRows: string[] = [];
+
+  for (const row of rows) {
+    const rowParams = columns.map((col) => {
+      params.push(row[col] ?? null);
+      return `$${params.length}`;
+    });
+    valueRows.push(`(${rowParams.join(", ")})`);
+  }
+
   await pglite.query(
-    `
-      INSERT INTO ${tableName} (${columns.join(", ")})
-      VALUES (${placeholders})
-      ON CONFLICT (${conflictTarget}) DO NOTHING
-    `,
-    values,
+    `INSERT INTO ${tableName} (${columns.join(", ")}) VALUES ${valueRows.join(", ")} ON CONFLICT (${conflictTarget}) DO NOTHING`,
+    params,
   );
 }
 
@@ -386,6 +450,19 @@ async function readDestinationCounts(pglite: PgliteExecutor): Promise<TableCount
   return Object.fromEntries(entries) as TableCounts;
 }
 
+function assertAllTablesManaged(sqlite: DatabaseSync): void {
+  const tableNames = new Set<string>(TABLES.map((t) => t.name));
+  const rows = sqlite.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`,
+  ).all() as { name: string }[];
+  const unmanaged = rows.filter((row) => !tableNames.has(row.name));
+  if (unmanaged.length > 0) {
+    throw new Error(
+      `Unmanaged table(s) found in source SQLite: ${unmanaged.map((r) => r.name).join(", ")}. Add these to TABLES before migrating.`,
+    );
+  }
+}
+
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await access(filePath, fsConstants.F_OK);
@@ -395,9 +472,13 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-function formatError(error: unknown): string {
+function sanitizePath(filePath: string): string {
+  return path.basename(filePath);
+}
+
+function sanitizeError(error: unknown): string {
   if (error instanceof Error) {
-    return error.stack ?? error.message;
+    return `${error.name}: ${error.message}`;
   }
   return String(error);
 }

@@ -1,4 +1,4 @@
-import path from "node:path";
+import { basename, join } from "node:path";
 import {
   cleanupExpiredSqliteBackups,
   migrateSqliteToPglite,
@@ -19,22 +19,16 @@ export type AgentDashboardDatabaseStartupResult =
       backend: "pglite";
       sqlitePath: string;
       pgliteDataDir: string;
-      migration: SqliteToPgliteMigrationResult;
+      migration?: SqliteToPgliteMigrationResult;
+      migrationPromise: Promise<SqliteToPgliteMigrationResult>;
     };
 
 export function resolveAgentDashboardDatabasePathForUserData(
   userDataPath: string,
 ): string {
-  return path.join(userDataPath, "agent-dashboard.sqlite");
+  return join(userDataPath, "agent-dashboard.sqlite");
 }
 
-/**
- * Startup-owned preparation for the dashboard database engine. SQLite mode only
- * performs stale backup cleanup so the current SQLite runtime cannot rename its
- * own live database. PGlite mode runs the forward migration before the PGlite
- * runtime opens; failure returns a SQLite fallback result and leaves the source
- * DB intact for retry on the next launch.
- */
 export async function prepareAgentDashboardDatabaseStartup(options: {
   userDataPath: string;
   backend: AgentDashboardDatabaseBackend;
@@ -46,39 +40,54 @@ export async function prepareAgentDashboardDatabaseStartup(options: {
   const pgliteDataDir = resolvePgliteDataDir(sqlitePath);
   const log = options.log ?? (() => {});
 
+  const removed = await cleanupExpiredSqliteBackups(sqlitePath);
+  if (removed > 0) {
+    log(
+      "agent-dashboard-migration",
+      `Removed ${removed} expired SQLite backup(s) for ${basename(sqlitePath)}`,
+    );
+  }
+
   if (options.backend === "sqlite") {
-    const removed = await cleanupExpiredSqliteBackups(sqlitePath);
-    if (removed > 0) {
-      log(
-        "agent-dashboard-migration",
-        `Removed ${removed} expired SQLite backup(s) for ${sqlitePath}`,
-      );
-    }
     return { backend: "sqlite", sqlitePath, pgliteDataDir };
   }
 
-  const migration = await migrateSqliteToPglite({
+  const onSettled = (migration: SqliteToPgliteMigrationResult) => {
+    if (migration.status === "failed") {
+      log(
+        "agent-dashboard-migration",
+        `PGlite migration failed (runtime continues on SQLite): ${migration.error}`,
+      );
+    } else if (migration.status === "migrated") {
+      log(
+        "agent-dashboard-migration",
+        `PGlite migration completed (${migration.rowCounts.sessions} sessions); SQLite preserved for sync runtime`,
+      );
+    }
+    return migration;
+  };
+
+  const migrationPromise = migrateSqliteToPglite({
     sqlitePath,
     pgliteDataDir,
+    keepSource: true,
     log: (message) => log("agent-dashboard-migration", message),
-  });
-  if (migration.status === "failed") {
-    log(
-      "agent-dashboard-migration",
-      `Falling back to SQLite after PGlite migration failure: ${migration.error}`,
-    );
+  }).then(onSettled, (error: unknown) => {
+    const err = error instanceof Error ? error.message : String(error);
+    log("agent-dashboard-migration", `PGlite migration failed: ${err}`);
     return {
-      backend: "sqlite",
+      status: "failed" as const,
       sqlitePath,
       pgliteDataDir,
-      migration,
+      error: err,
+      failedAt: new Date().toISOString(),
     };
-  }
+  });
 
   return {
     backend: "pglite",
     sqlitePath,
     pgliteDataDir,
-    migration,
+    migrationPromise,
   };
 }
