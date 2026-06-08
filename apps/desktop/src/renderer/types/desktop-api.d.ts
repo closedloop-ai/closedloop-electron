@@ -20,6 +20,17 @@ import type {
   AnalyticsData,
   WorkflowQueryData,
   AgentHierarchyNode,
+  CatalogEntry,
+  InstallRunRecord,
+  InstalledPack,
+  InstalledPackDetail,
+  SkillWithInvocations,
+  SkillInvocation,
+  PlanRecord,
+  PlanVersionRecord,
+  PrStats,
+  PrSessionGroup,
+  PrRecord,
 } from "../../shared/agent-db-contract";
 
 export interface AgentMonitorUrl {
@@ -135,9 +146,44 @@ export interface DesktopApi {
     getSubAgents: () => Promise<DashboardSubAgentSummary[]>;
     getPlans: () => Promise<DashboardPlanSummary[]>;
     getPullRequests: () => Promise<DashboardPullRequestSummary[]>;
+
+    // Catalog (FEA-1314)
+    getCatalog: () => Promise<CatalogEntry[]>;
+    getCatalogEntry: (packId: string) => Promise<CatalogEntry | null>;
+    getCatalogReadme: (packId: string) => Promise<string | null>;
+    getCatalogContents: (packId: string) => Promise<unknown[] | null>;
+    getCatalogHistory: (packId: string) => Promise<Array<{ fetchedAt: string; stars: number; forks: number }>>;
+    catalogInstall: (packId: string, harness: string, cwd?: string) => Promise<{ runId: number }>;
+    catalogUninstall: (packId: string, harness: string) => Promise<{ runId: number }>;
+    catalogRefresh: () => Promise<void>;
+    getInstallRuns: (packId?: string) => Promise<InstallRunRecord[]>;
+
+    // Installed packs (FEA-1224)
+    getInstalledPacks: () => Promise<InstalledPack[]>;
+    getPackDetail: (packId: string) => Promise<InstalledPackDetail | null>;
+    getPackSessions: (packId: string) => Promise<unknown[]>;
+    getAllSkills: () => Promise<SkillWithInvocations[]>;
+    getSkillInvocations: (name: string) => Promise<SkillInvocation[]>;
+    getRecentProjects: () => Promise<string[]>;
+
+    // Plans (FEA-1189)
+    getPlansList: (opts?: { sessionId?: string; needsConfirmation?: boolean; limit?: number; offset?: number }) => Promise<PlanRecord[]>;
+    getPlan: (id: string) => Promise<PlanRecord | null>;
+    getPlanVersions: (planId: string) => Promise<PlanVersionRecord[]>;
+    confirmPlan: (id: string) => Promise<void>;
+    rejectPlan: (id: string) => Promise<void>;
+    openPlan: (id: string, target?: string) => Promise<void>;
+
+    // Pull Requests (FEA-1226)
+    getPrStats: () => Promise<PrStats>;
+    getPrSessions: (opts?: { limit?: number; offset?: number }) => Promise<PrSessionGroup[]>;
+    getPrList: (opts?: { sessionId?: string; repo?: string; limit?: number; offset?: number }) => Promise<PrRecord[]>;
+    openPr: (id: string) => Promise<void>;
   };
   /** Live DB-change push subscription; returns an unsubscribe fn. */
   onDbChanged: (callback: (payload: { sessionId?: string }) => void) => () => void;
+  /** Subscribe to streamed pack install/uninstall output (FEA-1314). */
+  onInstallOutput?: (callback: (payload: { runId: number; type: string; data: string }) => void) => () => void;
 }
 
 declare global {

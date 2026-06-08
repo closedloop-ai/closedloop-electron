@@ -11,327 +11,220 @@ import {
 } from "@closedloop-ai/design-system/components/ui/table";
 import {
   Bot,
-  ClipboardList,
-  GitPullRequest,
   Package,
   Sparkles,
   Wrench,
 } from "lucide-react";
-import { useMemo } from "react";
 import type { ReactNode } from "react";
 import type {
-  DashboardPackSummary,
-  DashboardPlanSummary,
-  DashboardPullRequestSummary,
-  DashboardSkillSummary,
   DashboardSubAgentSummary,
   DashboardToolSummary,
+  SkillWithInvocations,
 } from "../../../shared/agent-db-contract";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import {
   DASHBOARD_METRIC_CARD_CLASS_NAME,
   DASHBOARD_TABLE_CLASS_NAME,
-  DASHBOARD_WIDE_GRID_CLASS_NAME,
   DashboardCard,
   LoadingState,
   PageShell,
   cx,
 } from "../layout/page-shell";
+import { PacksCatalog } from "./PacksCatalog";
+import { PlansView as PlansViewFull } from "./PlansView";
+import { PullRequestsView as PullRequestsViewFull } from "./PullRequestsView";
 
-type FeatureKind = "packs" | "skills" | "tools" | "subagents" | "plans" | "pull-requests";
-
-const FEATURE_LABELS: Record<FeatureKind, { title: string; description: string }> = {
-  packs: {
-    title: "Packs",
-    description: "Pack activity inferred from imported skill usage",
-  },
-  skills: {
-    title: "Skills",
-    description: "Skill invocations captured from agent sessions",
-  },
-  tools: {
-    title: "Tools",
-    description: "Tool calls grouped across all imported sessions",
-  },
-  subagents: {
-    title: "SubAgents",
-    description: "Subagent roles, outcomes, and session coverage",
-  },
-  plans: {
-    title: "Plans",
-    description: "Plans extracted from imported transcripts",
-  },
-  "pull-requests": {
-    title: "Pull Requests",
-    description: "Pull request artifacts associated with agent sessions",
-  },
-};
+// ---- Full-featured views (delegate to dedicated components) ----
 
 export function PacksView() {
-  return <FeatureView kind="packs" />;
-}
-
-export function SkillsView() {
-  return <FeatureView kind="skills" />;
-}
-
-export function ToolsView() {
-  return <FeatureView kind="tools" />;
-}
-
-export function SubAgentsView() {
-  return <FeatureView kind="subagents" />;
+  return <PacksCatalog />;
 }
 
 export function PlansView() {
-  return <FeatureView kind="plans" />;
+  return <PlansViewFull />;
 }
 
 export function PullRequestsView() {
-  return <FeatureView kind="pull-requests" />;
+  return <PullRequestsViewFull />;
 }
 
-function FeatureView({ kind }: { kind: FeatureKind }) {
-  const labels = FEATURE_LABELS[kind];
-  const { data: packs, loading: packsLoading } = useQueryCache<DashboardPackSummary[]>(
-    "db:packs",
-    () => window.desktopApi.db.getPacks(),
+// ---- Stub views kept for Skills, Tools, SubAgents ----
+
+export function SkillsView() {
+  const { data: skills, loading } = useQueryCache<SkillWithInvocations[]>(
+    "db:all-skills",
+    () => window.desktopApi.db.getAllSkills(),
     5_000,
     10_000,
   );
-  const { data: skills, loading: skillsLoading } = useQueryCache<DashboardSkillSummary[]>(
-    "db:skills",
-    () => window.desktopApi.db.getSkills(),
-    5_000,
-    10_000,
+
+  if (loading && !skills) {
+    return <LoadingState label="skills" />;
+  }
+
+  const rows = skills ?? [];
+
+  return (
+    <PageShell title="Skills" description="Skill invocations captured from agent sessions">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Skills" value={rows.length} icon={Sparkles} />
+        <MetricCard
+          className={DASHBOARD_METRIC_CARD_CLASS_NAME}
+          label="Total Invocations"
+          value={rows.reduce((sum, r) => sum + r.invocationCount, 0)}
+          icon={Sparkles}
+        />
+        <MetricCard
+          className={DASHBOARD_METRIC_CARD_CLASS_NAME}
+          label="Packs"
+          value={new Set(rows.map((r) => r.packId).filter(Boolean)).size}
+          icon={Package}
+        />
+      </div>
+
+      <FeatureCard title="Skill Invocations" empty={rows.length === 0 ? "No skill invocations captured yet." : null}>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <Header>Name</Header>
+              <Header>Pack</Header>
+              <Header>Harness</Header>
+              <Header align="right">Calls</Header>
+              <Header>Last Used</Header>
+            </TableRow>
+          </TableHeader>
+          <TableBody>{rows.map((row) => (
+            <TableRow key={row.skillId}>
+              <Cell className="font-medium">{row.name}</Cell>
+              <Cell>{row.packId ?? "-"}</Cell>
+              <Cell>{row.harness ? <Badge variant="outline">{row.harness}</Badge> : "-"}</Cell>
+              <Cell align="right">{row.invocationCount}</Cell>
+              <Cell>{formatDate(row.lastUsedAt)}</Cell>
+            </TableRow>
+          ))}</TableBody>
+        </Table>
+      </FeatureCard>
+    </PageShell>
   );
-  const { data: tools, loading: toolsLoading } = useQueryCache<DashboardToolSummary[]>(
+}
+
+export function ToolsView() {
+  const { data: tools, loading } = useQueryCache<DashboardToolSummary[]>(
     "db:tools",
     () => window.desktopApi.db.getTools(),
     5_000,
     10_000,
   );
-  const { data: subagents, loading: subagentsLoading } = useQueryCache<DashboardSubAgentSummary[]>(
+
+  if (loading && !tools) {
+    return <LoadingState label="tools" />;
+  }
+
+  const rows = tools ?? [];
+
+  return (
+    <PageShell title="Tools" description="Tool calls grouped across all imported sessions">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Tools" value={rows.length} icon={Wrench} />
+        <MetricCard
+          className={DASHBOARD_METRIC_CARD_CLASS_NAME}
+          label="Total Calls"
+          value={rows.reduce((sum, r) => sum + r.invocationCount, 0)}
+          icon={Wrench}
+        />
+        <MetricCard
+          className={DASHBOARD_METRIC_CARD_CLASS_NAME}
+          label="Sessions"
+          value={rows.reduce((sum, r) => sum + r.sessionCount, 0)}
+          icon={Wrench}
+        />
+      </div>
+
+      <FeatureCard title="Tool Usage" empty={rows.length === 0 ? "No tool calls captured yet." : null}>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <Header>Tool</Header>
+              <Header align="right">Calls</Header>
+              <Header align="right">Sessions</Header>
+              <Header>Last Used</Header>
+            </TableRow>
+          </TableHeader>
+          <TableBody>{rows.map((row) => (
+            <TableRow key={row.toolName}>
+              <Cell className="font-mono text-xs">{row.toolName}</Cell>
+              <Cell align="right">{row.invocationCount}</Cell>
+              <Cell align="right">{row.sessionCount}</Cell>
+              <Cell>{formatDate(row.lastUsedAt)}</Cell>
+            </TableRow>
+          ))}</TableBody>
+        </Table>
+      </FeatureCard>
+    </PageShell>
+  );
+}
+
+export function SubAgentsView() {
+  const { data: subagents, loading } = useQueryCache<DashboardSubAgentSummary[]>(
     "db:subagents",
     () => window.desktopApi.db.getSubAgents(),
     5_000,
     10_000,
   );
-  const { data: plans, loading: plansLoading } = useQueryCache<DashboardPlanSummary[]>(
-    "db:plans",
-    () => window.desktopApi.db.getPlans(),
-    5_000,
-    10_000,
-  );
-  const { data: pullRequests, loading: pullRequestsLoading } = useQueryCache<DashboardPullRequestSummary[]>(
-    "db:pull-requests",
-    () => window.desktopApi.db.getPullRequests(),
-    5_000,
-    10_000,
-  );
 
-  const loading = {
-    packs: packsLoading,
-    skills: skillsLoading,
-    tools: toolsLoading,
-    subagents: subagentsLoading,
-    plans: plansLoading,
-    "pull-requests": pullRequestsLoading,
-  }[kind];
-
-  const stats = useMemo(() => ({
-    packCount: packs?.length ?? 0,
-    skillCount: skills?.length ?? 0,
-    toolCount: tools?.length ?? 0,
-    subagentCount: subagents?.length ?? 0,
-    planCount: plans?.length ?? 0,
-    pullRequestCount: pullRequests?.length ?? 0,
-  }), [packs, skills, tools, subagents, plans, pullRequests]);
-
-  if (loading) {
-    return <LoadingState label={labels.title.toLowerCase()} />;
+  if (loading && !subagents) {
+    return <LoadingState label="subagents" />;
   }
 
-  return (
-    <PageShell title={labels.title} description={labels.description}>
+  const rows = subagents ?? [];
 
-      <div className={DASHBOARD_WIDE_GRID_CLASS_NAME}>
-        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Packs" value={stats.packCount} icon={Package} />
-        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Skills" value={stats.skillCount} icon={Sparkles} />
-        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Tools" value={stats.toolCount} icon={Wrench} />
-        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Subagents" value={stats.subagentCount} icon={Bot} />
-        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Plans" value={stats.planCount} icon={ClipboardList} />
-        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="PRs" value={stats.pullRequestCount} icon={GitPullRequest} />
+  return (
+    <PageShell title="SubAgents" description="Subagent roles, outcomes, and session coverage">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="SubAgent Types" value={rows.length} icon={Bot} />
+        <MetricCard
+          className={DASHBOARD_METRIC_CARD_CLASS_NAME}
+          label="Total"
+          value={rows.reduce((sum, r) => sum + r.total, 0)}
+          icon={Bot}
+        />
+        <MetricCard
+          className={DASHBOARD_METRIC_CARD_CLASS_NAME}
+          label="Sessions"
+          value={rows.reduce((sum, r) => sum + r.sessions, 0)}
+          icon={Bot}
+        />
       </div>
 
-      {kind === "packs" && <PacksTable rows={packs ?? []} />}
-      {kind === "skills" && <SkillsTable rows={skills ?? []} />}
-      {kind === "tools" && <ToolsTable rows={tools ?? []} />}
-      {kind === "subagents" && <SubAgentsTable rows={subagents ?? []} />}
-      {kind === "plans" && <PlansTable rows={plans ?? []} />}
-      {kind === "pull-requests" && <PullRequestsTable rows={pullRequests ?? []} />}
+      <FeatureCard title="SubAgent Outcomes" empty={rows.length === 0 ? "No subagent activity captured yet." : null}>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <Header>Role</Header>
+              <Header align="right">Total</Header>
+              <Header align="right">Completed</Header>
+              <Header align="right">Errors</Header>
+              <Header align="right">Sessions</Header>
+              <Header>Last Used</Header>
+            </TableRow>
+          </TableHeader>
+          <TableBody>{rows.map((row) => (
+            <TableRow key={row.subagentType}>
+              <Cell className="font-mono text-xs">{row.subagentType}</Cell>
+              <Cell align="right">{row.total}</Cell>
+              <Cell align="right" className="text-[var(--success)]">{row.completed}</Cell>
+              <Cell align="right" className="text-[var(--destructive)]">{row.errors}</Cell>
+              <Cell align="right">{row.sessions}</Cell>
+              <Cell>{formatDate(row.lastUsedAt)}</Cell>
+            </TableRow>
+          ))}</TableBody>
+        </Table>
+      </FeatureCard>
     </PageShell>
   );
 }
 
-function PacksTable({ rows }: { rows: DashboardPackSummary[] }) {
-  return (
-    <FeatureCard title="Pack Activity" empty={rows.length === 0 ? "No pack usage captured yet." : null}>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <Header>Name</Header>
-            <Header>Harness</Header>
-            <Header align="right">Skills</Header>
-            <Header align="right">Calls</Header>
-            <Header>Last Used</Header>
-          </TableRow>
-        </TableHeader>
-        <TableBody>{rows.map((row) => (
-          <TableRow key={row.id}>
-            <Cell className="font-medium">{row.name}</Cell>
-            <Cell><Badge variant="outline">{row.harness}</Badge></Cell>
-            <Cell align="right">{row.skillCount}</Cell>
-            <Cell align="right">{row.toolCallCount}</Cell>
-            <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </TableRow>
-        ))}</TableBody>
-      </Table>
-    </FeatureCard>
-  );
-}
-
-function SkillsTable({ rows }: { rows: DashboardSkillSummary[] }) {
-  return (
-    <FeatureCard title="Skill Invocations" empty={rows.length === 0 ? "No skill invocations captured yet." : null}>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <Header>Name</Header>
-            <Header>Pack</Header>
-            <Header>Harness</Header>
-            <Header align="right">Calls</Header>
-            <Header>Last Used</Header>
-          </TableRow>
-        </TableHeader>
-        <TableBody>{rows.map((row) => (
-          <TableRow key={row.id}>
-            <Cell className="font-medium">{row.name}</Cell>
-            <Cell>{row.packId ?? "-"}</Cell>
-            <Cell><Badge variant="outline">{row.harness}</Badge></Cell>
-            <Cell align="right">{row.invocationCount}</Cell>
-            <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </TableRow>
-        ))}</TableBody>
-      </Table>
-    </FeatureCard>
-  );
-}
-
-function ToolsTable({ rows }: { rows: DashboardToolSummary[] }) {
-  return (
-    <FeatureCard title="Tool Usage" empty={rows.length === 0 ? "No tool calls captured yet." : null}>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <Header>Tool</Header>
-            <Header align="right">Calls</Header>
-            <Header align="right">Sessions</Header>
-            <Header>Last Used</Header>
-          </TableRow>
-        </TableHeader>
-        <TableBody>{rows.map((row) => (
-          <TableRow key={row.toolName}>
-            <Cell className="font-mono text-xs">{row.toolName}</Cell>
-            <Cell align="right">{row.invocationCount}</Cell>
-            <Cell align="right">{row.sessionCount}</Cell>
-            <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </TableRow>
-        ))}</TableBody>
-      </Table>
-    </FeatureCard>
-  );
-}
-
-function SubAgentsTable({ rows }: { rows: DashboardSubAgentSummary[] }) {
-  return (
-    <FeatureCard title="SubAgent Outcomes" empty={rows.length === 0 ? "No subagent activity captured yet." : null}>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <Header>Role</Header>
-            <Header align="right">Total</Header>
-            <Header align="right">Completed</Header>
-            <Header align="right">Errors</Header>
-            <Header align="right">Sessions</Header>
-            <Header>Last Used</Header>
-          </TableRow>
-        </TableHeader>
-        <TableBody>{rows.map((row) => (
-          <TableRow key={row.subagentType}>
-            <Cell className="font-mono text-xs">{row.subagentType}</Cell>
-            <Cell align="right">{row.total}</Cell>
-            <Cell align="right" className="text-[var(--success)]">{row.completed}</Cell>
-            <Cell align="right" className="text-[var(--destructive)]">{row.errors}</Cell>
-            <Cell align="right">{row.sessions}</Cell>
-            <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </TableRow>
-        ))}</TableBody>
-      </Table>
-    </FeatureCard>
-  );
-}
-
-function PlansTable({ rows }: { rows: DashboardPlanSummary[] }) {
-  return (
-    <FeatureCard title="Extracted Plans" empty={rows.length === 0 ? "No plans captured yet." : null}>
-      <div className="divide-y divide-[var(--border)]">
-        {rows.map((row) => (
-          <div key={row.id} className="py-3">
-            <div className="flex items-center justify-between gap-3">
-              <p className="min-w-0 truncate text-sm font-medium">{row.title}</p>
-              <span className="shrink-0 text-xs text-[var(--muted-foreground)]">{formatDate(row.timestamp)}</span>
-            </div>
-            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--muted-foreground)]">
-              {row.harness && <Badge variant="outline">{row.harness}</Badge>}
-              {row.source && <span>{row.source}</span>}
-              {row.cwd && <span className="truncate font-mono">{row.cwd}</span>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </FeatureCard>
-  );
-}
-
-function PullRequestsTable({ rows }: { rows: DashboardPullRequestSummary[] }) {
-  return (
-    <FeatureCard title="Pull Request Artifacts" empty={rows.length === 0 ? "No pull request artifacts captured yet." : null}>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <Header>Pull Request</Header>
-            <Header>Repo</Header>
-            <Header>Harness</Header>
-            <Header>Observed</Header>
-          </TableRow>
-        </TableHeader>
-        <TableBody>{rows.map((row) => (
-          <TableRow key={row.id}>
-            <Cell>
-              <a className="font-medium text-[var(--primary)] hover:underline" href={row.prUrl} target="_blank" rel="noreferrer">
-                #{row.prNumber}{row.title ? ` ${row.title}` : ""}
-              </a>
-            </Cell>
-            <Cell className="font-mono text-xs">{row.repoFullName}</Cell>
-            <Cell>{row.harness ? <Badge variant="outline">{row.harness}</Badge> : "-"}</Cell>
-            <Cell>{formatDate(row.observedAt)}</Cell>
-          </TableRow>
-        ))}</TableBody>
-      </Table>
-    </FeatureCard>
-  );
-}
+// ---- Shared primitives (kept for the stub views) ----
 
 function FeatureCard({
   title,

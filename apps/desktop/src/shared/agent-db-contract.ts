@@ -283,3 +283,179 @@ export interface DashboardCoreFeatures {
   plans: DashboardPlanSummary[];
   pullRequests: DashboardPullRequestSummary[];
 }
+
+// --- Catalog (FEA-1314) ---
+
+export interface CatalogEntry {
+  packId: string;
+  displayName: string;
+  category: string | null;
+  githubUrl: string;
+  marketplaceUrl: string | null;
+  description: string | null;
+  descriptionLive: string | null;
+  harnesses: string[];
+  installCommands: Record<string, string> | null;
+  uninstallCommands: Record<string, string> | null;
+  installNotes: string | null;
+  placeholderReason: string | null;
+  verified: boolean;
+  readmeExcerpt: string | null;
+  stars: number | null;
+  forks: number | null;
+  lastRelease: string | null;
+  seedVersion: number;
+  pinOrder: number | null;
+  contents: CatalogContentsConfig | null;
+  contentsCache: CatalogContentItem[] | null;
+  detectionPatterns: string[] | null;
+  harnessAgnostic: boolean;
+  projectScoped: boolean;
+  singleInstall: boolean;
+  postInstall: Record<string, unknown> | null;
+  // Joined from agent_packs
+  installedHarnesses: string[];
+  skillCount: number;
+  usageCount: number;
+  // Sparkline data
+  history: Array<{ fetchedAt: string; stars: number; forks: number }>;
+}
+
+export interface CatalogContentsConfig {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface CatalogContentItem {
+  name: string;
+  type: string;
+  description?: string;
+  path?: string;
+}
+
+export interface InstallRunRecord {
+  id: number;
+  packId: string;
+  harness: string | null;
+  action: string;
+  command: string | null;
+  exitCode: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  stdoutTail: string | null;
+  stderrTail: string | null;
+}
+
+// --- Installed Packs (FEA-1224) ---
+
+export interface InstalledPack {
+  packId: string;
+  harnesses: string[];
+  installs: Array<{
+    harness: string;
+    installPath: string;
+    installKind: string | null;
+    sourceUrl: string | null;
+    version: string | null;
+    detectedAt: string | null;
+    lastSeenAt: string | null;
+  }>;
+  skillCount: number;
+  lastSeenAt: string | null;
+}
+
+export interface InstalledPackDetail extends InstalledPack {
+  skills: Array<{
+    skillId: string;
+    name: string | null;
+    version: string | null;
+    description: string | null;
+    harness: string | null;
+  }>;
+  associations: Array<{
+    projectPath: string;
+    detectedAt: string | null;
+    lastSeenAt: string | null;
+  }>;
+}
+
+export interface SkillWithInvocations {
+  skillId: string;
+  packId: string | null;
+  name: string;
+  harness: string | null;
+  description: string | null;
+  invocationCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface SkillInvocation {
+  eventId: string;
+  sessionId: string;
+  sessionName: string | null;
+  harness: string | null;
+  model: string | null;
+  createdAt: string | null;
+}
+
+// --- Plans (FEA-1189) ---
+
+export interface PlanRecord {
+  id: string;
+  title: string | null;
+  status: string;
+  source: string | null;
+  captureMethod: string | null;
+  harness: string | null;
+  sessionId: string | null;
+  filePath: string | null;
+  sourceLogPath: string | null;
+  needsConfirmation: boolean;
+  confidence: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+  latestContent: string | null;
+  versionCount: number;
+}
+
+export interface PlanVersionRecord {
+  id: string;
+  planId: string;
+  versionNumber: number;
+  contentMarkdown: string | null;
+  contentSha256: string | null;
+  authorType: string | null;
+  captureMethod: string | null;
+  createdAt: string | null;
+}
+
+// --- Pull Requests (FEA-1226) ---
+
+export interface PrRecord {
+  id: string;
+  sessionId: string | null;
+  prUrl: string;
+  prNumber: number | null;
+  repoFullName: string | null;
+  branchName: string | null;
+  headSha: string | null;
+  title: string | null;
+  harness: string | null;
+  observedAt: string | null;
+  createdAt: string | null;
+}
+
+export interface PrStats {
+  totalPrs: number;
+  sessionsWithPrs: number;
+  repos: number;
+}
+
+export interface PrSessionGroup {
+  sessionId: string;
+  sessionName: string | null;
+  cwd: string | null;
+  harness: string | null;
+  startedAt: string | null;
+  prs: PrRecord[];
+}

@@ -149,9 +149,169 @@ CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_status_started_at ON sessions(status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id) WHERE user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_organization_id ON sessions(organization_id) WHERE organization_id IS NOT NULL;
+
+-- Pack catalog (FEA-1314 / PLN-657)
+CREATE TABLE IF NOT EXISTS pack_catalog (
+  pack_id            TEXT PRIMARY KEY,
+  display_name       TEXT NOT NULL,
+  category           TEXT,
+  github_url         TEXT NOT NULL,
+  marketplace_url    TEXT,
+  description        TEXT,
+  description_live   TEXT,
+  harnesses          JSONB,
+  install_commands   JSONB,
+  uninstall_commands JSONB,
+  install_notes      TEXT,
+  placeholder_reason TEXT,
+  verified           BOOLEAN NOT NULL DEFAULT FALSE,
+  readme_excerpt     TEXT,
+  readme_fetched_at  TEXT,
+  stars              INTEGER,
+  forks              INTEGER,
+  last_release       TEXT,
+  last_fetched_at    TEXT,
+  seed_version       INTEGER NOT NULL DEFAULT 1,
+  pin_order          INTEGER,
+  contents           JSONB,
+  contents_cache     JSONB,
+  contents_fetched_at TEXT,
+  detection_patterns JSONB,
+  harness_agnostic   BOOLEAN NOT NULL DEFAULT FALSE,
+  project_scoped     BOOLEAN NOT NULL DEFAULT FALSE,
+  single_install     BOOLEAN NOT NULL DEFAULT FALSE,
+  post_install       JSONB
+);
+
+CREATE TABLE IF NOT EXISTS pack_catalog_history (
+  pack_id    TEXT NOT NULL,
+  fetched_at TEXT NOT NULL,
+  stars      INTEGER,
+  forks      INTEGER,
+  PRIMARY KEY (pack_id, fetched_at)
+);
+
+CREATE TABLE IF NOT EXISTS pack_install_runs (
+  id         SERIAL PRIMARY KEY,
+  pack_id    TEXT NOT NULL,
+  harness    TEXT,
+  action     TEXT NOT NULL,
+  command    TEXT,
+  exit_code  INTEGER,
+  started_at TEXT NOT NULL,
+  ended_at   TEXT,
+  stdout_tail TEXT,
+  stderr_tail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_install_runs_pack ON pack_install_runs(pack_id);
+
+-- Pack inventory (FEA-1224)
+CREATE TABLE IF NOT EXISTS agent_packs (
+  pack_id        TEXT NOT NULL,
+  harness        TEXT NOT NULL,
+  install_path   TEXT NOT NULL,
+  install_kind   TEXT CHECK (install_kind IN ('symlink', 'directory')),
+  source_url     TEXT,
+  version        TEXT,
+  detected_at    TEXT,
+  last_seen_at   TEXT,
+  uninstalled_at TEXT,
+  PRIMARY KEY (pack_id, harness, install_path)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_packs_pack ON agent_packs(pack_id);
+
+CREATE TABLE IF NOT EXISTS skills (
+  skill_id       TEXT PRIMARY KEY,
+  pack_id        TEXT,
+  harness        TEXT,
+  install_path   TEXT,
+  name           TEXT,
+  version        TEXT,
+  description    TEXT,
+  source_url     TEXT,
+  detected_at    TEXT,
+  last_seen_at   TEXT,
+  uninstalled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_skills_pack ON skills(pack_id);
+CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+
+CREATE TABLE IF NOT EXISTS project_pack_associations (
+  project_path TEXT NOT NULL,
+  pack_id      TEXT NOT NULL,
+  detected_at  TEXT,
+  last_seen_at TEXT,
+  PRIMARY KEY (project_path, pack_id)
+);
+
+-- Plans (FEA-1189 / PLN-613)
+CREATE TABLE IF NOT EXISTS plans (
+  id                      TEXT PRIMARY KEY,
+  title                   TEXT,
+  status                  TEXT NOT NULL DEFAULT 'active',
+  source                  TEXT,
+  capture_method          TEXT,
+  harness                 TEXT,
+  created_from_session_id TEXT,
+  created_from_event_id   TEXT,
+  plan_key                TEXT,
+  file_path               TEXT,
+  source_log_path         TEXT,
+  needs_confirmation      BOOLEAN NOT NULL DEFAULT FALSE,
+  confidence              REAL NOT NULL DEFAULT 1.0,
+  sync_state              TEXT,
+  metadata                JSONB,
+  created_at              TEXT,
+  updated_at              TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_plans_session ON plans(created_from_session_id);
+CREATE INDEX IF NOT EXISTS idx_plans_needs_confirmation ON plans(needs_confirmation) WHERE needs_confirmation = TRUE;
+CREATE INDEX IF NOT EXISTS idx_plans_updated ON plans(updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_session_key ON plans(created_from_session_id, plan_key) WHERE plan_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS plan_versions (
+  id                TEXT PRIMARY KEY,
+  plan_id           TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  version_number    INTEGER NOT NULL,
+  content_markdown  TEXT,
+  content_json      JSONB,
+  content_sha256    TEXT,
+  author_type       TEXT,
+  author_user_id    TEXT,
+  source_session_id TEXT,
+  source_event_ref  TEXT,
+  capture_method    TEXT,
+  created_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_plan_versions_plan ON plan_versions(plan_id);
+
+-- Pull Requests (FEA-1226)
+CREATE TABLE IF NOT EXISTS pull_requests (
+  id             TEXT PRIMARY KEY,
+  session_id     TEXT,
+  pr_url         TEXT NOT NULL,
+  pr_number      INTEGER,
+  repo_full_name TEXT,
+  branch_name    TEXT,
+  head_sha       TEXT,
+  title          TEXT,
+  harness        TEXT,
+  observed_at    TEXT,
+  created_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pr_session ON pull_requests(session_id);
+CREATE INDEX IF NOT EXISTS idx_pr_repo ON pull_requests(repo_full_name, pr_number);
+CREATE INDEX IF NOT EXISTS idx_pr_observed ON pull_requests(observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS pr_backfill_seen (
+  session_id   TEXT PRIMARY KEY,
+  file_path    TEXT,
+  file_mtime_ms BIGINT,
+  scanned_at   TEXT
+);
 `;
 
-interface PgliteExecutor {
+export interface PgliteExecutor {
   exec(query: string): Promise<Results[]>;
   query<T extends Record<string, unknown> = Record<string, unknown>>(
     query: string,
@@ -231,6 +391,8 @@ export interface PgliteAgentDatabase {
     getPullRequests(): Promise<DashboardPullRequestSummary[]>;
   };
   getSummary(): Promise<DashboardSummary>;
+  /** Constrained DB accessor for store modules (query + exec, no close/transaction). */
+  storeDb: PgliteExecutor;
   run(sql: string, ...params: unknown[]): Promise<void>;
   processEvent(hookType: string, data: HookData, harness: string): Promise<boolean>;
   loadMeteredUsageRows(cutoffIso: string): Promise<MeteredUsageRow[]>;
@@ -267,6 +429,7 @@ export async function openPgliteAgentDatabase(
   const database: PgliteAgentDatabase = {
     backend: "pglite",
     connection: null,
+    storeDb: db,
     importer: createPgliteImporter(db, queue, tokenUsage, {
       detectBillingMode: options.detectBillingMode,
       now: nowFn,

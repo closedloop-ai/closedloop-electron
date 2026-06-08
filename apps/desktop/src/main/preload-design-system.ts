@@ -3,6 +3,7 @@ import type {
   AgentHierarchyNode,
   AgentRow,
   AnalyticsData,
+  CatalogEntry,
   DashboardCoreFeatures,
   DashboardPackSummary,
   DashboardPlanSummary,
@@ -14,11 +15,21 @@ import type {
   EventCountByType,
   EventRow,
   EventWithSession,
+  InstallRunRecord,
+  InstalledPack,
+  InstalledPackDetail,
   KanbanPages,
+  PlanRecord,
+  PlanVersionRecord,
+  PrRecord,
+  PrSessionGroup,
+  PrStats,
   SessionPage,
   SessionPageRequest,
   SessionRow,
   SessionWithAgents,
+  SkillInvocation,
+  SkillWithInvocations,
   TokenAnalytics,
   WorkflowQueryData,
 } from "../shared/agent-db-contract.js";
@@ -49,6 +60,42 @@ const designSystemDashboardApi = {
     getSubAgents: () => ipcRenderer.invoke("desktop:db:get-subagents") as Promise<DashboardSubAgentSummary[]>,
     getPlans: () => ipcRenderer.invoke("desktop:db:get-plans") as Promise<DashboardPlanSummary[]>,
     getPullRequests: () => ipcRenderer.invoke("desktop:db:get-pull-requests") as Promise<DashboardPullRequestSummary[]>,
+
+    // Catalog (FEA-1314)
+    getCatalog: () => ipcRenderer.invoke("desktop:db:get-catalog") as Promise<CatalogEntry[]>,
+    getCatalogEntry: (packId: string) => ipcRenderer.invoke("desktop:db:get-catalog-entry", packId) as Promise<CatalogEntry | null>,
+    getCatalogReadme: (packId: string) => ipcRenderer.invoke("desktop:db:get-catalog-readme", packId) as Promise<string | null>,
+    getCatalogContents: (packId: string) => ipcRenderer.invoke("desktop:db:get-catalog-contents", packId) as Promise<unknown[] | null>,
+    getCatalogHistory: (packId: string) => ipcRenderer.invoke("desktop:db:get-catalog-history", packId) as Promise<Array<{ fetchedAt: string; stars: number; forks: number }>>,
+    catalogInstall: (packId: string, harness: string, cwd?: string) => ipcRenderer.invoke("desktop:db:catalog-install", packId, harness, cwd) as Promise<{ runId: number }>,
+    catalogUninstall: (packId: string, harness: string) => ipcRenderer.invoke("desktop:db:catalog-uninstall", packId, harness) as Promise<{ runId: number }>,
+    catalogRefresh: () => ipcRenderer.invoke("desktop:db:catalog-refresh") as Promise<void>,
+    getInstallRuns: (packId?: string) => ipcRenderer.invoke("desktop:db:get-install-runs", packId) as Promise<InstallRunRecord[]>,
+
+    // Installed packs (FEA-1224)
+    getInstalledPacks: () => ipcRenderer.invoke("desktop:db:get-installed-packs") as Promise<InstalledPack[]>,
+    getPackDetail: (packId: string) => ipcRenderer.invoke("desktop:db:get-pack-detail", packId) as Promise<InstalledPackDetail | null>,
+    getPackSessions: (packId: string) => ipcRenderer.invoke("desktop:db:get-pack-sessions", packId) as Promise<unknown[]>,
+    getAllSkills: () => ipcRenderer.invoke("desktop:db:get-all-skills") as Promise<SkillWithInvocations[]>,
+    getSkillInvocations: (name: string) => ipcRenderer.invoke("desktop:db:get-skill-invocations", name) as Promise<SkillInvocation[]>,
+    getRecentProjects: () => ipcRenderer.invoke("desktop:db:get-recent-projects") as Promise<string[]>,
+
+    // Plans (FEA-1189)
+    getPlansList: (opts?: { sessionId?: string; needsConfirmation?: boolean; limit?: number; offset?: number }) =>
+      ipcRenderer.invoke("desktop:db:get-plans-list", opts) as Promise<PlanRecord[]>,
+    getPlan: (id: string) => ipcRenderer.invoke("desktop:db:get-plan", id) as Promise<PlanRecord | null>,
+    getPlanVersions: (planId: string) => ipcRenderer.invoke("desktop:db:get-plan-versions", planId) as Promise<PlanVersionRecord[]>,
+    confirmPlan: (id: string) => ipcRenderer.invoke("desktop:db:confirm-plan", id) as Promise<void>,
+    rejectPlan: (id: string) => ipcRenderer.invoke("desktop:db:reject-plan", id) as Promise<void>,
+    openPlan: (id: string, target?: string) => ipcRenderer.invoke("desktop:db:open-plan", id, target) as Promise<void>,
+
+    // Pull Requests (FEA-1226)
+    getPrStats: () => ipcRenderer.invoke("desktop:db:get-pr-stats") as Promise<PrStats>,
+    getPrSessions: (opts?: { limit?: number; offset?: number }) =>
+      ipcRenderer.invoke("desktop:db:get-pr-sessions", opts) as Promise<PrSessionGroup[]>,
+    getPrList: (opts?: { sessionId?: string; repo?: string; limit?: number; offset?: number }) =>
+      ipcRenderer.invoke("desktop:db:get-pr-list", opts) as Promise<PrRecord[]>,
+    openPr: (id: string) => ipcRenderer.invoke("desktop:db:open-pr", id) as Promise<void>,
   },
   /**
    * Subscribe to in-process DB-change pushes. The design renderer listens for
@@ -58,6 +105,13 @@ const designSystemDashboardApi = {
     const handler = (_event: unknown, payload: { sessionId?: string }) => callback(payload);
     ipcRenderer.on("desktop:db:changed", handler);
     return () => ipcRenderer.removeListener("desktop:db:changed", handler);
+  },
+  /** Subscribe to streamed pack install/uninstall output (FEA-1314). */
+  onInstallOutput: (callback: (payload: { runId: number; type: string; data: string }) => void) => {
+    const handler = (_event: unknown, payload: { runId: number; type: string; data: string }) =>
+      callback(payload);
+    ipcRenderer.on("desktop:pack:install-output", handler);
+    return () => ipcRenderer.removeListener("desktop:pack:install-output", handler);
   },
 };
 

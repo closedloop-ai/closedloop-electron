@@ -1,0 +1,168 @@
+import { Button } from "@closedloop-ai/design-system/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@closedloop-ai/design-system/components/ui/dialog";
+import { CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { InstallRunRecord } from "../../../shared/agent-db-contract";
+import { cx } from "../layout/page-shell";
+
+export interface InstallModalProps {
+  open: boolean;
+  onClose: () => void;
+  packId: string;
+  harness: string;
+  action: "install" | "uninstall";
+  runId: number | null;
+  /** Command that was or will be executed (for display only). */
+  command?: string | null;
+}
+
+export function InstallModal({
+  open,
+  onClose,
+  packId,
+  harness,
+  action,
+  runId,
+  command,
+}: InstallModalProps) {
+  const [lines, setLines] = useState<Array<{ type: string; data: string }>>([]);
+  const [exitCode, setExitCode] = useState<number | null>(null);
+  const [done, setDone] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom on new output
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lines]);
+
+  // Subscribe to streamed install output via IPC
+  useEffect(() => {
+    if (!open || runId == null) return;
+    setLines([]);
+    setExitCode(null);
+    setDone(false);
+
+    const unsubscribe = window.desktopApi.onInstallOutput?.((payload) => {
+      if (payload.runId !== runId) return;
+
+      if (payload.type === "exit") {
+        const code = parseInt(payload.data, 10);
+        setExitCode(Number.isNaN(code) ? null : code);
+        setDone(true);
+        return;
+      }
+
+      setLines((prev) => [...prev, { type: payload.type, data: payload.data }]);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [open, runId]);
+
+  // Fallback: poll install runs if the IPC stream is not wired yet
+  useEffect(() => {
+    if (!open || runId == null || done) return;
+    // Only poll if onInstallOutput is not available
+    if (window.desktopApi.onInstallOutput) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const runs: InstallRunRecord[] = await window.desktopApi.db.getInstallRuns(packId);
+        const run = runs.find((r) => r.id === runId);
+        if (run?.endedAt) {
+          setExitCode(run.exitCode);
+          if (run.stdoutTail) {
+            setLines([{ type: "stdout", data: run.stdoutTail }]);
+          }
+          if (run.stderrTail) {
+            setLines((prev) => [...prev, { type: "stderr", data: run.stderrTail! }]);
+          }
+          setDone(true);
+        }
+      } catch {
+        // ignore poll errors
+      }
+    }, 1_500);
+
+    return () => clearInterval(interval);
+  }, [open, runId, packId, done]);
+
+  const handleClose = useCallback(() => {
+    setLines([]);
+    setExitCode(null);
+    setDone(false);
+    onClose();
+  }, [onClose]);
+
+  const title = action === "install"
+    ? `Installing ${packId} (${harness})`
+    : `Uninstalling ${packId} (${harness})`;
+
+  const success = done && (exitCode === 0 || exitCode == null);
+  const failed = done && exitCode != null && exitCode !== 0;
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
+      <DialogContent showCloseButton className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {!done && <Loader2 className="h-4 w-4 animate-spin" />}
+            {success && <CheckCircle2 className="h-4 w-4 text-[var(--success)]" />}
+            {failed && <XCircle className="h-4 w-4 text-[var(--destructive)]" />}
+            {title}
+          </DialogTitle>
+          <DialogDescription>
+            {done
+              ? success
+                ? `${action === "install" ? "Installation" : "Uninstallation"} completed successfully.`
+                : `Process exited with code ${exitCode}.`
+              : `Running ${action}...`}
+          </DialogDescription>
+        </DialogHeader>
+
+        {/* Command preview */}
+        {command && (
+          <div className="rounded-md border border-[var(--border)] bg-[var(--muted)] px-3 py-2 font-mono text-xs">
+            $ {command}
+          </div>
+        )}
+
+        {/* Scrolling output */}
+        <div
+          ref={scrollRef}
+          className="max-h-64 overflow-auto rounded-md border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-xs leading-5"
+        >
+          {lines.length === 0 && !done && (
+            <span className="text-[var(--muted-foreground)]">Waiting for output...</span>
+          )}
+          {lines.map((line, i) => (
+            <div
+              key={i}
+              className={cx(
+                "whitespace-pre-wrap break-all",
+                line.type === "stderr" && "text-[var(--destructive)]",
+              )}
+            >
+              {line.data}
+            </div>
+          ))}
+        </div>
+
+        <DialogFooter>
+          <Button variant={done ? "default" : "outline"} onClick={handleClose}>
+            {done ? "Close" : "Cancel"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
