@@ -253,6 +253,15 @@ test("PGlite dashboard side effects stay behind the Agent Dashboard runtime boun
     handlerRegistrationIndex < databaseReadyIndex,
     "design-system DB IPC handlers must be registered before awaiting PGlite startup",
   );
+  assert.doesNotMatch(
+    designSystemSource,
+    /SELECT DISTINCT cwd[\s\S]*ORDER BY started_at/,
+    "recent-projects query must stay valid for Postgres/PGlite",
+  );
+  assert.match(
+    designSystemSource,
+    /GROUP BY cwd[\s\S]*ORDER BY MAX\(started_at\) DESC NULLS LAST/,
+  );
   assert.match(
     appSource,
     /stopAgentCapture\(\{ closeDesignSystem: true \}\)/,

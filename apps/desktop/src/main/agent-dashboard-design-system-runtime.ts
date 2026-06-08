@@ -511,7 +511,12 @@ function registerDesignSystemDbIpcHandlers(
 
   ipcMain.handle("desktop:db:get-recent-projects", withStoreDb(async (dbForStores) => {
     const result = await dbForStores.query<{ cwd: string }>(
-      `SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL ORDER BY started_at DESC LIMIT 20`,
+      `SELECT cwd
+       FROM sessions
+       WHERE cwd IS NOT NULL AND cwd != ''
+       GROUP BY cwd
+       ORDER BY MAX(started_at) DESC NULLS LAST
+       LIMIT 20`,
     );
     return result.rows.map((r) => r.cwd);
   }));
