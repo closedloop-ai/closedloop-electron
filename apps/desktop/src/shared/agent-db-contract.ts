@@ -346,6 +346,21 @@ export interface InstallRunRecord {
   stderrTail: string | null;
 }
 
+export interface CatalogMutationResult {
+  started: boolean;
+  runId?: number;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface InstallOutputChunk {
+  runId: number;
+  type: "start" | "stdout" | "stderr" | "error" | "post_install" | "copy_command" | "complete";
+  data: unknown;
+}
+
 // --- Installed Packs (FEA-1224) ---
 
 export interface InstalledPack {

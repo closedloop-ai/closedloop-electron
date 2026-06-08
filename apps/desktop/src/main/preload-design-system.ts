@@ -4,6 +4,7 @@ import type {
   AgentRow,
   AnalyticsData,
   CatalogEntry,
+  CatalogMutationResult,
   DashboardCoreFeatures,
   DashboardPackSummary,
   DashboardPlanSummary,
@@ -15,6 +16,7 @@ import type {
   EventCountByType,
   EventRow,
   EventWithSession,
+  InstallOutputChunk,
   InstallRunRecord,
   InstalledPack,
   InstalledPackDetail,
@@ -67,8 +69,8 @@ const designSystemDashboardApi = {
     getCatalogReadme: (packId: string) => ipcRenderer.invoke("desktop:db:get-catalog-readme", packId) as Promise<string | null>,
     getCatalogContents: (packId: string) => ipcRenderer.invoke("desktop:db:get-catalog-contents", packId) as Promise<unknown[] | null>,
     getCatalogHistory: (packId: string) => ipcRenderer.invoke("desktop:db:get-catalog-history", packId) as Promise<Array<{ fetchedAt: string; stars: number; forks: number }>>,
-    catalogInstall: (packId: string, harness: string, cwd?: string) => ipcRenderer.invoke("desktop:db:catalog-install", packId, harness, cwd) as Promise<{ runId: number }>,
-    catalogUninstall: (packId: string, harness: string) => ipcRenderer.invoke("desktop:db:catalog-uninstall", packId, harness) as Promise<{ runId: number }>,
+    catalogInstall: (packId: string, harness: string, cwd?: string) => ipcRenderer.invoke("desktop:db:catalog-install", packId, harness, cwd) as Promise<CatalogMutationResult>,
+    catalogUninstall: (packId: string, harness: string, cwd?: string) => ipcRenderer.invoke("desktop:db:catalog-uninstall", packId, harness, cwd) as Promise<CatalogMutationResult>,
     catalogRefresh: () => ipcRenderer.invoke("desktop:db:catalog-refresh") as Promise<void>,
     getInstallRuns: (packId?: string) => ipcRenderer.invoke("desktop:db:get-install-runs", packId) as Promise<InstallRunRecord[]>,
 
@@ -107,8 +109,8 @@ const designSystemDashboardApi = {
     return () => ipcRenderer.removeListener("desktop:db:changed", handler);
   },
   /** Subscribe to streamed pack install/uninstall output (FEA-1314). */
-  onInstallOutput: (callback: (payload: { runId: number; type: string; data: string }) => void) => {
-    const handler = (_event: unknown, payload: { runId: number; type: string; data: string }) =>
+  onInstallOutput: (callback: (payload: InstallOutputChunk) => void) => {
+    const handler = (_event: unknown, payload: InstallOutputChunk) =>
       callback(payload);
     ipcRenderer.on("desktop:pack:install-output", handler);
     return () => ipcRenderer.removeListener("desktop:pack:install-output", handler);

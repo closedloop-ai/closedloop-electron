@@ -400,12 +400,13 @@ function registerDesignSystemDbIpcHandlers(
     });
   });
 
-  ipcMain.handle("desktop:db:catalog-uninstall", async (_event, packId: unknown, harness: unknown) => {
+  ipcMain.handle("desktop:db:catalog-uninstall", async (_event, packId: unknown, harness: unknown, cwd?: unknown) => {
     if (typeof packId !== "string" || typeof harness !== "string") return { started: false };
     return streamRun(dbForStores, {
       pack_id: packId,
       harness,
       action: "uninstall",
+      cwd: typeof cwd === "string" ? cwd : undefined,
       getWindow: options.getWindow,
       onComplete: () => void runPackScanner(dbForStores).catch(() => {}),
     });

@@ -1447,6 +1447,8 @@ export class DesktopApplication {
           await createAgentDashboardDesignSystemRuntime({
             userDataPath: app.getPath("userData"),
             getWindow: () => this.desktopWindow.getWindow(),
+            // User/org IDs are server-owned. Local-only sessions keep these columns null.
+            getUserIdentity: () => null,
             onTerminalFailure: (reason) => {
               const notification = new Notification({
                 title: "ClosedLoop Agent Monitor",

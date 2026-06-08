@@ -21,6 +21,8 @@ import type {
   WorkflowQueryData,
   AgentHierarchyNode,
   CatalogEntry,
+  CatalogMutationResult,
+  InstallOutputChunk,
   InstallRunRecord,
   InstalledPack,
   InstalledPackDetail,
@@ -153,8 +155,8 @@ export interface DesktopApi {
     getCatalogReadme: (packId: string) => Promise<string | null>;
     getCatalogContents: (packId: string) => Promise<unknown[] | null>;
     getCatalogHistory: (packId: string) => Promise<Array<{ fetchedAt: string; stars: number; forks: number }>>;
-    catalogInstall: (packId: string, harness: string, cwd?: string) => Promise<{ runId: number }>;
-    catalogUninstall: (packId: string, harness: string) => Promise<{ runId: number }>;
+    catalogInstall: (packId: string, harness: string, cwd?: string) => Promise<CatalogMutationResult>;
+    catalogUninstall: (packId: string, harness: string, cwd?: string) => Promise<CatalogMutationResult>;
     catalogRefresh: () => Promise<void>;
     getInstallRuns: (packId?: string) => Promise<InstallRunRecord[]>;
 
@@ -183,7 +185,7 @@ export interface DesktopApi {
   /** Live DB-change push subscription; returns an unsubscribe fn. */
   onDbChanged: (callback: (payload: { sessionId?: string }) => void) => () => void;
   /** Subscribe to streamed pack install/uninstall output (FEA-1314). */
-  onInstallOutput?: (callback: (payload: { runId: number; type: string; data: string }) => void) => () => void;
+  onInstallOutput?: (callback: (payload: InstallOutputChunk) => void) => () => void;
 }
 
 declare global {

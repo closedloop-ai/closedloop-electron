@@ -53,14 +53,18 @@ export function InstallModal({
     const unsubscribe = window.desktopApi.onInstallOutput?.((payload) => {
       if (payload.runId !== runId) return;
 
-      if (payload.type === "exit") {
-        const code = parseInt(payload.data, 10);
-        setExitCode(Number.isNaN(code) ? null : code);
+      if (payload.type === "complete") {
+        const code = extractExitCode(payload.data);
         setDone(true);
+        setExitCode(code);
         return;
       }
 
-      setLines((prev) => [...prev, { type: payload.type, data: payload.data }]);
+      const rendered = formatOutputPayload(payload.type, payload.data);
+      if (!rendered) {
+        return;
+      }
+      setLines((prev) => [...prev, { type: payload.type, data: rendered }]);
     });
 
     return () => {
@@ -165,4 +169,42 @@ export function InstallModal({
       </DialogContent>
     </Dialog>
   );
+}
+
+function extractExitCode(data: unknown): number | null {
+  if (typeof data === "number" && Number.isFinite(data)) {
+    return data;
+  }
+  if (typeof data === "string") {
+    const parsed = Number.parseInt(data, 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  if (data && typeof data === "object" && "exit_code" in data) {
+    const value = (data as { exit_code?: unknown }).exit_code;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+function formatOutputPayload(type: string, data: unknown): string | null {
+  if (type === "start") {
+    return null;
+  }
+  if (typeof data === "string") {
+    return data;
+  }
+  if (data && typeof data === "object" && "message" in data) {
+    const message = (data as { message?: unknown }).message;
+    if (typeof message === "string") {
+      return message;
+    }
+  }
+  if (type === "post_install" || type === "copy_command" || type === "error") {
+    try {
+      return JSON.stringify(data, null, 2);
+    } catch {
+      return String(data);
+    }
+  }
+  return null;
 }
