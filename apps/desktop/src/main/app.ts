@@ -1515,8 +1515,6 @@ export class DesktopApplication {
       this.agentDashboardDesignSystem =
         createAgentDashboardDesignSystemRuntime({
           userDataPath: app.getPath("userData"),
-          getSandboxBaseDirectory: () =>
-            this.settingsStore.getSandboxBaseDirectory(),
           getWindow: () => this.desktopWindow.getWindow(),
           onTerminalFailure: (reason) => {
             const notification = new Notification({

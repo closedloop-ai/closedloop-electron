@@ -33,7 +33,6 @@ const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
 ] as const;
 
 export interface AgentDashboardDesignSystemRuntimeOptions {
-  getSandboxBaseDirectory: () => string;
   getWindow: () => BrowserWindow | null;
   onTerminalFailure: (reason: string) => void;
   userDataPath?: string;
@@ -90,7 +89,6 @@ export function createAgentDashboardDesignSystemRuntime(
 
   const hookListener = new AgentHookListener({
     lifecycle,
-    getSandboxBaseDirectory: options.getSandboxBaseDirectory,
     log: (message: string) => log("agent-monitor-listener", message),
     onBindError: options.onTerminalFailure,
   });
@@ -98,7 +96,6 @@ export function createAgentDashboardDesignSystemRuntime(
   const collectorManager = new CollectorManager({
     agentDatabase,
     detectBillingMode,
-    getSandboxBaseDirectory: options.getSandboxBaseDirectory,
     stateDir: path.join(options.userDataPath ?? app.getPath("userData"), "agent-monitor"),
     emit: (sessionId?: string) => {
       options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });

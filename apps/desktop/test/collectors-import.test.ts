@@ -2,8 +2,8 @@
  * @file collectors-import.test.ts
  * @description Tests the first-party importSession write-sink (FEA-1503): it
  * writes a NormalizedSession into the in-process repository, is idempotent on
- * re-import (the headline acceptance criterion), and the CollectorManager applies
- * FEA-1407 sandbox gating (fail-closed) before any write.
+ * re-import (the headline acceptance criterion), and the CollectorManager imports
+ * all sessions regardless of the sandbox directory.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { openAgentDatabase } from "../src/main/database/index.js";
 import { createImporter } from "../src/main/collectors/import-session.js";
 import { CollectorManager } from "../src/main/collectors/collector-manager.js";
+import { isSessionInSandbox } from "../src/main/agent-session-sync-service.js";
 import type { HarnessCollector, NormalizedSession } from "../src/main/collectors/types.js";
 
 const FIXED_NOW = "2024-03-09T17:00:00.000Z";
@@ -404,7 +405,7 @@ test("Agent/Task tool use creates an idempotent subagent row", () => {
   }
 });
 
-test("CollectorManager imports in-sandbox sessions and drops out-of-sandbox ones (FEA-1407)", async () => {
+test("CollectorManager imports all sessions regardless of sandbox", async () => {
   const { db, dir, cleanup } = openTempDb();
   try {
     let emitted = 0;
@@ -423,7 +424,6 @@ test("CollectorManager imports in-sandbox sessions and drops out-of-sandbox ones
     const manager = new CollectorManager({
       agentDatabase: db,
       detectBillingMode: () => "api",
-      getSandboxBaseDirectory: () => "/sandbox",
       stateDir: dir,
       emit: () => { emitted++; },
       shouldWatchClaude: () => false,
@@ -437,14 +437,14 @@ test("CollectorManager imports in-sandbox sessions and drops out-of-sandbox ones
     manager.stop();
 
     assert.ok(db.sessions.getById("in"), "in-sandbox session is imported");
-    assert.equal(db.sessions.getById("out"), undefined, "out-of-sandbox session is dropped");
+    assert.ok(db.sessions.getById("out"), "out-of-sandbox session is also imported");
     assert.ok(emitted > 0, "emits a live-update signal after writing");
   } finally {
     cleanup();
   }
 });
 
-test("CollectorManager with an empty sandbox captures nothing (fail-closed)", async () => {
+test("CollectorManager imports sessions even with empty sandbox", async () => {
   const { db, dir, cleanup } = openTempDb();
   try {
     const fakeCollector: HarnessCollector = {
@@ -459,7 +459,6 @@ test("CollectorManager with an empty sandbox captures nothing (fail-closed)", as
     const manager = new CollectorManager({
       agentDatabase: db,
       detectBillingMode: () => "api",
-      getSandboxBaseDirectory: () => "", // empty ⇒ capture nothing
       stateDir: dir,
       emit: () => {},
       shouldWatchClaude: () => false,
@@ -471,8 +470,18 @@ test("CollectorManager with an empty sandbox captures nothing (fail-closed)", as
     await new Promise((resolve) => setTimeout(resolve, 50));
     manager.stop();
 
-    assert.equal(db.sessions.getAll().length, 0, "empty sandbox ⇒ nothing captured");
+    assert.equal(db.sessions.getAll().length, 1, "sessions captured regardless of sandbox");
   } finally {
     cleanup();
   }
+});
+
+test("sync-service isSessionInSandbox still filters out-of-sandbox sessions (regression)", () => {
+  // The cloud sync path in AgentSessionSyncService uses isSessionInSandbox
+  // independently of the local import path. Verify it still gates correctly.
+  assert.equal(isSessionInSandbox("/sandbox/proj", "/sandbox"), true);
+  assert.equal(isSessionInSandbox("/elsewhere/proj", "/sandbox"), false);
+  assert.equal(isSessionInSandbox(null, "/sandbox"), false);
+  assert.equal(isSessionInSandbox("/sandbox/proj", ""), false);
+  assert.equal(isSessionInSandbox("/sandbox/proj", null), false);
 });
