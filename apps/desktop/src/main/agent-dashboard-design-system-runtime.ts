@@ -1,5 +1,10 @@
 import path from "node:path";
-import { app, ipcMain, type BrowserWindow } from "electron";
+import {
+  app,
+  ipcMain,
+  type BrowserWindow,
+  type IpcMainInvokeEvent,
+} from "electron";
 import { AgentHookListener } from "./agent-monitor-listener.js";
 import { CollectorManager } from "./collectors/collector-manager.js";
 import type { MeteredUsageRow } from "./reconciliation-worker.js";
@@ -120,7 +125,8 @@ export async function createAgentDashboardDesignSystemRuntime(
 ): Promise<AgentDashboardDesignSystemRuntime> {
   const log = options.log ?? (() => {});
   let pgliteDatabase: PgliteAgentDatabase | null = null;
-  const agentDatabase = await openPgliteAgentDatabase({
+  let dbIpcRegistered = false;
+  const agentDatabasePromise = openPgliteAgentDatabase({
     dataDir: resolveAgentDashboardDatabasePath(options.userDataPath),
     detectBillingMode,
     emit: (sessionId: string) => {
@@ -130,6 +136,17 @@ export async function createAgentDashboardDesignSystemRuntime(
     getUserIdentity: options.getUserIdentity,
     log: (message: string) => log("agent-pglite", message),
   });
+
+  const registerIpcHandlers = () => {
+    if (dbIpcRegistered) {
+      return;
+    }
+    dbIpcRegistered = true;
+    registerDesignSystemDbIpcHandlers(() => agentDatabasePromise, options);
+  };
+  registerIpcHandlers();
+
+  const agentDatabase = await agentDatabasePromise;
   pgliteDatabase = agentDatabase;
   log(
     "agent-dashboard",
@@ -169,7 +186,6 @@ export async function createAgentDashboardDesignSystemRuntime(
   void runCatalogFetch(dbForStores).catch(() => {});
   catalogFetchTimer = scheduleCatalogFetch(dbForStores);
 
-  let dbIpcRegistered = false;
   let closed = false;
 
   const hookListener = new AgentHookListener({
@@ -217,7 +233,10 @@ export async function createAgentDashboardDesignSystemRuntime(
         clearInterval(catalogFetchTimer);
         catalogFetchTimer = null;
       }
-      unregisterDesignSystemDbIpcHandlers();
+      if (dbIpcRegistered) {
+        unregisterDesignSystemDbIpcHandlers();
+        dbIpcRegistered = false;
+      }
       await agentDatabase.close();
     },
     restartCollectors: () => {
@@ -227,13 +246,7 @@ export async function createAgentDashboardDesignSystemRuntime(
       collectorManager.stop();
       collectorManager.start();
     },
-    registerIpcHandlers: () => {
-      if (dbIpcRegistered) {
-        return;
-      }
-      dbIpcRegistered = true;
-      registerDesignSystemDbIpcHandlers(agentDatabase, options);
-    },
+    registerIpcHandlers,
     loadMeteredUsageRows: (cutoffIso: string) =>
       agentDatabase.loadMeteredUsageRows(cutoffIso),
   };
@@ -242,42 +255,74 @@ export async function createAgentDashboardDesignSystemRuntime(
 }
 
 function registerDesignSystemDbIpcHandlers(
-  agentDatabase: PgliteAgentDatabase,
+  getAgentDatabase: () => Promise<PgliteAgentDatabase>,
   options: AgentDashboardDesignSystemRuntimeOptions,
 ): void {
-  ipcMain.handle("desktop:db:get-sessions", () => agentDatabase.sessions.getAll());
+  unregisterDesignSystemDbIpcHandlers();
 
-  ipcMain.handle("desktop:db:get-sessions-page", (_event, request: unknown) =>
-    agentDatabase.sessions.getPage(coerceSessionPageRequest(request)),
+  const withDb =
+    <TArgs extends unknown[], TResult>(
+      handler: (
+        agentDatabase: PgliteAgentDatabase,
+        ...args: TArgs
+      ) => TResult | Promise<TResult>,
+    ) =>
+    async (_event: IpcMainInvokeEvent, ...args: TArgs): Promise<TResult> =>
+      handler(await getAgentDatabase(), ...args);
+
+  const withStoreDb =
+    <TArgs extends unknown[], TResult>(
+      handler: (
+        dbForStores: PgliteAgentDatabase["storeDb"],
+        ...args: TArgs
+      ) => TResult | Promise<TResult>,
+    ) =>
+    withDb((agentDatabase, ...args: TArgs) =>
+      handler(agentDatabase.storeDb, ...args),
+    );
+
+  ipcMain.handle(
+    "desktop:db:get-sessions",
+    withDb((agentDatabase) => agentDatabase.sessions.getAll()),
   );
 
-  ipcMain.handle("desktop:db:get-kanban-pages", (_event, statuses: unknown, limit: unknown) => {
-    const safeStatuses = Array.isArray(statuses) ? statuses.filter((s): s is string => typeof s === "string") : [];
-    const safeLimit = typeof limit === "number" && Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 25;
-    return agentDatabase.sessions.getKanbanPages(safeStatuses, safeLimit);
-  });
+  ipcMain.handle(
+    "desktop:db:get-sessions-page",
+    withDb((agentDatabase, request: unknown) =>
+      agentDatabase.sessions.getPage(coerceSessionPageRequest(request)),
+    ),
+  );
 
-  ipcMain.handle("desktop:db:get-session", (_event, id: unknown) => {
+  ipcMain.handle(
+    "desktop:db:get-kanban-pages",
+    withDb((agentDatabase, statuses: unknown, limit: unknown) => {
+      const safeStatuses = Array.isArray(statuses) ? statuses.filter((s): s is string => typeof s === "string") : [];
+      const safeLimit = typeof limit === "number" && Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 25;
+      return agentDatabase.sessions.getKanbanPages(safeStatuses, safeLimit);
+    }),
+  );
+
+  ipcMain.handle("desktop:db:get-session", withDb((agentDatabase, id: unknown) => {
     const sessionId = coerceDbId(id);
     if (sessionId === null) return undefined;
     return agentDatabase.sessions.getById(sessionId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-session-details", (_event, id: unknown) => {
+  ipcMain.handle("desktop:db:get-session-details", withDb((agentDatabase, id: unknown) => {
     const sessionId = coerceDbId(id);
     if (sessionId === null) return undefined;
     return agentDatabase.sessions.getDetailsById(sessionId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-agents", (_event, sessionId: unknown) => {
+  ipcMain.handle("desktop:db:get-agents", withDb((agentDatabase, sessionId: unknown) => {
     const id = coerceDbId(sessionId);
     if (id === null) return [];
     return agentDatabase.agents.getBySession(id);
-  });
+  }));
 
   ipcMain.handle(
     "desktop:db:get-events",
-    (_event, sessionId: unknown, agentId?: unknown) => {
+    withDb((agentDatabase, sessionId: unknown, agentId?: unknown) => {
       const sid = coerceDbId(sessionId);
       if (sid === null) return [];
       const aid = coerceDbId(agentId);
@@ -285,110 +330,123 @@ function registerDesignSystemDbIpcHandlers(
         return agentDatabase.events.getBySessionAndAgent(sid, aid);
       }
       return agentDatabase.events.getBySession(sid);
-    },
+    }),
   );
 
-  ipcMain.handle("desktop:db:get-dashboard-summary", () =>
-    agentDatabase.getSummary(),
+  ipcMain.handle(
+    "desktop:db:get-dashboard-summary",
+    withDb((agentDatabase) => agentDatabase.getSummary()),
   );
 
-  ipcMain.handle("desktop:db:get-sessions-with-details", () =>
-    agentDatabase.sessions.getAllWithDetails(),
+  ipcMain.handle(
+    "desktop:db:get-sessions-with-details",
+    withDb((agentDatabase) => agentDatabase.sessions.getAllWithDetails()),
   );
 
-  ipcMain.handle("desktop:db:get-event-feed", () =>
-    agentDatabase.events.getAll(),
+  ipcMain.handle(
+    "desktop:db:get-event-feed",
+    withDb((agentDatabase) => agentDatabase.events.getAll()),
   );
 
-  ipcMain.handle("desktop:db:get-events-with-session", (_event, sessionId: unknown) => {
+  ipcMain.handle("desktop:db:get-events-with-session", withDb((agentDatabase, sessionId: unknown) => {
     const id = coerceDbId(sessionId);
     if (id === null) return [];
     return agentDatabase.events.getWithSession(id);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-event-count-by-type", () =>
-    agentDatabase.events.getCountByType(),
+  ipcMain.handle(
+    "desktop:db:get-event-count-by-type",
+    withDb((agentDatabase) => agentDatabase.events.getCountByType()),
   );
 
-  ipcMain.handle("desktop:db:get-token-analytics", () =>
-    agentDatabase.dashboard.getTokenAnalytics(),
+  ipcMain.handle(
+    "desktop:db:get-token-analytics",
+    withDb((agentDatabase) => agentDatabase.dashboard.getTokenAnalytics()),
   );
 
-  ipcMain.handle("desktop:db:get-agent-hierarchy", (_event, sessionId: unknown) => {
+  ipcMain.handle("desktop:db:get-agent-hierarchy", withDb((agentDatabase, sessionId: unknown) => {
     const id = coerceDbId(sessionId);
     if (id === null) return [];
     return agentDatabase.agents.getBySessionWithChildren(id);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-analytics", () =>
-    agentDatabase.dashboard.getAnalytics(),
+  ipcMain.handle(
+    "desktop:db:get-analytics",
+    withDb((agentDatabase) => agentDatabase.dashboard.getAnalytics()),
   );
 
-  ipcMain.handle("desktop:db:get-workflow-data", () =>
-    agentDatabase.dashboard.getWorkflowData(),
+  ipcMain.handle(
+    "desktop:db:get-workflow-data",
+    withDb((agentDatabase) => agentDatabase.dashboard.getWorkflowData()),
   );
 
-  ipcMain.handle("desktop:db:get-core-features", () =>
-    agentDatabase.dashboard.getCoreFeatures(),
+  ipcMain.handle(
+    "desktop:db:get-core-features",
+    withDb((agentDatabase) => agentDatabase.dashboard.getCoreFeatures()),
   );
 
-  ipcMain.handle("desktop:db:get-packs", () =>
-    agentDatabase.dashboard.getPacks(),
+  ipcMain.handle(
+    "desktop:db:get-packs",
+    withDb((agentDatabase) => agentDatabase.dashboard.getPacks()),
   );
 
-  ipcMain.handle("desktop:db:get-skills", () =>
-    agentDatabase.dashboard.getSkills(),
+  ipcMain.handle(
+    "desktop:db:get-skills",
+    withDb((agentDatabase) => agentDatabase.dashboard.getSkills()),
   );
 
-  ipcMain.handle("desktop:db:get-tools", () =>
-    agentDatabase.dashboard.getTools(),
+  ipcMain.handle(
+    "desktop:db:get-tools",
+    withDb((agentDatabase) => agentDatabase.dashboard.getTools()),
   );
 
-  ipcMain.handle("desktop:db:get-subagents", () =>
-    agentDatabase.dashboard.getSubAgents(),
+  ipcMain.handle(
+    "desktop:db:get-subagents",
+    withDb((agentDatabase) => agentDatabase.dashboard.getSubAgents()),
   );
 
-  ipcMain.handle("desktop:db:get-plans", () =>
-    agentDatabase.dashboard.getPlans(),
+  ipcMain.handle(
+    "desktop:db:get-plans",
+    withDb((agentDatabase) => agentDatabase.dashboard.getPlans()),
   );
 
-  ipcMain.handle("desktop:db:get-pull-requests", () =>
-    agentDatabase.dashboard.getPullRequests(),
+  ipcMain.handle(
+    "desktop:db:get-pull-requests",
+    withDb((agentDatabase) => agentDatabase.dashboard.getPullRequests()),
   );
 
   // --- Catalog (FEA-1314) ---
-  const dbForStores = agentDatabase.storeDb;
-
-  ipcMain.handle("desktop:db:get-catalog", () =>
-    catalogStore.listCatalog(dbForStores),
+  ipcMain.handle(
+    "desktop:db:get-catalog",
+    withStoreDb((dbForStores) => catalogStore.listCatalog(dbForStores)),
   );
 
-  ipcMain.handle("desktop:db:get-catalog-entry", (_event, packId: unknown) => {
+  ipcMain.handle("desktop:db:get-catalog-entry", withStoreDb((dbForStores, packId: unknown) => {
     if (typeof packId !== "string") return null;
     return catalogStore.getCatalog(dbForStores, packId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-catalog-readme", async (_event, packId: unknown) => {
+  ipcMain.handle("desktop:db:get-catalog-readme", withStoreDb(async (dbForStores, packId: unknown) => {
     if (typeof packId !== "string") return null;
     const entry = await catalogStore.getCatalog(dbForStores, packId);
     return entry?.readme_excerpt ?? null;
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-catalog-contents", async (_event, packId: unknown) => {
+  ipcMain.handle("desktop:db:get-catalog-contents", withStoreDb(async (dbForStores, packId: unknown) => {
     if (typeof packId !== "string") return null;
     const entry = await catalogStore.getCatalog(dbForStores, packId);
     if (!entry) return null;
     await refreshCatalogContents(dbForStores, entry);
     const refreshed = await catalogStore.getCatalog(dbForStores, packId);
     return refreshed?.contents_cache ?? null;
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-catalog-history", (_event, packId: unknown) => {
+  ipcMain.handle("desktop:db:get-catalog-history", withStoreDb((dbForStores, packId: unknown) => {
     if (typeof packId !== "string") return [];
     return catalogStore.listHistory(dbForStores, packId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:catalog-install", async (_event, packId: unknown, harness: unknown, cwd?: unknown) => {
+  ipcMain.handle("desktop:db:catalog-install", withStoreDb(async (dbForStores, packId: unknown, harness: unknown, cwd?: unknown) => {
     if (typeof packId !== "string" || typeof harness !== "string") return { started: false };
     return streamRun(dbForStores, {
       pack_id: packId,
@@ -398,9 +456,9 @@ function registerDesignSystemDbIpcHandlers(
       getWindow: options.getWindow,
       onComplete: () => void runPackScanner(dbForStores).catch(() => {}),
     });
-  });
+  }));
 
-  ipcMain.handle("desktop:db:catalog-uninstall", async (_event, packId: unknown, harness: unknown, cwd?: unknown) => {
+  ipcMain.handle("desktop:db:catalog-uninstall", withStoreDb(async (dbForStores, packId: unknown, harness: unknown, cwd?: unknown) => {
     if (typeof packId !== "string" || typeof harness !== "string") return { started: false };
     return streamRun(dbForStores, {
       pack_id: packId,
@@ -410,51 +468,57 @@ function registerDesignSystemDbIpcHandlers(
       getWindow: options.getWindow,
       onComplete: () => void runPackScanner(dbForStores).catch(() => {}),
     });
-  });
+  }));
 
-  ipcMain.handle("desktop:db:catalog-refresh", () =>
-    runCatalogFetch(dbForStores),
+  ipcMain.handle(
+    "desktop:db:catalog-refresh",
+    withStoreDb((dbForStores) => runCatalogFetch(dbForStores)),
   );
 
-  ipcMain.handle("desktop:db:get-install-runs", (_event, packId?: unknown) =>
-    catalogStore.listInstallRuns(dbForStores, typeof packId === "string" ? { pack_id: packId } : {}),
+  ipcMain.handle(
+    "desktop:db:get-install-runs",
+    withStoreDb((dbForStores, packId?: unknown) =>
+      catalogStore.listInstallRuns(dbForStores, typeof packId === "string" ? { pack_id: packId } : {}),
+    ),
   );
 
   // --- Installed Packs (FEA-1224) ---
 
-  ipcMain.handle("desktop:db:get-installed-packs", () =>
-    packStore.listPacks(dbForStores),
+  ipcMain.handle(
+    "desktop:db:get-installed-packs",
+    withStoreDb((dbForStores) => packStore.listPacks(dbForStores)),
   );
 
-  ipcMain.handle("desktop:db:get-pack-detail", (_event, packId: unknown) => {
+  ipcMain.handle("desktop:db:get-pack-detail", withStoreDb((dbForStores, packId: unknown) => {
     if (typeof packId !== "string") return null;
     return packStore.getPack(dbForStores, packId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-pack-sessions", (_event, packId: unknown) => {
+  ipcMain.handle("desktop:db:get-pack-sessions", withStoreDb((dbForStores, packId: unknown) => {
     if (typeof packId !== "string") return [];
     return packStore.listPackSessions(dbForStores, packId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-all-skills", () =>
-    packStore.listSkills(dbForStores),
+  ipcMain.handle(
+    "desktop:db:get-all-skills",
+    withStoreDb((dbForStores) => packStore.listSkills(dbForStores)),
   );
 
-  ipcMain.handle("desktop:db:get-skill-invocations", (_event, name: unknown) => {
+  ipcMain.handle("desktop:db:get-skill-invocations", withStoreDb((dbForStores, name: unknown) => {
     if (typeof name !== "string") return [];
     return packStore.listSkillInvocations(dbForStores, name);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-recent-projects", async () => {
+  ipcMain.handle("desktop:db:get-recent-projects", withStoreDb(async (dbForStores) => {
     const result = await dbForStores.query<{ cwd: string }>(
       `SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL ORDER BY started_at DESC LIMIT 20`,
     );
     return result.rows.map((r) => r.cwd);
-  });
+  }));
 
   // --- Plans (FEA-1189) ---
 
-  ipcMain.handle("desktop:db:get-plans-list", (_event, opts?: unknown) => {
+  ipcMain.handle("desktop:db:get-plans-list", withStoreDb((dbForStores, opts?: unknown) => {
     const o = typeof opts === "object" && opts !== null ? opts as Record<string, unknown> : {};
     return planStore.listPlans(dbForStores, {
       sessionId: typeof o.sessionId === "string" ? o.sessionId : undefined,
@@ -462,51 +526,52 @@ function registerDesignSystemDbIpcHandlers(
       limit: typeof o.limit === "number" ? o.limit : undefined,
       offset: typeof o.offset === "number" ? o.offset : undefined,
     });
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-plan", (_event, id: unknown) => {
+  ipcMain.handle("desktop:db:get-plan", withStoreDb((dbForStores, id: unknown) => {
     if (typeof id !== "string") return null;
     return planStore.getPlan(dbForStores, id);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-plan-versions", (_event, planId: unknown) => {
+  ipcMain.handle("desktop:db:get-plan-versions", withStoreDb((dbForStores, planId: unknown) => {
     if (typeof planId !== "string") return [];
     return planStore.getPlanVersions(dbForStores, planId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:confirm-plan", (_event, id: unknown) => {
+  ipcMain.handle("desktop:db:confirm-plan", withStoreDb((dbForStores, id: unknown) => {
     if (typeof id !== "string") return;
     return planStore.confirmPlan(dbForStores, id);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:reject-plan", (_event, id: unknown) => {
+  ipcMain.handle("desktop:db:reject-plan", withStoreDb((dbForStores, id: unknown) => {
     if (typeof id !== "string") return;
     return planStore.rejectPlan(dbForStores, id);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:open-plan", async (_event, id: unknown, target?: unknown) => {
+  ipcMain.handle("desktop:db:open-plan", withStoreDb(async (dbForStores, id: unknown, target?: unknown) => {
     if (typeof id !== "string") return;
     const plan = await planStore.getPlan(dbForStores, id);
     if (!plan) return;
     const filePath = String(target === "log" ? plan.source_log_path : plan.file_path);
     if (filePath && filePath !== "null" && filePath !== "undefined") void shell.openPath(filePath);
-  });
+  }));
 
   // --- Pull Requests (FEA-1226) ---
 
-  ipcMain.handle("desktop:db:get-pr-stats", () =>
-    prStore.getPrStats(dbForStores),
+  ipcMain.handle(
+    "desktop:db:get-pr-stats",
+    withStoreDb((dbForStores) => prStore.getPrStats(dbForStores)),
   );
 
-  ipcMain.handle("desktop:db:get-pr-sessions", (_event, opts?: unknown) => {
+  ipcMain.handle("desktop:db:get-pr-sessions", withStoreDb((dbForStores, opts?: unknown) => {
     const o = typeof opts === "object" && opts !== null ? opts as Record<string, unknown> : {};
     return prStore.listPrSessions(dbForStores, {
       limit: typeof o.limit === "number" ? o.limit : undefined,
       offset: typeof o.offset === "number" ? o.offset : undefined,
     });
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-pr-list", (_event, opts?: unknown) => {
+  ipcMain.handle("desktop:db:get-pr-list", withStoreDb((dbForStores, opts?: unknown) => {
     const o = typeof opts === "object" && opts !== null ? opts as Record<string, unknown> : {};
     return prStore.listPullRequests(dbForStores, {
       sessionId: typeof o.sessionId === "string" ? o.sessionId : undefined,
@@ -514,15 +579,15 @@ function registerDesignSystemDbIpcHandlers(
       limit: typeof o.limit === "number" ? o.limit : undefined,
       offset: typeof o.offset === "number" ? o.offset : undefined,
     });
-  });
+  }));
 
-  ipcMain.handle("desktop:db:open-pr", async (_event, id: unknown) => {
+  ipcMain.handle("desktop:db:open-pr", withStoreDb(async (dbForStores, id: unknown) => {
     if (typeof id !== "string") return;
     const prs = await prStore.listPullRequests(dbForStores);
     const pr = prs.find((p) => p.id === id);
     const prUrl = pr?.pr_url;
     if (typeof prUrl === "string") void shell.openExternal(prUrl);
-  });
+  }));
 }
 
 function unregisterDesignSystemDbIpcHandlers(): void {

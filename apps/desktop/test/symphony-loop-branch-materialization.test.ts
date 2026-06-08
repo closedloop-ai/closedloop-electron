@@ -623,6 +623,53 @@ test("GENERATE_PRD records expected primary branch before PRD command starts", a
   assert.equal(payload.baseBranch, "main");
 });
 
+test("fresh GENERATE_PRD removes stale deterministic directory before branch record", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "branch-prd-stale-dir-"));
+  tempPathsToClean.push(tmpDir);
+  await setupLoopRuntime(tmpDir);
+  const repo = await createRepoWithOrigin(tmpDir, "prd-stale-dir-repo");
+  const api = await startBranchApi();
+  const server = await startGateway(tmpDir, api.port);
+
+  const artifactSlug = "PRD-604-stale-dir";
+  const worktreeDir = path.join(
+    process.env.SYMPHONY_WORKTREE_PARENT_DIR!,
+    `${path.basename(repo.repoPath)}-loop-generate-prd-prd-604-stale-dir`,
+  );
+  await fs.mkdir(path.join(worktreeDir, "node_modules", "pkg"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(worktreeDir, "node_modules", "pkg", "stale.txt"),
+    "stale",
+  );
+
+  const loopId = "00000000-0000-0000-0000-000000113207";
+  const branchName = "symphony/server-owned-prd-stale-dir-branch";
+  const response = await postLoop(server, {
+    loopId,
+    command: LoopCommand.GeneratePrd,
+    closedLoopAuthToken: "loop-token",
+    artifacts: [],
+    prompt: "Generate the PRD",
+    artifactSlug,
+    repo: { fullName: repo.fullName, branch: "main" },
+    branchMaterialization: branchMaterialization([
+      { role: "primary", repositoryFullName: repo.fullName, branchName },
+    ]),
+  });
+
+  assert.equal(response.status, 200, await response.text());
+  await api.waitForRequest(`/loops/${loopId}/branch-artifact`);
+  assert.equal(
+    await assertRemoteBranch(repo.originPath, branchName),
+    await assertRemoteBranch(repo.originPath, "main"),
+  );
+  await assert.rejects(
+    fs.access(path.join(worktreeDir, "node_modules", "pkg", "stale.txt")),
+  );
+});
+
 test("legacy PLAN payload without branch materialization uses legacy worktree setup", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "branch-missing-"));
   tempPathsToClean.push(tmpDir);

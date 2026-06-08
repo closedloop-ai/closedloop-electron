@@ -23,6 +23,7 @@ import https from "node:https";
 import type { Results } from "@electric-sql/pglite";
 
 import { resolveBinaryFromLoginShellSync } from "../../server/shell-path.js";
+import { gatewayLog } from "../gateway-logger.js";
 import { applyFetchResult } from "./catalog-store.js";
 
 // FEA-1314 v6: marketplace sub-plugins (e.g. code-review, context7) live as
@@ -300,8 +301,7 @@ export async function runCatalogFetch(db: CatalogDb): Promise<FetchSummary> {
     rows = result.rows;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn("[catalog-fetcher] cannot read pack_catalog:", msg);
+    gatewayLog.warn("catalog-fetcher", `cannot read pack_catalog: ${msg}`);
     return summary;
   }
 
@@ -372,10 +372,9 @@ export async function runCatalogFetch(db: CatalogDb): Promise<FetchSummary> {
         summary.succeeded += 1;
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[catalog-fetcher] applyFetchResult failed for ${row.pack_id}:`,
-          msg,
+        gatewayLog.warn(
+          "catalog-fetcher",
+          `applyFetchResult failed for ${row.pack_id}: ${msg}`,
         );
         summary.failed += 1;
       }
@@ -408,10 +407,9 @@ export async function runCatalogFetch(db: CatalogDb): Promise<FetchSummary> {
       summary.succeeded += 1;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[catalog-fetcher] applyFetchResult failed for ${row.pack_id}:`,
-        msg,
+      gatewayLog.warn(
+        "catalog-fetcher",
+        `applyFetchResult failed for ${row.pack_id}: ${msg}`,
       );
       summary.failed += 1;
     }
@@ -432,8 +430,7 @@ export function scheduleCatalogFetch(
   const handle = setInterval(() => {
     runCatalogFetch(db).catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e);
-      // eslint-disable-next-line no-console
-      console.warn("[catalog-fetcher] scheduled run failed:", msg);
+      gatewayLog.warn("catalog-fetcher", `scheduled run failed: ${msg}`);
     });
   }, intervalMs);
   if (typeof handle.unref === "function") handle.unref();

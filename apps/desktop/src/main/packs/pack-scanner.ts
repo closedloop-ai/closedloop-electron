@@ -34,6 +34,11 @@ import {
   upsertSkill,
   upsertProjectAssociation,
 } from "./pack-store.js";
+import { gatewayLog } from "../gateway-logger.js";
+import {
+  resolveBinaryFromLoginShellSync,
+  type BinaryName,
+} from "../../server/shell-path.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1006,7 +1011,7 @@ async function detectBinaryTool(
   db: PackScannerDb,
   opts: {
     pack_id: string;
-    binNames: string[];
+    binNames: BinaryName[];
     source_url: string | null;
     harnesses: string[];
     versionArgs?: string[];
@@ -1014,18 +1019,10 @@ async function detectBinaryTool(
 ): Promise<boolean> {
   let binaryPath: string | null = null;
   for (const bin of opts.binNames) {
-    try {
-      const out = execFileSync("/usr/bin/which", [bin], {
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 1000,
-      });
-      const trimmed = out.toString().trim();
-      if (trimmed) {
-        binaryPath = trimmed;
-        break;
-      }
-    } catch {
-      /* not on PATH — try next bin name */
+    const resolved = resolveBinaryFromLoginShellSync(bin);
+    if (resolved.source === "path") {
+      binaryPath = resolved.path;
+      break;
     }
   }
   if (!binaryPath) return false;
@@ -1078,16 +1075,7 @@ async function detectClaudeCodeRouter(db: PackScannerDb): Promise<boolean> {
     installed = true;
   } catch {
     // Fall back to probing the binary on PATH.
-    try {
-      // eslint-disable-next-line no-restricted-syntax
-      execFileSync("which", ["ccr"], {
-        stdio: ["ignore", "ignore", "ignore"],
-        timeout: 1000,
-      });
-      installed = true;
-    } catch {
-      installed = false;
-    }
+    installed = resolveBinaryFromLoginShellSync("ccr").source === "path";
   }
   if (!installed) return false;
   await upsertPack(db, {
@@ -1131,8 +1119,7 @@ export async function runCatalogDetectorAdapters(
       results[name] = await fn(db);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      // eslint-disable-next-line no-console
-      console.warn(`[catalog-detector] adapter ${name} failed:`, msg);
+      gatewayLog.warn("catalog-detector", `adapter ${name} failed: ${msg}`);
       results[name] = false;
     }
   }
@@ -1163,8 +1150,7 @@ async function pruneStaleRows(
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn("[pack-scanner] tombstone agent_packs failed:", msg);
+    gatewayLog.warn("pack-scanner", `tombstone agent_packs failed: ${msg}`);
   }
   try {
     await db.query(
@@ -1176,8 +1162,7 @@ async function pruneStaleRows(
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn("[pack-scanner] tombstone skills failed:", msg);
+    gatewayLog.warn("pack-scanner", `tombstone skills failed: ${msg}`);
   }
   try {
     await db.query(
@@ -1186,10 +1171,9 @@ async function pruneStaleRows(
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[pack-scanner] prune project_pack_associations failed:",
-      msg,
+    gatewayLog.warn(
+      "pack-scanner",
+      `prune project_pack_associations failed: ${msg}`,
     );
   }
 }
@@ -1243,24 +1227,21 @@ export async function runPackScanner(
     summary.scopes.gstack = true;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn("[pack-scanner] gstack scan failed:", msg);
+    gatewayLog.warn("pack-scanner", `gstack scan failed: ${msg}`);
   }
   try {
     summary.bmad = await scanners.scanBmad(db);
     summary.scopes.bmad = true;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn("[pack-scanner] bmad scan failed:", msg);
+    gatewayLog.warn("pack-scanner", `bmad scan failed: ${msg}`);
   }
   try {
     summary.marketplaces = await scanners.scanClaudeMarketplaces(db);
     summary.scopes.marketplaces = true;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn("[pack-scanner] claude marketplace scan failed:", msg);
+    gatewayLog.warn("pack-scanner", `claude marketplace scan failed: ${msg}`);
   }
   try {
     summary.gstackProjects =
@@ -1268,10 +1249,9 @@ export async function runPackScanner(
     summary.scopes.gstackProjects = true;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[pack-scanner] gstack project association scan failed:",
-      msg,
+    gatewayLog.warn(
+      "pack-scanner",
+      `gstack project association scan failed: ${msg}`,
     );
   }
   try {
@@ -1280,20 +1260,19 @@ export async function runPackScanner(
     summary.scopes.catalogDetectors = true;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // eslint-disable-next-line no-console
-    console.warn("[pack-scanner] catalog detectors failed:", msg);
+    gatewayLog.warn("pack-scanner", `catalog detectors failed: ${msg}`);
   }
 
   const allSucceeded = Object.values(summary.scopes).every(Boolean);
   if (!allSucceeded) {
     summary.pruneSkipped = true;
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[pack-scanner] skipping prune — some detector scopes failed:",
-      Object.entries(summary.scopes)
-        .filter(([, ok]) => !ok)
-        .map(([k]) => k)
-        .join(", "),
+    const failedScopes = Object.entries(summary.scopes)
+      .filter(([, ok]) => !ok)
+      .map(([k]) => k)
+      .join(", ");
+    gatewayLog.warn(
+      "pack-scanner",
+      `skipping prune - some detector scopes failed: ${failedScopes}`,
     );
   } else {
     await pruneStaleRows(db, scanStartedAt);

@@ -240,6 +240,19 @@ test("PGlite dashboard side effects stay behind the Agent Dashboard runtime boun
   assert.doesNotMatch(windowSource, /resolveLegacyRendererPath/);
   assert.doesNotMatch(windowSource, /loadFile\(rendererPath\)/);
   assert.match(designSystemRuntimeSource(), /ipcMain\.removeHandler\(channel\)/);
+  const designSystemSource = designSystemRuntimeSource();
+  const handlerRegistrationIndex = designSystemSource.indexOf(
+    "registerIpcHandlers();",
+  );
+  const databaseReadyIndex = designSystemSource.indexOf(
+    "const agentDatabase = await agentDatabasePromise;",
+  );
+  assert.ok(handlerRegistrationIndex >= 0);
+  assert.ok(databaseReadyIndex >= 0);
+  assert.ok(
+    handlerRegistrationIndex < databaseReadyIndex,
+    "design-system DB IPC handlers must be registered before awaiting PGlite startup",
+  );
   assert.match(
     appSource,
     /stopAgentCapture\(\{ closeDesignSystem: true \}\)/,

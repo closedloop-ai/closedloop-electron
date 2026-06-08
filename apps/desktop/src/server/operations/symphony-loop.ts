@@ -213,7 +213,12 @@ export function getOverrideBinaryPaths(): BinaryPathOverrides | null {
 }
 
 export function getResolvedGitPath(): string {
-  return resolveBinaryFromLoginShellSync("git", getOverrideBinaryPaths()?.git).path;
+  const override = getOverrideBinaryPaths()?.git;
+  const resolved = resolveBinaryFromLoginShellSync("git", override);
+  if (resolved.source !== "override_invalid") {
+    return resolved.path;
+  }
+  return resolveBinaryFromLoginShellSync("git").path;
 }
 
 export function getResolvedGhPath(): string {
@@ -1990,7 +1995,12 @@ async function removeWorktreeImpl(
         `git worktree remove failed for GENERATE_PRD, falling back to fs.rm`,
       );
     }
-    await fs.rm(worktreeDir, { recursive: true, force: true });
+    await fs.rm(worktreeDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
     try {
       execSync(`${shellEscape(gitBin)} worktree prune`, {
         cwd: expandedRepoPath,
