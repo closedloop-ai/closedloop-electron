@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
-import type { createLifecycle, HookData } from "./database/lifecycle.js";
+import type { HookData } from "./agent-dashboard-db-types.js";
 
 // CLOSEDLOOP-TICKET FEA-1500: remove legacy HTTP hook listener on 4820 after
 // transport migration (FEA-1497 breaking-change discipline contract #1). The hook
@@ -20,6 +20,14 @@ const CODEX_HOOK_EVENT_PATH = "/api/hooks/codex/event";
 const PROVIDER_HINT_FIELD = "__provider";
 type HookHarness = "claude" | "codex";
 
+export interface AgentHookLifecycle {
+  processEvent(
+    hookType: string,
+    data: HookData,
+    harness: string,
+  ): boolean | Promise<boolean>;
+}
+
 /** The `{ hook_type, data }` envelope every hook handler POSTs. */
 const HookEnvelopeSchema = z.object({
   hook_type: z.string(),
@@ -28,7 +36,7 @@ const HookEnvelopeSchema = z.object({
 
 export interface AgentHookListenerOptions {
   /** The lifecycle processor that owns all DB writes. */
-  lifecycle: ReturnType<typeof createLifecycle>;
+  lifecycle: AgentHookLifecycle;
   /** Key-free diagnostic sink (gatewayLog). */
   log?: (message: string) => void;
   /**
@@ -51,10 +59,9 @@ export interface AgentHookListenerOptions {
  *
  * Every request responds 200 fail-soft so a hook never blocks an agent turn.
  * Local import is ungated — all hook events are written to the local DB
- * regardless of the sandbox directory. Sandbox enforcement is applied
- * exclusively on the cloud-sync path in AgentSessionSyncService. Provider
- * attribution is route-owned; payload-level provider hints are rejected as
- * spoofable data before lifecycle writes or live DB-change emits.
+ * regardless of the sandbox directory. Provider attribution is route-owned;
+ * payload-level provider hints are rejected as spoofable data before lifecycle
+ * writes or live DB-change emits.
  */
 export class AgentHookListener {
   private readonly options: AgentHookListenerOptions;
@@ -169,8 +176,16 @@ export class AgentHookListener {
             return;
           }
 
-          this.options.lifecycle.processEvent(hookType, data, harness);
-          this.json(res, 200, { ok: true });
+          Promise.resolve(
+            this.options.lifecycle.processEvent(hookType, data, harness),
+          )
+            .then(() => this.json(res, 200, { ok: true }))
+            .catch((error: unknown) => {
+              this.log(
+                `agent hook listener: failed to process event: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              this.json(res, 200, { ok: false });
+            });
         } catch (error) {
           // Malformed JSON or unexpected error: ack 200 (fail-soft) + log.
           this.log(

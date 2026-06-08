@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import electron from "electron";
 import type { DesktopAgentSessionsAck } from "./cloud-protocol.js";
 import { DesktopAgentSessionsAckReason } from "./cloud-protocol.js";
 import {
@@ -11,7 +9,6 @@ import {
   type AgentSessionSyncMode,
   type SyncedAgentSession,
   type SyncedAgentSessionAttribution,
-  type SyncedAgentSessionTokenUsage,
   type SyncJsonObject,
   type SyncJsonValue,
 } from "./agent-session-sync-contract.js";
@@ -21,7 +18,6 @@ import {
   readLaunchMetadata,
   type LaunchMetadata,
 } from "../server/operations/symphony-utils.js";
-import { expandHomePath } from "../shared/path-utils.js";
 import { computeTokenCost } from "../shared/token-cost.js";
 import type { BillingMode } from "../shared/billing-mode.js";
 import { resolveBillingMode } from "./billing-mode-detector.js";
@@ -53,9 +49,7 @@ export function estimateSessionPayloadBytes(session: SyncedAgentSession): number
   return Buffer.byteLength(JSON.stringify(session));
 }
 
-const { app } = electron;
-
-type SessionCursorRow = {
+export type SessionCursorRow = {
   id: string;
   updated_at: string;
 };
@@ -77,34 +71,6 @@ type SessionRow = {
   organization_id: string | null;
 };
 
-type AgentRow = {
-  id: string;
-  session_id: string;
-  name: string;
-  type: string;
-  subagent_type: string | null;
-  status: string;
-  task: string | null;
-  current_tool: string | null;
-  started_at: string;
-  updated_at: string;
-  ended_at: string | null;
-  awaiting_input_since: string | null;
-  parent_agent_id: string | null;
-  metadata: string | null;
-};
-
-type EventRow = {
-  id: number;
-  session_id: string;
-  agent_id: string | null;
-  event_type: string;
-  tool_name: string | null;
-  summary: string | null;
-  data: string | null;
-  created_at: string;
-};
-
 type TokenUsageRow = {
   session_id: string;
   model: string;
@@ -120,6 +86,18 @@ export type SessionAttributionResolverCache = {
   repoFullNameByPath: Map<string, string | null>;
 };
 
+export interface AgentSessionSyncSource {
+  listAllSessionCursorRows(): SessionCursorRow[] | Promise<SessionCursorRow[]>;
+  listUpdatedSessionCursorRows(
+    sinceUpdatedAt: string,
+  ): SessionCursorRow[] | Promise<SessionCursorRow[]>;
+  loadSyncedSessions(
+    ids: string[],
+    cache: SessionAttributionResolverCache,
+  ): SyncedAgentSession[] | Promise<SyncedAgentSession[]>;
+  close?: () => void | Promise<void>;
+}
+
 export type AgentSessionSyncTelemetryEvent = {
   outcome: "failure";
   reason: DesktopAgentSessionsAckReason;
@@ -131,17 +109,9 @@ export type AgentSessionSyncTelemetryEvent = {
 export interface AgentSessionSyncServiceOptions {
   isAgentMonitorEnabled: () => boolean;
   isRelayReady: () => boolean;
-  isChunkedSyncEnabled?: () => boolean;
-  getSandboxBaseDirectory?: () => string;
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
-  getUserDataPath?: () => string;
-  /**
-   * The optional design-system in-process DB connection. When provided, the
-   * service reads through it (no per-cycle open/close, no path resolution, no
-   * existsSync guard). When omitted or null, the service falls back to the
-   * legacy sidecar dashboard.db path from getUserDataPath.
-   */
-  getConnection?: () => DatabaseSync | null;
+  /** Live dashboard source for PGlite. */
+  getSource?: () => AgentSessionSyncSource | null;
   onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
 }
 
@@ -289,16 +259,8 @@ export class AgentSessionSyncService {
     this.syncing = true;
 
     try {
-      // The caller owns the dashboard source by mode: design-system injects an
-      // in-process connection, legacy falls back to dashboard.db on disk, and
-      // disabled mode stops this service before it reaches the source lookup.
-      const sharedDb = this.options.getConnection?.() ?? null;
-      const dbPath = sharedDb
-        ? null
-        : resolveAgentMonitorDatabasePath(this.options.getUserDataPath?.());
-      if (dbPath && !existsSync(dbPath)) {
-        return;
-      }
+      const injectedSource = this.options.getSource?.() ?? null;
+      if (!injectedSource) return;
 
       let syncMode: AgentSessionSyncMode | null = null;
       let syncIds: string[] = [];
@@ -331,13 +293,10 @@ export class AgentSessionSyncService {
         syncIds = [sessionId];
         // Skip DB access — go straight to send.
       } else {
-        const db = sharedDb ?? new DatabaseSync(dbPath!);
+        const source = injectedSource;
         try {
-          if (!sharedDb) {
-            db.exec("PRAGMA busy_timeout = 5000");
-          }
-          this.initializeBackfillQueueIfNeeded(db);
-          this.enqueueIncrementalUpdates(db);
+          await this.initializeBackfillQueueIfNeeded(source);
+          await this.enqueueIncrementalUpdates(source);
 
           const nowMs = Date.now();
           let candidateIds: string[] = [];
@@ -382,34 +341,15 @@ export class AgentSessionSyncService {
             return;
           }
 
-          const chunkedSyncEnabled = this.options.isChunkedSyncEnabled?.() ?? false;
-
-          // Load all candidate sessions from SQLite, then accumulate into the
-          // batch until adding the next session would exceed the 256 KiB cap.
-          // Sessions that individually exceed the cap are either chunked (if
-          // the feature flag is on) or skipped/dead-lettered.
-          const rawSessions = loadSyncedSessions(
-            db,
+          // Load all candidate sessions from the selected dashboard source,
+          // then accumulate into the batch until adding the next session would
+          // exceed the 256 KiB cap.
+          // Sessions that individually exceed the cap are split into chunks.
+          const rawSessions = await source.loadSyncedSessions(
             candidateIds,
             this.attributionCache,
           );
-
-          const sandboxBase = this.options.getSandboxBaseDirectory?.() ?? "";
-          const sandboxSkipped: string[] = [];
-          const candidateSessions = rawSessions.filter((s) => {
-            if (isSessionInSandbox(s.cwd, sandboxBase)) {
-              return true;
-            }
-            sandboxSkipped.push(s.externalSessionId);
-            return false;
-          });
-          if (sandboxSkipped.length > 0) {
-            this.dequeue(syncMode, sandboxSkipped);
-            gatewayLog.debug(
-              TAG,
-              `filtered ${sandboxSkipped.length} session(s) outside sandbox`,
-            );
-          }
+          const candidateSessions = rawSessions;
 
           if (candidateSessions.length === 0) {
             this.dequeue(syncMode, candidateIds);
@@ -417,40 +357,28 @@ export class AgentSessionSyncService {
           }
 
           const sessions: SyncedAgentSession[] = [];
-          const skippedOversized: string[] = [];
           syncIds = [];
           for (const session of candidateSessions) {
             const sanitized = sanitizeSessionForSync(session);
             const sessionBytes = estimateSessionPayloadBytes(sanitized);
             if (sessionBytes > SESSION_PAYLOAD_BYTE_CAP && sessions.length === 0) {
-              if (chunkedSyncEnabled) {
-                const chunks = chunkOversizedSession(sanitized, SESSION_PAYLOAD_BYTE_CAP);
-                const first = chunks.shift()!;
-                if (chunks.length > 0) {
-                  this.pendingChunks = {
-                    sessionId: sanitized.externalSessionId,
-                    syncMode,
-                    chunks,
-                  };
-                }
-                sessions.push(first);
-                syncIds.push(sanitized.externalSessionId);
-                accumulatedBytes += estimateSessionPayloadBytes(first);
-                gatewayLog.info(
-                  TAG,
-                  `chunking oversized session ${sanitized.externalSessionId} (~${formatBytes(sessionBytes)}) into ` +
-                    `${chunks.length + 1} chunks of ≤${formatBytes(SESSION_PAYLOAD_BYTE_CAP)}`,
-                );
-              } else {
-                skippedOversized.push(sanitized.externalSessionId);
-                this.deadLetteredIds.add(sanitized.externalSessionId);
-                gatewayLog.warn(
-                  TAG,
-                  `skipping oversized session ${sanitized.externalSessionId} (~${formatBytes(sessionBytes)}) — ` +
-                    `exceeds ${formatBytes(SESSION_PAYLOAD_BYTE_CAP)} payload cap; ` +
-                    `enable chunked session sync or wait for server-side support`,
-                );
+              const chunks = chunkOversizedSession(sanitized, SESSION_PAYLOAD_BYTE_CAP);
+              const first = chunks.shift()!;
+              if (chunks.length > 0) {
+                this.pendingChunks = {
+                  sessionId: sanitized.externalSessionId,
+                  syncMode,
+                  chunks,
+                };
               }
+              sessions.push(first);
+              syncIds.push(sanitized.externalSessionId);
+              accumulatedBytes += estimateSessionPayloadBytes(first);
+              gatewayLog.info(
+                TAG,
+                `chunking oversized session ${sanitized.externalSessionId} (~${formatBytes(sessionBytes)}) into ` +
+                  `${chunks.length + 1} chunks of <=${formatBytes(SESSION_PAYLOAD_BYTE_CAP)}`,
+              );
               continue;
             }
             if (
@@ -463,10 +391,6 @@ export class AgentSessionSyncService {
             syncIds.push(sanitized.externalSessionId);
             accumulatedBytes += sessionBytes;
           }
-          if (skippedOversized.length > 0) {
-            this.dequeue(syncMode, skippedOversized);
-          }
-
           batch = {
             schemaVersion: AGENT_SESSION_SYNC_SCHEMA_VERSION,
             batchId: randomUUID(),
@@ -475,9 +399,7 @@ export class AgentSessionSyncService {
             sessions,
           };
         } finally {
-          if (!sharedDb) {
-            db.close();
-          }
+          await source.close?.();
         }
       }
 
@@ -511,12 +433,14 @@ export class AgentSessionSyncService {
     }
   }
 
-  private initializeBackfillQueueIfNeeded(db: DatabaseSync): void {
+  private async initializeBackfillQueueIfNeeded(
+    source: AgentSessionSyncSource,
+  ): Promise<void> {
     if (this.observedTopUpdatedAt !== null) {
       return;
     }
 
-    const rows = listAllSessionCursorRows(db);
+    const rows = await source.listAllSessionCursorRows();
     if (rows.length === 0) {
       return;
     }
@@ -540,14 +464,16 @@ export class AgentSessionSyncService {
     );
   }
 
-  private enqueueIncrementalUpdates(db: DatabaseSync): void {
+  private async enqueueIncrementalUpdates(
+    source: AgentSessionSyncSource,
+  ): Promise<void> {
     if (!this.observedTopUpdatedAt) {
       return;
     }
 
     const previousTopUpdatedAt = this.observedTopUpdatedAt;
     const previousTopIds = new Set(this.observedIdsAtTopUpdatedAt);
-    const rows = listUpdatedSessionCursorRows(db, previousTopUpdatedAt);
+    const rows = await source.listUpdatedSessionCursorRows(previousTopUpdatedAt);
     if (rows.length === 0) {
       return;
     }
@@ -645,7 +571,7 @@ export class AgentSessionSyncService {
     // chunk sequences are not useful without server-side reassembly.
     //
     // FEA-1461: the next retry will re-fetch + re-chunk the source session
-    // from SQLite. That re-chunk work is bounded for transient failures
+    // from the dashboard sync source. That re-chunk work is bounded for transient failures
     // (rate_limited) by the per-session backoff added below — the same
     // session is not re-attempted within RATE_LIMIT_BACKOFF_MS — and by the
     // MAX_CONSECUTIVE_RATE_LIMITED dead-letter trip. True resume-from-chunk-N
@@ -798,27 +724,6 @@ export class AgentSessionSyncService {
   }
 }
 
-export function isSessionInSandbox(
-  cwd: string | null | undefined,
-  sandboxBaseDirectory: string | null | undefined,
-): boolean {
-  if (!sandboxBaseDirectory) {
-    return false;
-  }
-  if (!cwd) {
-    return false;
-  }
-  const normalizedCwd = path.resolve(expandHomePath(cwd));
-  const normalizedSandbox = path.resolve(expandHomePath(sandboxBaseDirectory));
-  if (normalizedCwd === normalizedSandbox) {
-    return true;
-  }
-  const prefix = normalizedSandbox.endsWith(path.sep)
-    ? normalizedSandbox
-    : normalizedSandbox + path.sep;
-  return normalizedCwd.startsWith(prefix);
-}
-
 export function sanitizeSessionForSync(
   session: SyncedAgentSession,
 ): SyncedAgentSession {
@@ -830,15 +735,25 @@ export function sanitizeSessionForSync(
     })),
     events: session.events.map((event) => ({
       ...event,
+      summary: null,
       data: stripDataContent(event.data),
     })),
   };
 }
 
 const STRIPPED_LEAF_KEYS = new Set([
-  "prompt", "content", "stdout", "stderr",
-  "text", "output", "reasoning",
-  "old_string", "new_string", "patch", "command", "arguments",
+  "arguments",
+  "command",
+  "content",
+  "new_string",
+  "old_string",
+  "output",
+  "patch",
+  "prompt",
+  "reasoning",
+  "stderr",
+  "stdout",
+  "text",
 ]);
 
 function stripDataContent(data: SyncJsonValue | undefined): SyncJsonValue | undefined {
@@ -862,40 +777,6 @@ function stripDataContent(data: SyncJsonValue | undefined): SyncJsonValue | unde
   return Object.keys(rest).length > 0 ? rest : null;
 }
 
-export function resolveAgentMonitorDatabasePath(
-  userDataPath = app.getPath("userData"),
-): string {
-  return path.join(userDataPath, "agent-monitor", "dashboard.db");
-}
-
-export function listAllSessionCursorRows(db: DatabaseSync): SessionCursorRow[] {
-  return db
-    .prepare(
-      `
-        SELECT id, updated_at
-        FROM sessions
-        ORDER BY updated_at DESC, id DESC
-      `,
-    )
-    .all() as SessionCursorRow[];
-}
-
-export function listUpdatedSessionCursorRows(
-  db: DatabaseSync,
-  sinceUpdatedAt: string,
-): SessionCursorRow[] {
-  return db
-    .prepare(
-      `
-        SELECT id, updated_at
-        FROM sessions
-        WHERE updated_at >= ?
-        ORDER BY updated_at DESC, id DESC
-      `,
-    )
-    .all(sinceUpdatedAt) as SessionCursorRow[];
-}
-
 function collectIdsAtTimestamp(
   rows: SessionCursorRow[],
   updatedAt: string,
@@ -908,181 +789,6 @@ function collectIdsAtTimestamp(
     ids.add(row.id);
   }
   return ids;
-}
-
-export function loadSyncedSessions(
-  db: DatabaseSync,
-  ids: string[],
-  cache: SessionAttributionResolverCache = {
-    attributionByCwd: new Map(),
-    launchMetadataRootByCwd: new Map(),
-    repoFullNameByPath: new Map(),
-  },
-): SyncedAgentSession[] {
-  if (ids.length === 0) {
-    return [];
-  }
-
-  const hasIdentityCols =
-    columnExists(db, "sessions", "user_id")
-    && columnExists(db, "sessions", "organization_id");
-  const identityColsSql = hasIdentityCols
-    ? "user_id, organization_id"
-    : "NULL AS user_id, NULL AS organization_id";
-  const sessionRows = selectRowsByIds<SessionRow>(
-    db,
-    `
-      SELECT
-        id,
-        name,
-        status,
-        cwd,
-        model,
-        started_at,
-        updated_at,
-        ended_at,
-        awaiting_input_since,
-        metadata,
-        harness,
-        billing_mode,
-        ${identityColsSql}
-      FROM sessions
-      WHERE id IN (__IDS__)
-    `,
-    ids,
-  );
-  const agentRows = selectRowsByIds<AgentRow>(
-    db,
-    `
-      SELECT
-        id,
-        session_id,
-        name,
-        type,
-        subagent_type,
-        status,
-        task,
-        current_tool,
-        started_at,
-        updated_at,
-        ended_at,
-        awaiting_input_since,
-        parent_agent_id,
-        metadata
-      FROM agents
-      WHERE session_id IN (__IDS__)
-      ORDER BY session_id ASC, started_at ASC, id ASC
-    `,
-    ids,
-  );
-  const eventRows = selectRowsByIds<EventRow>(
-    db,
-    `
-      SELECT
-        id,
-        session_id,
-        agent_id,
-        event_type,
-        tool_name,
-        summary,
-        data,
-        created_at
-      FROM events
-      WHERE session_id IN (__IDS__)
-      ORDER BY session_id ASC, created_at ASC, id ASC
-    `,
-    ids,
-  );
-  const tokenRows = selectRowsByIds<TokenUsageRow>(
-    db,
-    `
-      SELECT
-        session_id,
-        model,
-        input_tokens AS input_tokens,
-        output_tokens AS output_tokens,
-        cache_read_tokens AS cache_read_tokens,
-        cache_write_tokens AS cache_write_tokens
-      FROM token_usage
-      WHERE session_id IN (__IDS__)
-      ORDER BY session_id ASC, model ASC
-    `,
-    ids,
-  );
-
-  const sessionsById = new Map(sessionRows.map((row) => [row.id, row]));
-  const agentsBySessionId = groupRowsBySessionId(agentRows);
-  const eventsBySessionId = groupRowsBySessionId(eventRows);
-  const tokenUsageBySessionId = groupRowsBySessionId(tokenRows);
-
-  return ids.flatMap((id) => {
-    const row = sessionsById.get(id);
-    if (!row) {
-      return [];
-    }
-
-    const attribution = resolveSessionAttribution(row.cwd, cache);
-    const tokenUsageByModel: SyncedAgentSessionTokenUsage[] = (
-      tokenUsageBySessionId.get(id) ?? []
-    ).map((tokenRow) => {
-      const estimatedCostUsd = estimateTokenUsageCostUsd(tokenRow);
-      return {
-        model: tokenRow.model,
-        inputTokens: tokenRow.input_tokens,
-        outputTokens: tokenRow.output_tokens,
-        cacheReadTokens: tokenRow.cache_read_tokens,
-        cacheWriteTokens: tokenRow.cache_write_tokens,
-        // Omit entirely when the model is not priced — the contract field is
-        // optional, so an absent value renders as "—" rather than a silent $0.
-        ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
-      };
-    });
-
-    return [
-      {
-        externalSessionId: row.id,
-        name: row.name,
-        status: row.status,
-        harness: row.harness,
-        billingMode: resolveBillingModeForRow(row),
-        cwd: row.cwd,
-        model: row.model,
-        startedAt: row.started_at,
-        updatedAt: row.updated_at,
-        endedAt: row.ended_at,
-        awaitingInputSince: row.awaiting_input_since,
-        metadata: parseJsonObjectText(row.metadata),
-        ...(attribution ? { attribution } : {}),
-        ...(row.user_id != null ? { userId: row.user_id } : {}),
-        ...(row.organization_id != null ? { organizationId: row.organization_id } : {}),
-        agents: (agentsBySessionId.get(id) ?? []).map((agentRow) => ({
-          externalAgentId: agentRow.id,
-          name: agentRow.name,
-          type: agentRow.type,
-          subagentType: agentRow.subagent_type,
-          status: agentRow.status,
-          task: agentRow.task,
-          currentTool: agentRow.current_tool,
-          startedAt: agentRow.started_at,
-          updatedAt: agentRow.updated_at,
-          endedAt: agentRow.ended_at,
-          awaitingInputSince: agentRow.awaiting_input_since,
-          parentExternalAgentId: agentRow.parent_agent_id,
-          metadata: parseJsonObjectText(agentRow.metadata),
-        })),
-        events: (eventsBySessionId.get(id) ?? []).map((eventRow) => ({
-          externalEventId: String(eventRow.id),
-          agentExternalId: eventRow.agent_id,
-          eventType: eventRow.event_type,
-          toolName: eventRow.tool_name,
-          summary: eventRow.summary,
-          data: parseJsonValueText(eventRow.data),
-          createdAt: eventRow.created_at,
-        })),
-        tokenUsageByModel,
-      },
-    ];
-  });
 }
 
 /**
@@ -1113,51 +819,17 @@ export function estimateTokenUsageCostUsd(
  * 'unknown') by best-effort detecting from the live desktop environment. A
  * stored, definite mode always wins over re-detection.
  */
-export function resolveBillingModeForRow(row: SessionRow): BillingMode {
+export function resolveBillingModeForRow(
+  row: Pick<SessionRow, "billing_mode" | "harness">,
+): BillingMode {
   return resolveBillingMode({
     billingMode: row.billing_mode,
     harness: row.harness,
   });
 }
 
-function columnExists(
-  db: DatabaseSync,
-  table: string,
-  column: string,
-): boolean {
-  const rows = db
-    .prepare(`PRAGMA table_info(${table})`)
-    .all() as Array<{ name: string }>;
-  return rows.some((row) => row.name === column);
-}
 
-function selectRowsByIds<T>(
-  db: DatabaseSync,
-  sql: string,
-  ids: string[],
-): T[] {
-  const placeholders = ids.map(() => "?").join(", ");
-  return db
-    .prepare(sql.replace("__IDS__", placeholders))
-    .all(...ids) as T[];
-}
-
-function groupRowsBySessionId<
-  T extends { session_id: string },
->(rows: T[]): Map<string, T[]> {
-  const grouped = new Map<string, T[]>();
-  for (const row of rows) {
-    const existing = grouped.get(row.session_id);
-    if (existing) {
-      existing.push(row);
-    } else {
-      grouped.set(row.session_id, [row]);
-    }
-  }
-  return grouped;
-}
-
-function resolveSessionAttribution(
+export function resolveSessionAttribution(
   cwd: string | null,
   cache: SessionAttributionResolverCache,
 ): SyncedAgentSessionAttribution | undefined {
@@ -1238,7 +910,7 @@ function findLaunchMetadataRoot(
   }
 }
 
-function parseJsonValueText(value: string | null): SyncJsonValue | null {
+export function parseJsonValueText(value: string | null): SyncJsonValue | null {
   if (!value || value.trim().length === 0) {
     return null;
   }
@@ -1250,7 +922,7 @@ function parseJsonValueText(value: string | null): SyncJsonValue | null {
   }
 }
 
-function parseJsonObjectText(value: string | null): SyncJsonObject | null {
+export function parseJsonObjectText(value: string | null): SyncJsonObject | null {
   const parsed = parseJsonValueText(value);
   return isSyncJsonObject(parsed) ? parsed : null;
 }

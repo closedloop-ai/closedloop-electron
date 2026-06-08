@@ -1,8 +1,24 @@
 import { useState, useEffect } from "react";
+import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
 import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
+import { Input } from "@closedloop-ai/design-system/components/ui/input";
+import { Switch } from "@closedloop-ai/design-system/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@closedloop-ai/design-system/components/ui/tabs";
 
 type SettingsTab = "relay-gateway" | "security" | "policies" | "binary-paths" | "labs";
+
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+  { id: "relay-gateway", label: "Relay / Gateway" },
+  { id: "security", label: "Security" },
+  { id: "policies", label: "Policies" },
+  { id: "binary-paths", label: "CLI Tools" },
+  { id: "labs", label: "Labs" },
+];
+
+function isSettingsTab(value: string): value is SettingsTab {
+  return SETTINGS_TABS.some((item) => item.id === value);
+}
 
 /** Renderer view of ApiKeyStore.getStatus() (src/main/api-key-store.ts). */
 interface ApiKeyStatusView {
@@ -21,45 +37,51 @@ export function SettingsPanel() {
   }, []);
 
   useEffect(() => {
-    const handler = (e: CustomEvent<string>) => setTab(e.detail as SettingsTab);
+    const handler = (e: CustomEvent<string>) => {
+      if (isSettingsTab(e.detail)) {
+        setTab(e.detail);
+      }
+    };
     window.addEventListener("desktop:navigate-settings-tab", handler as EventListener);
     return () => window.removeEventListener("desktop:navigate-settings-tab", handler as EventListener);
   }, []);
-
-  const tabs: { id: SettingsTab; label: string }[] = [
-    { id: "relay-gateway", label: "Relay / Gateway" },
-    { id: "security", label: "Security" },
-    { id: "policies", label: "Policies" },
-    { id: "binary-paths", label: "CLI Tools" },
-    { id: "labs", label: "Labs" },
-  ];
 
   return (
     <div className="p-6 space-y-4">
       <h2 className="text-lg font-semibold text-[var(--foreground)]">Settings</h2>
 
-      <div className="flex gap-1 border-b">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={`px-3 py-2 text-sm border-b-2 transition-colors ${
-              tab === t.id
-                ? "border-[var(--primary)] text-[var(--foreground)] font-medium"
-                : "border-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          if (isSettingsTab(value)) {
+            setTab(value);
+          }
+        }}
+      >
+        <TabsList>
+          {SETTINGS_TABS.map((t) => (
+            <TabsTrigger key={t.id} value={t.id}>
+              {t.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-      {tab === "relay-gateway" && <RelayGatewayTab settings={settings} />}
-      {tab === "security" && <SecurityTab settings={settings} />}
-      {tab === "policies" && <PoliciesTab settings={settings} />}
-      {tab === "binary-paths" && <BinaryPathsTab />}
-      {tab === "labs" && <LabsTab settings={settings} onSettingsChange={setSettings} />}
+        <TabsContent value="relay-gateway">
+          <RelayGatewayTab settings={settings} />
+        </TabsContent>
+        <TabsContent value="security">
+          <SecurityTab settings={settings} />
+        </TabsContent>
+        <TabsContent value="policies">
+          <PoliciesTab settings={settings} />
+        </TabsContent>
+        <TabsContent value="binary-paths">
+          <BinaryPathsTab />
+        </TabsContent>
+        <TabsContent value="labs">
+          <LabsTab settings={settings} onSettingsChange={setSettings} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -79,26 +101,22 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
     window.desktopApi.getAgentMonitorCodexHooksOptIn().then((c) => setCodexOptIn(c as boolean));
   }, []);
 
-  const handlePauseToggle = async () => {
-    const next = !paused;
+  const handlePauseToggle = async (next: boolean) => {
     await window.desktopApi.setCloudCommandsPaused(next);
     setPaused(next);
   };
 
-  const handleConnectionToggle = async () => {
-    const next = !connected;
+  const handleConnectionToggle = async (next: boolean) => {
     await window.desktopApi.setCloudConnectionEnabled(next);
     setConnected(next);
   };
 
-  const handleHooksToggle = async () => {
-    const next = !hooksEnabled;
+  const handleHooksToggle = async (next: boolean) => {
     const result = await window.desktopApi.setAgentMonitorHooksEnabled(next);
     setHooksEnabled(result.enabled);
   };
 
-  const handleCodexToggle = async () => {
-    const next = !codexOptIn;
+  const handleCodexToggle = async (next: boolean) => {
     const result = await window.desktopApi.setAgentMonitorCodexHooksOptIn(next);
     if (result.ok) {
       setCodexOptIn(next);
@@ -154,10 +172,7 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
             <p className="text-sm font-medium">Pause Incoming Commands</p>
             <p className="text-xs text-[var(--muted-foreground)]">Pause processing of remote commands</p>
           </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" checked={paused} onChange={handlePauseToggle} className="sr-only peer" />
-            <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)]" />
-          </label>
+          <Switch checked={paused} onCheckedChange={handlePauseToggle} />
         </div>
 
         <div className="flex items-center justify-between">
@@ -165,10 +180,7 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
             <p className="text-sm font-medium">Cloud Connection</p>
             <p className="text-xs text-[var(--muted-foreground)]">Enable cloud relay connection</p>
           </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" checked={connected} onChange={handleConnectionToggle} className="sr-only peer" />
-            <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)]" />
-          </label>
+          <Switch checked={connected} onCheckedChange={handleConnectionToggle} />
         </div>
 
         <div className="flex items-center justify-between">
@@ -176,10 +188,7 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
             <p className="text-sm font-medium">Claude Code Session Tracking</p>
             <p className="text-xs text-[var(--muted-foreground)]">Receive live session events from Claude Code</p>
           </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" checked={hooksEnabled} onChange={handleHooksToggle} className="sr-only peer" />
-            <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)]" />
-          </label>
+          <Switch checked={hooksEnabled} onCheckedChange={handleHooksToggle} />
         </div>
 
         <div className="flex items-center justify-between">
@@ -189,10 +198,7 @@ function RelayGatewayTab({ settings }: { settings: Record<string, unknown> | nul
               Also track OpenAI Codex sessions via {"~/.codex/hooks.json"} (requires Claude Code tracking on; enable Codex hooks in {"~/.codex/config.toml"})
             </p>
           </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" checked={codexOptIn} onChange={handleCodexToggle} disabled={!hooksEnabled} className="sr-only peer" />
-            <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)] peer-disabled:opacity-40" />
-          </label>
+          <Switch checked={codexOptIn} onCheckedChange={handleCodexToggle} disabled={!hooksEnabled} />
         </div>
       </div>
     </div>
@@ -216,8 +222,7 @@ function SecurityTab({ settings }: { settings: Record<string, unknown> | null })
     void refreshApiKeyStatus();
   }, []);
 
-  const handleDangerousToggle = async () => {
-    const next = !dangerousAutoApprove;
+  const handleDangerousToggle = async (next: boolean) => {
     await window.desktopApi.setDangerousAutoApprove(next);
     setDangerousAutoApprove(next);
   };
@@ -278,14 +283,14 @@ function SecurityTab({ settings }: { settings: Record<string, unknown> | null })
                 : "Set a ClosedLoop API key (starts with sk_live_). It is stored encrypted at rest."}
             </p>
             <div className="flex gap-2">
-              <input
+              <Input
                 type="password"
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") handleSetApiKey(); }}
                 placeholder="sk_live_..."
                 autoComplete="off"
-                className="flex-1 text-xs font-mono bg-[var(--input)] border rounded px-2 py-1 text-[var(--foreground)]"
+                className="flex-1 font-mono text-xs"
               />
               <Button
                 variant="outline"
@@ -315,10 +320,11 @@ function SecurityTab({ settings }: { settings: Record<string, unknown> | null })
               <p className="text-sm font-medium text-[var(--destructive)]">Dangerous Auto-Approve</p>
               <p className="text-xs text-[var(--muted-foreground)]">Automatically approve all commands — use with extreme caution</p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" checked={dangerousAutoApprove} onChange={handleDangerousToggle} className="sr-only peer" />
-              <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--destructive)]" />
-            </label>
+            <Switch
+              checked={dangerousAutoApprove}
+              onCheckedChange={handleDangerousToggle}
+              className="data-[state=checked]:bg-[var(--destructive)]"
+            />
           </div>
         </CardContent>
       </Card>
@@ -416,13 +422,13 @@ function BinaryPathsTab() {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">{tool}</p>
                   {editing === tool ? (
-                    <input
+                    <Input
                       type="text"
                       value={editValue}
                       onChange={(e) => setEditValue(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter") handleSave(tool); if (e.key === "Escape") setEditing(null); }}
                       autoFocus
-                      className="mt-1 w-full text-xs font-mono bg-[var(--input)] border rounded px-2 py-1 text-[var(--foreground)]"
+                      className="mt-1 w-full font-mono text-xs"
                       placeholder={`/usr/bin/${tool}`}
                     />
                   ) : (
@@ -451,8 +457,7 @@ function BinaryPathsTab() {
 }
 
 const LAB_FLAGS: { key: string; label: string; description: string; category: string; requiresRestart?: boolean }[] = [
-  { key: "agentMonitorEnabled", label: "Agent Dashboard", description: "Enable the legacy sidecar-backed Agent Dashboard.", category: "Monitoring", requiresRestart: true },
-  { key: "agentDashboardDesignSystemEnabled", label: "Agent Dashboard Design System", description: "Use the in-process design-system dashboard instead of the legacy dashboard.", category: "Labs", requiresRestart: true },
+  { key: "agentMonitorEnabled", label: "Agent Dashboard", description: "Enable the local PGlite-backed Agent Dashboard.", category: "Monitoring", requiresRestart: true },
   { key: "planExtractionEnabled", label: "Plan Extraction", description: "Enable Plans / plan extraction UI in the Agent Dashboard.", category: "Monitoring" },
   { key: "commandSigningEnforcementEnabled", label: "Command Signing Enforcement", description: "Require ED25519 signatures on browser commands.", category: "Security", requiresRestart: true },
   { key: "verboseLogging", label: "Verbose Logging", description: "Enable verbose gateway logging for debugging.", category: "Debugging" },
@@ -489,23 +494,19 @@ function LabsTab({ settings, onSettingsChange }: { settings: Record<string, unkn
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <p className="text-sm font-medium">{flag.label}</p>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--muted)] text-[var(--muted-foreground)]">{flag.category}</span>
+                      <Badge variant="outline" className="text-[10px]">{flag.category}</Badge>
                     </div>
                     <p className="text-xs text-[var(--muted-foreground)] mt-0.5">{flag.description}</p>
                     {flag.requiresRestart && (
                       <p className="text-[10px] text-[var(--warning-foreground)] mt-0.5">Requires restart</p>
                     )}
                   </div>
-                  <label className="relative inline-flex items-center cursor-pointer ml-3 shrink-0">
-                    <input
-                      type="checkbox"
-                      checked={value}
-                      onChange={() => handleToggle(flag.key, value)}
-                      disabled={saving === flag.key}
-                      className="sr-only peer"
-                    />
-                    <div className="w-9 h-5 bg-[var(--muted)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--primary)]" />
-                  </label>
+                  <Switch
+                    checked={value}
+                    onCheckedChange={() => handleToggle(flag.key, value)}
+                    disabled={saving === flag.key}
+                    className="ml-3 shrink-0"
+                  />
                 </div>
               );
             })}

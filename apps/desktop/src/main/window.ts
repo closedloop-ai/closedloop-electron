@@ -1,8 +1,7 @@
-import { app, BrowserWindow, protocol, shell } from "electron";
+import { BrowserWindow, protocol, shell } from "electron";
 import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
-import type { AgentDashboardMode } from "./agent-dashboard-mode.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,20 +50,6 @@ function registerAppProtocol(): void {
     return serveAppProtocolAsset(request);
   });
   appProtocolRegistered = true;
-}
-
-function unregisterAppProtocol(): void {
-  if (!appProtocolRegistered) {
-    return;
-  }
-
-  const protocolWithUnhandle = protocol as typeof protocol & {
-    unhandle?: (scheme: string) => void;
-  };
-  if (typeof protocolWithUnhandle.unhandle === "function") {
-    protocolWithUnhandle.unhandle(APP_PROTOCOL);
-  }
-  appProtocolRegistered = false;
 }
 
 function serveAppProtocolAsset(request: Request): Response {
@@ -153,11 +138,6 @@ export class DesktopWindow {
   private disposing = false;
   private quitting = false;
   private allowedRendererUrl: string | null = null;
-  private agentDashboardMode: AgentDashboardMode;
-
-  constructor(options: { agentDashboardMode: AgentDashboardMode }) {
-    this.agentDashboardMode = options.agentDashboardMode;
-  }
 
   init(): void {
     if (this.browserWindow) {
@@ -174,10 +154,7 @@ export class DesktopWindow {
         contextIsolation: true,
         sandbox: false,
         preload: this.resolvePreloadPath(),
-        additionalArguments:
-          this.agentDashboardMode === "design-system"
-            ? ["--closedloop-agent-dashboard-design-system"]
-            : [],
+        additionalArguments: ["--closedloop-agent-dashboard-design-system"],
       },
     });
     this.browserWindow.once("ready-to-show", () => {
@@ -195,35 +172,7 @@ export class DesktopWindow {
     void this.loadContent();
   }
 
-  /**
-   * Recreate the BrowserWindow with the preload and renderer target for the
-   * requested Agent Dashboard mode. Electron preloads are fixed at window
-   * creation time, so runtime availability disable must replace the window
-   * instead of only navigating the existing design-system renderer.
-   */
-  reloadForAgentDashboardMode(agentDashboardMode: AgentDashboardMode): void {
-    const wasVisible = this.browserWindow?.isVisible() ?? false;
-    this.agentDashboardMode = agentDashboardMode;
-
-    if (this.browserWindow) {
-      this.dispose();
-    }
-
-    this.init();
-    if (wasVisible) {
-      this.show();
-    }
-  }
-
   private async loadContent(): Promise<void> {
-    if (this.agentDashboardMode !== "design-system") {
-      unregisterAppProtocol();
-      const rendererPath = resolveLegacyRendererPath();
-      this.allowRendererUrl(pathToFileURL(rendererPath).toString());
-      await this.browserWindow!.loadFile(rendererPath);
-      return;
-    }
-
     registerAppProtocol();
     this.allowRendererUrl(DESIGN_RENDERER_URL);
     await this.browserWindow!.loadURL(DESIGN_RENDERER_URL);
@@ -264,12 +213,7 @@ export class DesktopWindow {
   }
 
   private resolvePreloadPath(): string {
-    return path.join(
-      __dirname,
-      this.agentDashboardMode === "design-system"
-        ? "preload-design-system.js"
-        : "preload.js",
-    );
+    return path.join(__dirname, "preload-design-system.js");
   }
 
   getWindow(): BrowserWindow | null {
@@ -315,18 +259,4 @@ function isAllowedExternalUrl(url: string): boolean {
 function isPathInside(candidate: string, root: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function resolveLegacyRendererPath(): string {
-  if (app.isPackaged) {
-    return path.join(__dirname, "..", "..", "src", "renderer", "index.html");
-  }
-
-  const cwd = process.cwd();
-  const inDesktopCwdPath = path.join(cwd, "src", "renderer", "index.html");
-  if (existsSync(inDesktopCwdPath)) {
-    return inDesktopCwdPath;
-  }
-
-  return path.join(cwd, "apps", "desktop", "src", "renderer", "index.html");
 }

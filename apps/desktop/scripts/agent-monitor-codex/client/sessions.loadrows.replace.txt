@@ -1,4 +1,0 @@
-        let rows = res.sessions;
-        rows = rows.filter(isSessionAwaitingInput);
-        setTotal(rows.length);
-        setSessions(rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));

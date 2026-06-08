@@ -1,3 +1,4 @@
+import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import type { NavId } from "../../App";
 
 interface NavItem {
@@ -13,6 +14,12 @@ const NAV_ITEMS: NavItem[] = [
   { id: "activity", label: "Activity", icon: "activity", section: "agent" },
   { id: "analytics", label: "Analytics", icon: "analytics", section: "agent" },
   { id: "workflows", label: "Workflows", icon: "workflows", section: "agent" },
+  { id: "packs", label: "Packs", icon: "package", section: "agent" },
+  { id: "skills", label: "Skills", icon: "sparkles", section: "agent" },
+  { id: "tools", label: "Tools", icon: "wrench", section: "agent" },
+  { id: "subagents", label: "SubAgents", icon: "bot", section: "agent" },
+  { id: "plans", label: "Plans", icon: "clipboard", section: "agent" },
+  { id: "pull-requests", label: "Pull Requests", icon: "git-pull-request", section: "agent" },
   { id: "approvals", label: "Approvals", icon: "shield", section: "gateway" },
   { id: "requests", label: "Requests", icon: "inbox", section: "gateway" },
   { id: "diagnostics", label: "Diagnostics", icon: "stethoscope", section: "gateway" },
@@ -26,6 +33,12 @@ const SVG_ICONS: Record<string, string> = {
   activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
   analytics: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
   workflows: '<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>',
+  package: '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  sparkles: '<path d="M9.94 14.56a1.31 1.31 0 0 0 0-2.12L7.7 10.2a1.31 1.31 0 0 0-2.12 0L3.34 12.44a1.31 1.31 0 0 0 0 2.12l2.24 2.24a1.31 1.31 0 0 0 2.12 0Z"/><path d="M17 2v4"/><path d="M19 4h-4"/><path d="M18 13v6"/><path d="M21 16h-6"/>',
+  wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"/>',
+  bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+  clipboard: '<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M8 12h8"/><path d="M8 16h6"/>',
+  "git-pull-request": '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',
   shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
   inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   stethoscope: '<path d="M11 2v2"/><path d="M5 2v2"/><path d="M5 3H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/>',
@@ -35,8 +48,8 @@ const SVG_ICONS: Record<string, string> = {
 function NavIcon({ name }: { name: string }) {
   const paths = SVG_ICONS[name] || "";
   return (
-    <span className="shrink-0 size-[18px] text-current opacity-70">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-full">
+    <span className="shrink-0 text-current opacity-70">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
         <g dangerouslySetInnerHTML={{ __html: paths }} />
       </svg>
     </span>
@@ -71,11 +84,12 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)] px-2 pb-1">Agents</div>
         )}
         {agentItems.map((item) => (
-          <button
+          <Button
             key={item.id}
             type="button"
+            variant="ghost"
             onClick={() => onNavigate(item.id)}
-            className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-sm transition-colors ${
+            className={`h-auto w-full justify-start gap-2.5 px-2 py-1.5 text-sm transition-colors ${
               activeNav === item.id
                 ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)] font-medium"
                 : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]/60"
@@ -84,7 +98,7 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           >
             <NavIcon name={item.icon} />
             {!collapsed && <span className="truncate">{item.label}</span>}
-          </button>
+          </Button>
         ))}
 
         {collapsed ? (
@@ -93,11 +107,12 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)] px-2 pt-3 pb-1">Gateway</div>
         )}
         {gatewayItems.map((item) => (
-          <button
+          <Button
             key={item.id}
             type="button"
+            variant="ghost"
             onClick={() => onNavigate(item.id)}
-            className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-sm transition-colors ${
+            className={`h-auto w-full justify-start gap-2.5 px-2 py-1.5 text-sm transition-colors ${
               activeNav === item.id
                 ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)] font-medium"
                 : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]/60"
@@ -106,7 +121,7 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           >
             <NavIcon name={item.icon} />
             {!collapsed && <span className="truncate">{item.label}</span>}
-          </button>
+          </Button>
         ))}
       </nav>
 

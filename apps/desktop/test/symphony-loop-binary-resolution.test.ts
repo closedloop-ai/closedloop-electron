@@ -102,6 +102,18 @@ describe("symphony-loop binary wrappers", () => {
     });
   });
 
+  test("getResolvedGitPath falls back when the configured override is invalid", () => {
+    const { paths, env } = setupFakeLoginShellBinaries();
+
+    withShellPathEnvForTest(env, () => {
+      configureBinaryPathsResolver(() => ({
+        git: path.join(makeTempDir("symphony-loop-missing-git-"), "git"),
+      }));
+
+      assert.equal(getResolvedGitPath(), paths.git);
+    });
+  });
+
   test("getResolvedClaudePath matches the async resolver path", async () => {
     const { paths, env } = setupFakeLoginShellBinaries();
 

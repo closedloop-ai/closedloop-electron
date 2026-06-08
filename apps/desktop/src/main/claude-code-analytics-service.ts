@@ -17,10 +17,9 @@
  * Lives entirely in desktop-main and depends on the Anthropic Admin key store
  * through a deliberately minimal reader interface (getKey/getStatus only — ISP):
  * it reads the key ONLY to construct the outbound client (which places it in
- * request headers) and never logs it, never returns it over IPC, and never hands
- * it to the sidecar. The per-user data it returns (emails) is org billing data
- * that crosses IPC to the trusted host renderer only — never the sandboxed
- * sidecar iframe.
+ * request headers), never logs it, and never returns it over IPC. The per-user
+ * data it returns (emails) is org billing data that crosses IPC to the trusted
+ * host renderer only.
  */
 import type { AdminKeyStatus } from "./admin-key-store.js";
 import {

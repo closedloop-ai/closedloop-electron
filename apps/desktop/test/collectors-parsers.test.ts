@@ -15,9 +15,19 @@ import { test } from "node:test";
 
 import { workspacePathFromUri } from "../src/main/collectors/copilot/copilot-home.js";
 import { parseChatSessionFile } from "../src/main/collectors/copilot/copilot-parser.js";
+import { parseRolloutFile } from "../src/main/collectors/codex/codex-parser.js";
 import { loadSessionsFromDb } from "../src/main/collectors/opencode/opencode-parser.js";
 import { parseTranscriptFile } from "../src/main/collectors/cursor/cursor-parser.js";
 import { parseSessionFile as parseClaudeFile } from "../src/main/collectors/claude/claude-parser.js";
+
+const CODEX_UUID = "11111111-1111-4111-8111-111111111111";
+
+function writeRollout(name: string, lines: unknown[]): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "codex-rollout-"));
+  const filePath = path.join(dir, name);
+  writeFileSync(filePath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+  return filePath;
+}
 
 test("Copilot workspace file URIs decode to filesystem paths", () => {
   assert.equal(
@@ -139,6 +149,143 @@ test("OpenCode parser loads sessions from opencode.db", () => {
     cacheRead: 40,
     cacheWrite: 0,
   });
+});
+
+test("Codex parser reads modern rollout envelopes into the shared session shape", async () => {
+  const filePath = writeRollout(`rollout-2026-05-18T10-00-00-${CODEX_UUID}.jsonl`, [
+    {
+      timestamp: "2026-05-18T10:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: CODEX_UUID,
+        cwd: "/Users/dev/myproj",
+        cli_version: "0.40.0",
+        git: { branch: "main" },
+      },
+    },
+    {
+      timestamp: "2026-05-18T10:00:01.000Z",
+      type: "turn_context",
+      payload: { model: "gpt-5-codex", cwd: "/Users/dev/myproj" },
+    },
+    {
+      timestamp: "2026-05-18T10:00:02.000Z",
+      type: "event_msg",
+      payload: { type: "user_message", message: "fix the bug" },
+    },
+    {
+      timestamp: "2026-05-18T10:00:05.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "on it" }],
+      },
+    },
+    {
+      timestamp: "2026-05-18T10:00:06.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "shell",
+        arguments: '{"command":["ls"]}',
+        call_id: "c1",
+      },
+    },
+    {
+      timestamp: "2026-05-18T10:00:07.000Z",
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        summary: [],
+      },
+    },
+    {
+      timestamp: "2026-05-18T10:00:08.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: 1200,
+            cached_input_tokens: 400,
+            output_tokens: 300,
+            reasoning_output_tokens: 50,
+          },
+        },
+        turn_context: { model: "gpt-5-codex" },
+      },
+    },
+  ]);
+
+  const parsed = await parseRolloutFile(filePath);
+  assert.ok(parsed, "expected a parsed Codex rollout");
+  assert.equal(parsed.sessionId, CODEX_UUID);
+  assert.equal(parsed.cwd, "/Users/dev/myproj");
+  assert.equal(parsed.model, "gpt-5-codex");
+  assert.equal(parsed.gitBranch, "main");
+  assert.equal(parsed.version, "0.40.0");
+  assert.equal(parsed.name, "myproj");
+  assert.equal(parsed.entrypoint, "codex");
+  assert.equal(parsed.userMessages, 1);
+  assert.equal(parsed.assistantMessages, 1);
+  assert.equal(parsed.thinkingBlockCount, 1);
+  assert.equal(parsed.toolUses.length, 1);
+  assert.equal(parsed.toolUses[0].name, "shell");
+  assert.deepEqual(parsed.tokensByModel["gpt-5-codex"], {
+    input: 1200,
+    output: 350,
+    cacheRead: 400,
+    cacheWrite: 0,
+  });
+  assert.deepEqual(parsed.turnDurations, [
+    { durationMs: 3000, timestamp: "2026-05-18T10:00:05.000Z" },
+  ]);
+  for (const key of [
+    "messageTimestamps",
+    "compactions",
+    "apiErrors",
+    "turnDurations",
+    "toolResultErrors",
+    "usageExtras",
+    "teams",
+  ] as const) {
+    assert.ok(key in parsed, `missing normalized field: ${key}`);
+  }
+});
+
+test("Codex parser tolerates legacy records and returns null without timestamps", async () => {
+  const legacyPath = writeRollout(`rollout-legacy-${CODEX_UUID}.jsonl`, [
+    { session_id: CODEX_UUID, cwd: "/x", timestamp: "2026-05-18T09:00:00.000Z" },
+    { type: "message", role: "user", content: "hi" },
+    { type: "function_call", name: "apply_patch", arguments: "{}" },
+  ]);
+  const parsed = await parseRolloutFile(legacyPath);
+  assert.ok(parsed);
+  assert.equal(parsed.cwd, "/x");
+  assert.equal(parsed.userMessages, 1);
+  assert.equal(parsed.toolUses[0].name, "apply_patch");
+
+  const untimestampedUserPath = writeRollout(`rollout-legacy-turns-${CODEX_UUID}.jsonl`, [
+    { session_id: CODEX_UUID, cwd: "/x", timestamp: "2026-05-18T09:00:00.000Z" },
+    { type: "message", role: "user", content: "hi" },
+    {
+      timestamp: "2026-05-18T09:00:05.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "hello" }],
+      },
+    },
+  ]);
+  assert.deepEqual((await parseRolloutFile(untimestampedUserPath))?.turnDurations, []);
+
+  const emptyPath = writeRollout(`rollout-empty-${CODEX_UUID}.jsonl`, [
+    { type: "event_msg", payload: { type: "agent_message_delta", delta: "x" } },
+    "not json at all",
+  ]);
+  assert.equal(await parseRolloutFile(emptyPath), null);
 });
 
 test("Cursor parser derives turn durations from user/assistant timestamps", async () => {

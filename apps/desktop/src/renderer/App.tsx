@@ -18,6 +18,12 @@ const KanbanView = lazy(() => import("./components/kanban/KanbanView").then((m) 
 const ActivityFeedView = lazy(() => import("./components/feed/ActivityFeedView").then((m) => ({ default: m.ActivityFeedView })));
 const AnalyticsView = lazy(() => import("./components/analytics/AnalyticsView").then((m) => ({ default: m.AnalyticsView })));
 const WorkflowsView = lazy(() => import("./components/workflows/WorkflowsView").then((m) => ({ default: m.WorkflowsView })));
+const PacksView = lazy(() => import("./components/features/CoreFeaturesView").then((m) => ({ default: m.PacksView })));
+const SkillsView = lazy(() => import("./components/features/CoreFeaturesView").then((m) => ({ default: m.SkillsView })));
+const ToolsView = lazy(() => import("./components/features/CoreFeaturesView").then((m) => ({ default: m.ToolsView })));
+const SubAgentsView = lazy(() => import("./components/features/CoreFeaturesView").then((m) => ({ default: m.SubAgentsView })));
+const PlansView = lazy(() => import("./components/features/CoreFeaturesView").then((m) => ({ default: m.PlansView })));
+const PullRequestsView = lazy(() => import("./components/features/CoreFeaturesView").then((m) => ({ default: m.PullRequestsView })));
 const ApprovalsPanel = lazy(() => import("./components/approvals/ApprovalsPanel").then((m) => ({ default: m.ApprovalsPanel })));
 const ActivityPanel = lazy(() => import("./components/activity/ActivityPanel").then((m) => ({ default: m.ActivityPanel })));
 const LogsPanel = lazy(() => import("./components/logs/LogsPanel").then((m) => ({ default: m.LogsPanel })));
@@ -29,6 +35,12 @@ export type NavId =
   | "activity"
   | "analytics"
   | "workflows"
+  | "packs"
+  | "skills"
+  | "tools"
+  | "subagents"
+  | "plans"
+  | "pull-requests"
   | "approvals"
   | "requests"
   | "diagnostics"
@@ -42,6 +54,12 @@ function isNavId(value: string | null): value is NavId {
     || value === "activity"
     || value === "analytics"
     || value === "workflows"
+    || value === "packs"
+    || value === "skills"
+    || value === "tools"
+    || value === "subagents"
+    || value === "plans"
+    || value === "pull-requests"
     || value === "approvals"
     || value === "requests"
     || value === "diagnostics"
@@ -163,6 +181,18 @@ export default function App() {
         return <AnalyticsView />;
       case "workflows":
         return <WorkflowsView />;
+      case "packs":
+        return <PacksView />;
+      case "skills":
+        return <SkillsView />;
+      case "tools":
+        return <ToolsView />;
+      case "subagents":
+        return <SubAgentsView />;
+      case "plans":
+        return <PlansView />;
+      case "pull-requests":
+        return <PullRequestsView />;
       case "approvals":
         return <ApprovalsPanel />;
       case "requests":

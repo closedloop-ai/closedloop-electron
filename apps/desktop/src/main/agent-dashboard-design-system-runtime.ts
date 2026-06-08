@@ -1,17 +1,32 @@
 import path from "node:path";
-import { app, ipcMain, type BrowserWindow } from "electron";
+import {
+  app,
+  ipcMain,
+  type BrowserWindow,
+  type IpcMainInvokeEvent,
+} from "electron";
 import { AgentHookListener } from "./agent-monitor-listener.js";
 import { CollectorManager } from "./collectors/collector-manager.js";
-import {
-  loadMeteredUsageRows,
-  type MeteredUsageRow,
-} from "./reconciliation-worker.js";
+import type { MeteredUsageRow } from "./reconciliation-worker.js";
+import type { AgentSessionSyncSource } from "./agent-session-sync-service.js";
 import type { SessionPageRequest } from "../shared/agent-db-contract.js";
 import { detectBillingMode } from "./billing-mode-detector.js";
-import { openAgentDatabase, type AgentDatabase } from "./database/index.js";
+import { shell } from "electron";
+import {
+  openPgliteAgentDatabase,
+  type PgliteAgentDatabase,
+} from "./database/pglite.js";
 import { coerceDbId } from "./database/ipc-validation.js";
-import { createLifecycle } from "./database/lifecycle.js";
 import { isAgentMonitorHooksEnabled } from "./agent-monitor-hooks.js";
+import * as catalogStore from "./packs/catalog-store.js";
+import * as packStore from "./packs/pack-store.js";
+import { runPackScanner } from "./packs/pack-scanner.js";
+import { streamRun } from "./packs/install-orchestrator.js";
+import { runCatalogFetch, scheduleCatalogFetch } from "./packs/catalog-fetcher.js";
+import { refreshCatalogContents } from "./packs/catalog-contents.js";
+import * as planStore from "./plans/plan-store.js";
+import * as prStore from "./pull-requests/pr-store.js";
+import catalogSeed from "./packs/catalog-seed.json" with { type: "json" };
 
 const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
   "desktop:db:get-sessions",
@@ -30,73 +45,159 @@ const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
   "desktop:db:get-agent-hierarchy",
   "desktop:db:get-analytics",
   "desktop:db:get-workflow-data",
+  "desktop:db:get-core-features",
+  "desktop:db:get-packs",
+  "desktop:db:get-skills",
+  "desktop:db:get-tools",
+  "desktop:db:get-subagents",
+  "desktop:db:get-plans",
+  "desktop:db:get-pull-requests",
+  // Catalog (FEA-1314)
+  "desktop:db:get-catalog",
+  "desktop:db:get-catalog-entry",
+  "desktop:db:get-catalog-readme",
+  "desktop:db:get-catalog-contents",
+  "desktop:db:get-catalog-history",
+  "desktop:db:catalog-install",
+  "desktop:db:catalog-uninstall",
+  "desktop:db:catalog-refresh",
+  "desktop:db:get-install-runs",
+  // Installed packs (FEA-1224)
+  "desktop:db:get-installed-packs",
+  "desktop:db:get-pack-detail",
+  "desktop:db:get-pack-sessions",
+  "desktop:db:get-all-skills",
+  "desktop:db:get-skill-invocations",
+  "desktop:db:get-recent-projects",
+  // Plans (FEA-1189)
+  "desktop:db:get-plans-list",
+  "desktop:db:get-plan",
+  "desktop:db:get-plan-versions",
+  "desktop:db:confirm-plan",
+  "desktop:db:reject-plan",
+  "desktop:db:open-plan",
+  // Pull Requests (FEA-1226)
+  "desktop:db:get-pr-stats",
+  "desktop:db:get-pr-sessions",
+  "desktop:db:get-pr-list",
+  "desktop:db:open-pr",
 ] as const;
 
 export interface AgentDashboardDesignSystemRuntimeOptions {
   getWindow: () => BrowserWindow | null;
+  getUserIdentity?: () => { userId: string | null; organizationId: string | null } | null;
   onTerminalFailure: (reason: string) => void;
   userDataPath?: string;
   log?: (scope: string, message: string) => void;
 }
 
 export interface AgentDashboardDesignSystemRuntime {
-  connection: AgentDatabase["connection"];
+  connection: null;
+  syncSource: AgentSessionSyncSource | null;
   getUrl: () => string | null;
   isReady: () => boolean;
   start: () => void;
   stop: () => Promise<void>;
-  close: () => void;
+  close: () => Promise<void> | void;
   restartCollectors: () => void;
   registerIpcHandlers: () => void;
-  loadMeteredUsageRows: (cutoffIso: string) => MeteredUsageRow[];
+  loadMeteredUsageRows: (cutoffIso: string) => MeteredUsageRow[] | Promise<MeteredUsageRow[]>;
 }
 
 /**
  * Resolve the opt-in design-system dashboard database. This helper lives inside
  * the dynamic boundary so default/legacy boot never imports code that can create
- * or migrate `agent-dashboard.sqlite`.
+ * the PGlite data directory.
  */
 export function resolveAgentDashboardDatabasePath(
   userDataPath = app.getPath("userData"),
 ): string {
-  return path.join(userDataPath, "agent-dashboard.sqlite");
+  return path.join(userDataPath, "agent-dashboard.pgdata");
 }
 
 /**
  * Create the in-process design-system dashboard runtime. Import this module only
  * after the Labs flag has selected design-system mode; all imports below this
- * boundary can open SQLite, bind the hook port, register IPC, or start watchers.
+ * boundary can open PGlite, bind the hook port, register IPC, or start watchers.
  */
-export function createAgentDashboardDesignSystemRuntime(
+export async function createAgentDashboardDesignSystemRuntime(
   options: AgentDashboardDesignSystemRuntimeOptions,
-): AgentDashboardDesignSystemRuntime {
+): Promise<AgentDashboardDesignSystemRuntime> {
   const log = options.log ?? (() => {});
-  const agentDatabase = openAgentDatabase(
-    resolveAgentDashboardDatabasePath(options.userDataPath),
-  );
+  let pgliteDatabase: PgliteAgentDatabase | null = null;
   let dbIpcRegistered = false;
-  let closed = false;
-
-  const lifecycle = createLifecycle(agentDatabase.connection, {
-    tokenUsage: agentDatabase.tokenUsage,
+  const agentDatabasePromise = openPgliteAgentDatabase({
+    dataDir: resolveAgentDashboardDatabasePath(options.userDataPath),
     detectBillingMode,
     emit: (sessionId: string) => {
-      agentDatabase.sessions.handleSessionMutation(sessionId);
+      void pgliteDatabase?.sessions.handleSessionMutation(sessionId);
       options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });
     },
-    log: (message: string) => log("agent-lifecycle", message),
+    getUserIdentity: options.getUserIdentity,
+    log: (message: string) => log("agent-pglite", message),
   });
 
+  const registerIpcHandlers = () => {
+    if (dbIpcRegistered) {
+      return;
+    }
+    dbIpcRegistered = true;
+    registerDesignSystemDbIpcHandlers(() => agentDatabasePromise, options);
+  };
+  registerIpcHandlers();
+
+  const agentDatabase = await agentDatabasePromise;
+  pgliteDatabase = agentDatabase;
+  log(
+    "agent-dashboard",
+    "PGlite runtime active for Agent Dashboard database",
+  );
+
+  // The underlying PGlite client supports both query() and exec(), which
+  // the pack/plan/PR store modules need for full result access.
+  const dbForStores = agentDatabase.storeDb;
+  void (async () => {
+    try {
+      await catalogStore.upsertCatalogSeed(dbForStores, catalogSeed);
+      log("agent-dashboard", "Catalog seed applied");
+    } catch (e) {
+      log("agent-dashboard", `Catalog seed failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    try {
+      await runPackScanner(dbForStores);
+      log("agent-dashboard", "Pack scanner completed");
+    } catch (e) {
+      log("agent-dashboard", `Pack scanner failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    try {
+      const plansDir = path.join(process.env.CLAUDE_HOME || path.join(app.getPath("home"), ".claude"), "plans");
+      const captures = planStore.extractPlansFromPlansDir(plansDir);
+      for (const c of captures) {
+        await planStore.upsertPlan(dbForStores, c);
+      }
+      if (captures.length > 0) log("agent-dashboard", `Backfilled ${captures.length} plans from ~/.claude/plans/`);
+    } catch (e) {
+      log("agent-dashboard", `Plan backfill failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  })();
+
+  let catalogFetchTimer: ReturnType<typeof setInterval> | null = null;
+  // Schedule async GitHub catalog fetch (best-effort, non-blocking)
+  void runCatalogFetch(dbForStores).catch(() => {});
+  catalogFetchTimer = scheduleCatalogFetch(dbForStores);
+
+  let closed = false;
+
   const hookListener = new AgentHookListener({
-    lifecycle,
+    lifecycle: { processEvent: agentDatabase.processEvent },
     log: (message: string) => log("agent-monitor-listener", message),
     onBindError: options.onTerminalFailure,
   });
 
   const collectorManager = new CollectorManager({
-    agentDatabase,
+    importer: agentDatabase.importer,
     detectBillingMode,
-    stateDir: path.join(options.userDataPath ?? app.getPath("userData"), "agent-monitor"),
+    stateDir: path.join(options.userDataPath ?? app.getPath("userData"), "agent-dashboard-ingest"),
     emit: (sessionId?: string) => {
       options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });
     },
@@ -106,6 +207,7 @@ export function createAgentDashboardDesignSystemRuntime(
 
   const runtime: AgentDashboardDesignSystemRuntime = {
     connection: agentDatabase.connection,
+    syncSource: agentDatabase.syncSource,
     getUrl: () => hookListener.getUrl(),
     isReady: () => hookListener.isReady(),
     start: () => {
@@ -122,13 +224,20 @@ export function createAgentDashboardDesignSystemRuntime(
       collectorManager.stop();
       await hookListener.stop();
     },
-    close: () => {
+    close: async () => {
       if (closed) {
         return;
       }
       closed = true;
-      unregisterDesignSystemDbIpcHandlers();
-      agentDatabase.close();
+      if (catalogFetchTimer) {
+        clearInterval(catalogFetchTimer);
+        catalogFetchTimer = null;
+      }
+      if (dbIpcRegistered) {
+        unregisterDesignSystemDbIpcHandlers();
+        dbIpcRegistered = false;
+      }
+      await agentDatabase.close();
     },
     restartCollectors: () => {
       if (closed) {
@@ -137,54 +246,83 @@ export function createAgentDashboardDesignSystemRuntime(
       collectorManager.stop();
       collectorManager.start();
     },
-    registerIpcHandlers: () => {
-      if (dbIpcRegistered) {
-        return;
-      }
-      dbIpcRegistered = true;
-      registerDesignSystemDbIpcHandlers(agentDatabase);
-    },
+    registerIpcHandlers,
     loadMeteredUsageRows: (cutoffIso: string) =>
-      loadMeteredUsageRows(agentDatabase.connection, cutoffIso),
+      agentDatabase.loadMeteredUsageRows(cutoffIso),
   };
 
   return runtime;
 }
 
-function registerDesignSystemDbIpcHandlers(agentDatabase: AgentDatabase): void {
-  ipcMain.handle("desktop:db:get-sessions", () => agentDatabase.sessions.getAll());
+function registerDesignSystemDbIpcHandlers(
+  getAgentDatabase: () => Promise<PgliteAgentDatabase>,
+  options: AgentDashboardDesignSystemRuntimeOptions,
+): void {
+  unregisterDesignSystemDbIpcHandlers();
 
-  ipcMain.handle("desktop:db:get-sessions-page", (_event, request: unknown) =>
-    agentDatabase.sessions.getPage(coerceSessionPageRequest(request)),
+  const withDb =
+    <TArgs extends unknown[], TResult>(
+      handler: (
+        agentDatabase: PgliteAgentDatabase,
+        ...args: TArgs
+      ) => TResult | Promise<TResult>,
+    ) =>
+    async (_event: IpcMainInvokeEvent, ...args: TArgs): Promise<TResult> =>
+      handler(await getAgentDatabase(), ...args);
+
+  const withStoreDb =
+    <TArgs extends unknown[], TResult>(
+      handler: (
+        dbForStores: PgliteAgentDatabase["storeDb"],
+        ...args: TArgs
+      ) => TResult | Promise<TResult>,
+    ) =>
+    withDb((agentDatabase, ...args: TArgs) =>
+      handler(agentDatabase.storeDb, ...args),
+    );
+
+  ipcMain.handle(
+    "desktop:db:get-sessions",
+    withDb((agentDatabase) => agentDatabase.sessions.getAll()),
   );
 
-  ipcMain.handle("desktop:db:get-kanban-pages", (_event, statuses: unknown, limit: unknown) => {
-    const safeStatuses = Array.isArray(statuses) ? statuses.filter((s): s is string => typeof s === "string") : [];
-    const safeLimit = typeof limit === "number" && Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 25;
-    return agentDatabase.sessions.getKanbanPages(safeStatuses, safeLimit);
-  });
+  ipcMain.handle(
+    "desktop:db:get-sessions-page",
+    withDb((agentDatabase, request: unknown) =>
+      agentDatabase.sessions.getPage(coerceSessionPageRequest(request)),
+    ),
+  );
 
-  ipcMain.handle("desktop:db:get-session", (_event, id: unknown) => {
+  ipcMain.handle(
+    "desktop:db:get-kanban-pages",
+    withDb((agentDatabase, statuses: unknown, limit: unknown) => {
+      const safeStatuses = Array.isArray(statuses) ? statuses.filter((s): s is string => typeof s === "string") : [];
+      const safeLimit = typeof limit === "number" && Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 25;
+      return agentDatabase.sessions.getKanbanPages(safeStatuses, safeLimit);
+    }),
+  );
+
+  ipcMain.handle("desktop:db:get-session", withDb((agentDatabase, id: unknown) => {
     const sessionId = coerceDbId(id);
     if (sessionId === null) return undefined;
     return agentDatabase.sessions.getById(sessionId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-session-details", (_event, id: unknown) => {
+  ipcMain.handle("desktop:db:get-session-details", withDb((agentDatabase, id: unknown) => {
     const sessionId = coerceDbId(id);
     if (sessionId === null) return undefined;
     return agentDatabase.sessions.getDetailsById(sessionId);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-agents", (_event, sessionId: unknown) => {
+  ipcMain.handle("desktop:db:get-agents", withDb((agentDatabase, sessionId: unknown) => {
     const id = coerceDbId(sessionId);
     if (id === null) return [];
     return agentDatabase.agents.getBySession(id);
-  });
+  }));
 
   ipcMain.handle(
     "desktop:db:get-events",
-    (_event, sessionId: unknown, agentId?: unknown) => {
+    withDb((agentDatabase, sessionId: unknown, agentId?: unknown) => {
       const sid = coerceDbId(sessionId);
       if (sid === null) return [];
       const aid = coerceDbId(agentId);
@@ -192,48 +330,269 @@ function registerDesignSystemDbIpcHandlers(agentDatabase: AgentDatabase): void {
         return agentDatabase.events.getBySessionAndAgent(sid, aid);
       }
       return agentDatabase.events.getBySession(sid);
-    },
+    }),
   );
 
-  ipcMain.handle("desktop:db:get-dashboard-summary", () =>
-    agentDatabase.getSummary(),
+  ipcMain.handle(
+    "desktop:db:get-dashboard-summary",
+    withDb((agentDatabase) => agentDatabase.getSummary()),
   );
 
-  ipcMain.handle("desktop:db:get-sessions-with-details", () =>
-    agentDatabase.sessions.getAllWithDetails(),
+  ipcMain.handle(
+    "desktop:db:get-sessions-with-details",
+    withDb((agentDatabase) => agentDatabase.sessions.getAllWithDetails()),
   );
 
-  ipcMain.handle("desktop:db:get-event-feed", () =>
-    agentDatabase.events.getAll(),
+  ipcMain.handle(
+    "desktop:db:get-event-feed",
+    withDb((agentDatabase) => agentDatabase.events.getAll()),
   );
 
-  ipcMain.handle("desktop:db:get-events-with-session", (_event, sessionId: unknown) => {
+  ipcMain.handle("desktop:db:get-events-with-session", withDb((agentDatabase, sessionId: unknown) => {
     const id = coerceDbId(sessionId);
     if (id === null) return [];
     return agentDatabase.events.getWithSession(id);
-  });
+  }));
 
-  ipcMain.handle("desktop:db:get-event-count-by-type", () =>
-    agentDatabase.events.getCountByType(),
+  ipcMain.handle(
+    "desktop:db:get-event-count-by-type",
+    withDb((agentDatabase) => agentDatabase.events.getCountByType()),
   );
 
-  ipcMain.handle("desktop:db:get-token-analytics", () =>
-    agentDatabase.dashboard.getTokenAnalytics(),
+  ipcMain.handle(
+    "desktop:db:get-token-analytics",
+    withDb((agentDatabase) => agentDatabase.dashboard.getTokenAnalytics()),
   );
 
-  ipcMain.handle("desktop:db:get-agent-hierarchy", (_event, sessionId: unknown) => {
+  ipcMain.handle("desktop:db:get-agent-hierarchy", withDb((agentDatabase, sessionId: unknown) => {
     const id = coerceDbId(sessionId);
     if (id === null) return [];
-    return agentDatabase.agents.getBySessionWithChildren(id, agentDatabase.events);
-  });
+    return agentDatabase.agents.getBySessionWithChildren(id);
+  }));
 
-  ipcMain.handle("desktop:db:get-analytics", () =>
-    agentDatabase.dashboard.getAnalytics(),
+  ipcMain.handle(
+    "desktop:db:get-analytics",
+    withDb((agentDatabase) => agentDatabase.dashboard.getAnalytics()),
   );
 
-  ipcMain.handle("desktop:db:get-workflow-data", () =>
-    agentDatabase.dashboard.getWorkflowData(),
+  ipcMain.handle(
+    "desktop:db:get-workflow-data",
+    withDb((agentDatabase) => agentDatabase.dashboard.getWorkflowData()),
   );
+
+  ipcMain.handle(
+    "desktop:db:get-core-features",
+    withDb((agentDatabase) => agentDatabase.dashboard.getCoreFeatures()),
+  );
+
+  ipcMain.handle(
+    "desktop:db:get-packs",
+    withDb((agentDatabase) => agentDatabase.dashboard.getPacks()),
+  );
+
+  ipcMain.handle(
+    "desktop:db:get-skills",
+    withDb((agentDatabase) => agentDatabase.dashboard.getSkills()),
+  );
+
+  ipcMain.handle(
+    "desktop:db:get-tools",
+    withDb((agentDatabase) => agentDatabase.dashboard.getTools()),
+  );
+
+  ipcMain.handle(
+    "desktop:db:get-subagents",
+    withDb((agentDatabase) => agentDatabase.dashboard.getSubAgents()),
+  );
+
+  ipcMain.handle(
+    "desktop:db:get-plans",
+    withDb((agentDatabase) => agentDatabase.dashboard.getPlans()),
+  );
+
+  ipcMain.handle(
+    "desktop:db:get-pull-requests",
+    withDb((agentDatabase) => agentDatabase.dashboard.getPullRequests()),
+  );
+
+  // --- Catalog (FEA-1314) ---
+  ipcMain.handle(
+    "desktop:db:get-catalog",
+    withStoreDb((dbForStores) => catalogStore.listCatalog(dbForStores)),
+  );
+
+  ipcMain.handle("desktop:db:get-catalog-entry", withStoreDb((dbForStores, packId: unknown) => {
+    if (typeof packId !== "string") return null;
+    return catalogStore.getCatalog(dbForStores, packId);
+  }));
+
+  ipcMain.handle("desktop:db:get-catalog-readme", withStoreDb(async (dbForStores, packId: unknown) => {
+    if (typeof packId !== "string") return null;
+    const entry = await catalogStore.getCatalog(dbForStores, packId);
+    return entry?.readmeExcerpt ?? null;
+  }));
+
+  ipcMain.handle("desktop:db:get-catalog-contents", withStoreDb(async (dbForStores, packId: unknown) => {
+    if (typeof packId !== "string") return null;
+    const entry = await catalogStore.getCatalog(dbForStores, packId);
+    if (!entry) return null;
+    await refreshCatalogContents(dbForStores, entry);
+    const refreshed = await catalogStore.getCatalog(dbForStores, packId);
+    return refreshed?.contentsCache ?? null;
+  }));
+
+  ipcMain.handle("desktop:db:get-catalog-history", withStoreDb((dbForStores, packId: unknown) => {
+    if (typeof packId !== "string") return [];
+    return catalogStore.listHistory(dbForStores, packId);
+  }));
+
+  ipcMain.handle("desktop:db:catalog-install", withStoreDb(async (dbForStores, packId: unknown, harness: unknown, cwd?: unknown) => {
+    if (typeof packId !== "string" || typeof harness !== "string") return { started: false };
+    return streamRun(dbForStores, {
+      pack_id: packId,
+      harness,
+      action: "install",
+      cwd: typeof cwd === "string" ? cwd : undefined,
+      getWindow: options.getWindow,
+      onComplete: () => void runPackScanner(dbForStores).catch(() => {}),
+    });
+  }));
+
+  ipcMain.handle("desktop:db:catalog-uninstall", withStoreDb(async (dbForStores, packId: unknown, harness: unknown, cwd?: unknown) => {
+    if (typeof packId !== "string" || typeof harness !== "string") return { started: false };
+    return streamRun(dbForStores, {
+      pack_id: packId,
+      harness,
+      action: "uninstall",
+      cwd: typeof cwd === "string" ? cwd : undefined,
+      getWindow: options.getWindow,
+      onComplete: () => void runPackScanner(dbForStores).catch(() => {}),
+    });
+  }));
+
+  ipcMain.handle(
+    "desktop:db:catalog-refresh",
+    withStoreDb((dbForStores) => runCatalogFetch(dbForStores)),
+  );
+
+  ipcMain.handle(
+    "desktop:db:get-install-runs",
+    withStoreDb((dbForStores, packId?: unknown) =>
+      catalogStore.listInstallRuns(dbForStores, typeof packId === "string" ? { pack_id: packId } : {}),
+    ),
+  );
+
+  // --- Installed Packs (FEA-1224) ---
+
+  ipcMain.handle(
+    "desktop:db:get-installed-packs",
+    withStoreDb((dbForStores) => packStore.listPacks(dbForStores)),
+  );
+
+  ipcMain.handle("desktop:db:get-pack-detail", withStoreDb((dbForStores, packId: unknown) => {
+    if (typeof packId !== "string") return null;
+    return packStore.getPack(dbForStores, packId);
+  }));
+
+  ipcMain.handle("desktop:db:get-pack-sessions", withStoreDb((dbForStores, packId: unknown) => {
+    if (typeof packId !== "string") return [];
+    return packStore.listPackSessions(dbForStores, packId);
+  }));
+
+  ipcMain.handle(
+    "desktop:db:get-all-skills",
+    withStoreDb((dbForStores) => packStore.listSkills(dbForStores)),
+  );
+
+  ipcMain.handle("desktop:db:get-skill-invocations", withStoreDb((dbForStores, name: unknown) => {
+    if (typeof name !== "string") return [];
+    return packStore.listSkillInvocations(dbForStores, name);
+  }));
+
+  ipcMain.handle("desktop:db:get-recent-projects", withStoreDb(async (dbForStores) => {
+    const result = await dbForStores.query<{ cwd: string }>(
+      `SELECT cwd
+       FROM sessions
+       WHERE cwd IS NOT NULL AND cwd != ''
+       GROUP BY cwd
+       ORDER BY MAX(started_at) DESC NULLS LAST
+       LIMIT 20`,
+    );
+    return result.rows.map((r) => r.cwd);
+  }));
+
+  // --- Plans (FEA-1189) ---
+
+  ipcMain.handle("desktop:db:get-plans-list", withStoreDb((dbForStores, opts?: unknown) => {
+    const o = typeof opts === "object" && opts !== null ? opts as Record<string, unknown> : {};
+    return planStore.listPlans(dbForStores, {
+      sessionId: typeof o.sessionId === "string" ? o.sessionId : undefined,
+      needsConfirmation: typeof o.needsConfirmation === "boolean" ? o.needsConfirmation : undefined,
+      limit: typeof o.limit === "number" ? o.limit : undefined,
+      offset: typeof o.offset === "number" ? o.offset : undefined,
+    });
+  }));
+
+  ipcMain.handle("desktop:db:get-plan", withStoreDb((dbForStores, id: unknown) => {
+    if (typeof id !== "string") return null;
+    return planStore.getPlan(dbForStores, id);
+  }));
+
+  ipcMain.handle("desktop:db:get-plan-versions", withStoreDb((dbForStores, planId: unknown) => {
+    if (typeof planId !== "string") return [];
+    return planStore.getPlanVersions(dbForStores, planId);
+  }));
+
+  ipcMain.handle("desktop:db:confirm-plan", withStoreDb((dbForStores, id: unknown) => {
+    if (typeof id !== "string") return;
+    return planStore.confirmPlan(dbForStores, id);
+  }));
+
+  ipcMain.handle("desktop:db:reject-plan", withStoreDb((dbForStores, id: unknown) => {
+    if (typeof id !== "string") return;
+    return planStore.rejectPlan(dbForStores, id);
+  }));
+
+  ipcMain.handle("desktop:db:open-plan", withStoreDb(async (dbForStores, id: unknown, target?: unknown) => {
+    if (typeof id !== "string") return;
+    const plan = await planStore.getPlan(dbForStores, id);
+    if (!plan) return;
+    const filePath = String(target === "log" ? plan.sourceLogPath : plan.filePath);
+    if (filePath && filePath !== "null" && filePath !== "undefined") void shell.openPath(filePath);
+  }));
+
+  // --- Pull Requests (FEA-1226) ---
+
+  ipcMain.handle(
+    "desktop:db:get-pr-stats",
+    withStoreDb((dbForStores) => prStore.getPrStats(dbForStores)),
+  );
+
+  ipcMain.handle("desktop:db:get-pr-sessions", withStoreDb((dbForStores, opts?: unknown) => {
+    const o = typeof opts === "object" && opts !== null ? opts as Record<string, unknown> : {};
+    return prStore.listPrSessions(dbForStores, {
+      limit: typeof o.limit === "number" ? o.limit : undefined,
+      offset: typeof o.offset === "number" ? o.offset : undefined,
+    });
+  }));
+
+  ipcMain.handle("desktop:db:get-pr-list", withStoreDb((dbForStores, opts?: unknown) => {
+    const o = typeof opts === "object" && opts !== null ? opts as Record<string, unknown> : {};
+    return prStore.listPullRequests(dbForStores, {
+      sessionId: typeof o.sessionId === "string" ? o.sessionId : undefined,
+      repo: typeof o.repo === "string" ? o.repo : undefined,
+      limit: typeof o.limit === "number" ? o.limit : undefined,
+      offset: typeof o.offset === "number" ? o.offset : undefined,
+    });
+  }));
+
+  ipcMain.handle("desktop:db:open-pr", withStoreDb(async (dbForStores, id: unknown) => {
+    if (typeof id !== "string") return;
+    const prs = await prStore.listPullRequests(dbForStores);
+    const pr = prs.find((p) => p.id === id);
+    const prUrl = pr?.prUrl;
+    if (typeof prUrl === "string") void shell.openExternal(prUrl);
+  }));
 }
 
 function unregisterDesignSystemDbIpcHandlers(): void {

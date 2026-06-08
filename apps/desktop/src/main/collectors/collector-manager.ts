@@ -2,21 +2,19 @@
  * @file collector-manager.ts
  * @description Owns the in-process multi-harness collection layer (FEA-1503):
  * boot-time bulk import + live file watchers for all five agent CLIs (Claude,
- * Codex, Cursor, Copilot, OpenCode), writing through the first-party
- * `importSession` into the shared in-process DB. Started/stopped alongside the
+ * Codex, Cursor, Copilot, OpenCode), writing through the injected importer into
+ * the shared in-process DB. Started/stopped alongside the
  * hook listener via the `agentMonitorEnabled` toggle.
  *
  * Local import is ungated — all sessions from all five harnesses are imported
- * into the local DB regardless of the sandbox directory. Sandbox enforcement
- * is applied exclusively on the cloud-sync path in AgentSessionSyncService.
+ * into the local DB regardless of the sandbox directory.
  *
  * Claude has a live hook path; its live watcher is therefore gated OFF when hooks
  * are installed (hooks own live capture — a concurrent file watcher would
  * double-count turns). Claude boot historical import still runs and is idempotent
  * against any hook-written events.
  */
-import type { AgentDatabase } from "../database/index.js";
-import { createImporter, type Importer } from "./import-session.js";
+import type { Importer } from "../agent-dashboard-db-types.js";
 import { createCatchupCache, type CatchupCache } from "./catchup-cache.js";
 import { ingestCachePath, ingestOpencodeFingerprintPath } from "./ingest-paths.js";
 import { createHarnessWatcher, type HarnessWatcher } from "./watcher.js";
@@ -28,10 +26,10 @@ import { createCopilotCollector } from "./copilot/copilot-collector.js";
 import { createOpencodeCollector } from "./opencode/opencode-collector.js";
 
 export interface CollectorManagerOptions {
-  agentDatabase: AgentDatabase;
+  importer: Importer;
   /** Resolve a billing mode for a harness at session creation (FEA-1434). */
   detectBillingMode: (harness: string) => string;
-  /** Durable dir for persisted catchup caches (e.g. userData/agent-monitor). */
+  /** Durable dir for persisted catchup caches. */
   stateDir: string;
   /** Push a renderer live-update after an import batch wrote rows. */
   emit: (sessionId?: string) => void;
@@ -61,12 +59,7 @@ export class CollectorManager {
   constructor(options: CollectorManagerOptions) {
     this.options = options;
     this.log = options.log ?? (() => {});
-    this.importer = createImporter(options.agentDatabase.connection, {
-      tokenUsage: options.agentDatabase.tokenUsage,
-      detectBillingMode: options.detectBillingMode,
-      now: options.now,
-      log: this.log,
-    });
+    this.importer = options.importer;
     this.collectors = options.collectors ?? defaultCollectors(options.stateDir);
     for (const collector of this.collectors) {
       if (!collector.batch) {
@@ -160,7 +153,7 @@ export class CollectorManager {
 
       for (const session of sessions) {
         if (this.stopped) break;
-        const result = this.importer.importSession(session, collector.key);
+        const result = await this.importer.importSession(session, collector.key);
         if (!(result.skipped && !result.reactivated)) imported++;
       }
 

@@ -138,15 +138,12 @@ The Diagnostics tab shows the current in-memory gateway log plus a bounded previ
 
 ## Agent Monitor
 
-> **Status (FEA-1504):** Agent Monitor has three boot modes. The default user
-> experience is the legacy sidecar-backed dashboard (`agentMonitorEnabled=true`,
-> `agentDashboardDesignSystemEnabled=false`): pnpm-managed upstream packages are
-> materialized into `.generated/agent-monitor`, shipped unpacked, and rendered in
-> the legacy iframe shell. The in-process design-system dashboard is a Labs
-> opt-in only. When `agentDashboardDesignSystemEnabled` is not the literal
-> boolean `true`, the main process must not load `src/main/database/`,
-> `src/main/collectors/`, `AgentHookListener`, `desktop:db:*`, or the `app://`
-> design renderer path.
+> **Status (FEA-1550):** Agent Monitor is an in-process, PGlite-backed desktop
+> feature. The legacy generated runtime tree, embedded web shell, and
+> `agentDashboardDesignSystemEnabled` boot split have been removed. When
+> `agentMonitorEnabled=false`, the main process must not start collectors,
+> `AgentHookListener`, the `desktop:db:*` IPC handlers, cloud session sync, or
+> dashboard-derived cost reads.
 
 The desktop app provides local Claude Code (and opt-in Codex) session/agent
 observability. It powers the **Dashboard** and the agent nav items (Sessions,
@@ -155,23 +152,20 @@ is gated by the persisted `agentMonitorEnabled` desktop setting, which
 **defaults ON**; when disabled, the agent nav items are hidden and only the
 Gateway section remains.
 
-- **Legacy sidecar (default):** `src/main/agent-monitor-sidecar.ts` launches the
-  generated Claude-Code-Agent-Monitor runtime tree. `build:agent-monitor`
-  materializes the tree from pnpm-managed upstream packages; package/stage logic
-  must keep `.generated/agent-monitor` available for default users.
-- **Design-system runtime (Labs opt-in):** `src/main/agent-dashboard-design-system-runtime.ts`
+- **Runtime:** `src/main/agent-dashboard-design-system-runtime.ts`
   is the only module allowed to import `src/main/database/`,
   `src/main/collectors/`, `AgentHookListener`, or register `desktop:db:*`. It is
-  reached only through `await import()` after boot mode resolves to
-  `design-system`.
-- **Disabled mode:** `agentMonitorEnabled=false` starts no sidecar, no
-  design-system runtime, no dashboard-derived sync source, and no
-  dashboard-derived cost source.
+  reached only through `await import()` after the Agent Monitor setting is
+  enabled.
+- **Disabled mode:** `agentMonitorEnabled=false` starts no design-system
+  runtime, no dashboard-derived sync source, and no dashboard-derived cost
+  source.
 - **Hook listener:** in design-system mode, `src/main/agent-monitor-listener.ts`
   binds `127.0.0.1:4820` in the main process and accepts the hook payload
-  (`POST /api/hooks/event`, `GET /api/health`). Each event is gated by the
-  FEA-1407 sandbox check, harness-stamped from `__provider`, and applied by the
-  lifecycle state machine.
+  (`POST /api/hooks/event`, `GET /api/health`). Each event is
+  harness-stamped from `__provider` and applied by the lifecycle state machine.
+  Local import is ungated — all hook events are written to the local DB
+  regardless of the sandbox directory (FEA-1550).
 - **Collection layer (`src/main/collectors/`):** design-system mode uses
   `CollectorManager` for best-effort boot bulk import and live file watchers for
   all five agent CLIs, writing through the first-party `importSession` into the
@@ -182,12 +176,12 @@ Gateway section remains.
   `~/.claude/settings.json` at install time, so 4820 means hooks need zero
   per-hook env. 4820 is outside `PORT_PROBE_ORDER`, so it never collides with
   the gateway. (FEA-1500 tracks migrating this transport later.)
-- **Durable DB:** `app.getPath("userData")/agent-dashboard.sqlite` (schema in
-  `src/main/database/schema.ts`), Node's built-in `node:sqlite`. Persisted
-  collector caches live under `<userData>/agent-monitor/`.
-- **UI:** a first-party React app in the main window (`src/renderer/`) — NO
-  iframe. The left sidebar drives the **Dashboard** + agent nav items; live
-  updates arrive via the `desktop:db:changed` IPC push after each write.
+- **Durable DB:** `app.getPath("userData")/agent-dashboard.pgdata` (PGlite,
+  schema in `src/main/database/pglite.ts`). Persisted collector caches live
+  under `<userData>/agent-dashboard-ingest/`.
+- **UI:** a first-party React app in the main window (`src/renderer/`). The
+  left sidebar drives the **Dashboard** + agent nav items; live updates arrive
+  via the `desktop:db:changed` IPC push after each write.
 - **Hooks are explicit opt-in (consent-bearing).** The user enables/disables
   tracking via the toggle → `src/main/agent-monitor-hooks.ts` writes/removes the
   hook entries in `~/.claude/settings.json` (and, opt-in, `~/.codex/hooks.json`).
@@ -206,10 +200,12 @@ Gateway section remains.
   tree.
 - **Security model (by design):** the collectors + listener read the agent-CLI
   home dirs (`~/.claude`, `~/.codex`, …) **directly**, outside the gateway
-  `isPathAllowed` sandbox, but every captured session is dropped unless its
-  `cwd` is inside the FEA-1407 sandbox base directory (fail-closed). The listener
-  is bound to `127.0.0.1` only; no cloud egress from collectors. Hooks only
-  mutate global Claude/Codex config on explicit user opt-in and are reversible.
+  `isPathAllowed` sandbox. Local import and hook capture are ungated — all
+  sessions are written to the local PGlite DB regardless of working directory
+  (FEA-1550). Cloud sync sends all local sessions without sandbox filtering;
+  payloads are sanitized before upload. The listener is bound to `127.0.0.1`
+  only; no cloud egress from collectors. Hooks only mutate global Claude/Codex
+  config on explicit user opt-in and are reversible.
 - **Multi-harness support (5 agent tools):** ingests sessions from **Claude
   Code** (hooks live + file historical), **OpenAI Codex** (rollout JSONL under
   `~/.codex/sessions/`), **Cursor** (agent transcripts under `~/.cursor/projects/`),

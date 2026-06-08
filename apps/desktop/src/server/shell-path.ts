@@ -350,7 +350,15 @@ function resolveExecutablesOnPathSync(
   return hits;
 }
 
-export type BinaryName = "claude" | "gh" | "codex" | "python3" | "git";
+export type BinaryName =
+  | "claude"
+  | "gh"
+  | "codex"
+  | "python3"
+  | "git"
+  | "rtk"
+  | "npm"
+  | "ccr";
 
 export type BinaryResolveResult = {
   path: string;

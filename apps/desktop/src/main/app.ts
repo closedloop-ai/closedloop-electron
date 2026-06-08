@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -74,16 +74,8 @@ import {
 import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
-import {
-  type AgentDashboardMode,
-  resolveAgentDashboardMode,
-} from "./agent-dashboard-mode.js";
 import type { AgentDashboardDesignSystemRuntime } from "./agent-dashboard-design-system-runtime.js";
-import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
-import {
-  AgentSessionSyncService,
-  resolveAgentMonitorDatabasePath,
-} from "./agent-session-sync-service.js";
+import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
   createAnthropicAdminKeyStore,
   createOpenAiAdminKeyStore,
@@ -94,7 +86,6 @@ import {
   type ReconciliationQuery,
 } from "./reconciliation-store.js";
 import {
-  loadMeteredUsageRowsFromDisk,
   reconciliationCutoffIso,
   type MeteredUsageRow,
 } from "./reconciliation-worker.js";
@@ -307,8 +298,6 @@ export class DesktopApplication {
   private readonly server: DesktopGatewayServer;
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
-  private readonly agentDashboardMode: AgentDashboardMode;
-  private readonly agentMonitor: AgentMonitorSidecar | null;
   private agentDashboardDesignSystem: AgentDashboardDesignSystemRuntime | null = null;
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly costReconciliation: CostReconciliationService;
@@ -326,11 +315,10 @@ export class DesktopApplication {
   private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
   private cloudCommandsPaused: boolean;
-  // In-memory supervisor verdict: set once the agent-monitor sidecar gives up
-  // permanently (after MAX_RESTART_ATTEMPTS). refreshTrayState() consults this so
+  // In-memory dashboard capture verdict. refreshTrayState() consults this so
   // the degraded indicator sticks across later refreshes instead of being reset
-  // to ready by the next cloud heartbeat or gateway recheck. Not persisted — a
-  // fresh boot re-attempts the sidecar, so the verdict is per-process.
+  // to ready by the next cloud heartbeat or gateway recheck. Not persisted; a
+  // fresh boot re-attempts the dashboard listener, so the verdict is per-process.
   private agentMonitorFailed = false;
   private agentMonitorFailureReason: string | null = null;
   private cloudConnectionEnabled: boolean;
@@ -413,32 +401,7 @@ export class DesktopApplication {
     this.loopTokenStore = new LoopTokenStore();
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
-    this.agentDashboardMode = resolveAgentDashboardMode(this.settingsStore);
-    this.desktopWindow = new DesktopWindow({
-      agentDashboardMode: this.agentDashboardMode,
-    });
-    this.agentMonitor =
-      this.agentDashboardMode === "legacy"
-        ? new AgentMonitorSidecar({
-            onTerminalFailure: (reason: string) => {
-              const notification = new Notification({
-                title: "ClosedLoop Agent Monitor",
-                body: reason,
-              });
-              notification.show();
-              // Latch the failure and route through refreshTrayState() — the
-              // single owner of tray state — so the degraded indicator survives
-              // subsequent refreshes. A direct tray.setState here would be
-              // stomped by the next refreshTrayState() call.
-              this.agentMonitorFailed = true;
-              this.agentMonitorFailureReason = reason;
-              this.refreshTrayState();
-            },
-          })
-        : null;
-    this.agentMonitor?.setSandboxBaseDirectory(
-      this.settingsStore.getSandboxBaseDirectory(),
-    );
+    this.desktopWindow = new DesktopWindow();
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -695,15 +658,8 @@ export class DesktopApplication {
       isRelayReady: () =>
         this.serverAgentSessionSyncSupported &&
         this.cloudStatus.state === "online",
-      isChunkedSyncEnabled: () => this.settingsStore.getFlag("agentSessionChunkedSyncEnabled"),
-      getSandboxBaseDirectory: () =>
-        this.settingsStore.getSandboxBaseDirectory(),
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
-      getUserDataPath: () => app.getPath("userData"),
-      getConnection: () =>
-        this.agentDashboardMode === "design-system"
-          ? this.agentDashboardDesignSystem?.connection ?? null
-          : null,
+      getSource: () => this.agentDashboardDesignSystem?.syncSource ?? null,
       onBatchOutcome: (event) => {
         Observability.agentSessionSyncBatchFailed(event);
       },
@@ -712,9 +668,9 @@ export class DesktopApplication {
     // the org-level vendor Admin key stores (safeStorage, never exposed to the
     // renderer) and the reconciliation store, and reconciles the local
     // genai-prices estimate against what each vendor actually billed.
-    // Agent Dashboard usage rows are mode-owned: legacy reads dashboard.db from
-    // disk, design-system reads the in-process connection, and disabled returns
-    // no rows so the dashboard code path stays inert.
+    // Agent Dashboard usage rows come from the PGlite runtime. When the master
+    // Agent Dashboard flag is disabled, usage loading returns no rows so the
+    // dashboard code path stays inert.
     // One Anthropic Admin key store, shared by reconciliation (compares the local
     // estimate against the billed cost_report) and Claude Code analytics (reads
     // Anthropic's own per-user usage estimate). Sharing the store means a key
@@ -791,7 +747,7 @@ export class DesktopApplication {
     this.tray.setAgentMonitorEnabled(this.settingsStore.getAgentMonitorEnabled());
     this.tray.setPaused(this.cloudCommandsPaused);
     this.syncPendingApprovalsToTray();
-    if (this.agentDashboardMode === "design-system") {
+    if (this.isAgentMonitorEnabled()) {
       await this.ensureAgentDashboardDesignSystemRuntime();
     }
     this.desktopWindow.init();
@@ -1463,89 +1419,70 @@ export class DesktopApplication {
   }
 
   private getAgentMonitorUrl(): string | null {
-    if (this.agentDashboardMode === "legacy") {
-      return this.agentMonitor?.getUrl() ?? null;
-    }
-    if (this.agentDashboardMode === "design-system") {
-      return this.agentDashboardDesignSystem?.getUrl() ?? null;
-    }
-    return null;
+    return this.agentDashboardDesignSystem?.getUrl() ?? null;
   }
 
   private isAgentMonitorReady(): boolean {
-    if (this.agentDashboardMode === "legacy") {
-      return this.agentMonitor?.isReady() ?? false;
-    }
-    if (this.agentDashboardMode === "design-system") {
-      return this.agentDashboardDesignSystem?.isReady() ?? false;
-    }
-    return false;
+    return this.agentDashboardDesignSystem?.isReady() ?? false;
   }
 
-  private loadAgentDashboardMeteredUsageRows(): MeteredUsageRow[] {
+  private async loadAgentDashboardMeteredUsageRows(): Promise<MeteredUsageRow[]> {
     if (!this.isAgentMonitorEnabled()) {
       return [];
     }
 
     const cutoffIso = reconciliationCutoffIso(new Date());
-    if (this.agentDashboardMode === "design-system") {
-      return (
-        this.agentDashboardDesignSystem?.loadMeteredUsageRows(cutoffIso) ?? []
-      );
-    }
-
-    if (this.agentDashboardMode === "legacy") {
-      return loadMeteredUsageRowsFromDisk(
-        resolveAgentMonitorDatabasePath(app.getPath("userData")),
-        cutoffIso,
-      );
-    }
-
-    return [];
+    return await Promise.resolve(
+      this.agentDashboardDesignSystem?.loadMeteredUsageRows(cutoffIso) ?? [],
+    );
   }
 
   private async ensureAgentDashboardDesignSystemRuntime(): Promise<AgentDashboardDesignSystemRuntime | null> {
-    if (this.agentDashboardMode !== "design-system") {
-      return null;
-    }
     if (!this.agentDashboardDesignSystem) {
       const { createAgentDashboardDesignSystemRuntime } = await import(
         "./agent-dashboard-design-system-runtime.js"
       );
-      this.agentDashboardDesignSystem =
-        createAgentDashboardDesignSystemRuntime({
-          userDataPath: app.getPath("userData"),
-          getWindow: () => this.desktopWindow.getWindow(),
-          onTerminalFailure: (reason) => {
-            const notification = new Notification({
-              title: "ClosedLoop Agent Monitor",
-              body: reason,
-            });
-            notification.show();
-            this.agentMonitorFailed = true;
-            this.agentMonitorFailureReason = reason;
-            this.refreshTrayState();
-          },
-          log: (scope, message) => gatewayLog.info(scope, message),
-        });
+      try {
+        this.agentDashboardDesignSystem =
+          await createAgentDashboardDesignSystemRuntime({
+            userDataPath: app.getPath("userData"),
+            getWindow: () => this.desktopWindow.getWindow(),
+            // User/org IDs are server-owned. Local-only sessions keep these columns null.
+            getUserIdentity: () => null,
+            onTerminalFailure: (reason) => {
+              const notification = new Notification({
+                title: "ClosedLoop Agent Monitor",
+                body: reason,
+              });
+              notification.show();
+              this.agentMonitorFailed = true;
+              this.agentMonitorFailureReason = reason;
+              this.refreshTrayState();
+            },
+            log: (scope, message) => gatewayLog.info(scope, message),
+          });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        gatewayLog.error(
+          "agent-monitor",
+          `failed to initialize Agent Monitor runtime: ${reason}`,
+        );
+        this.agentMonitorFailed = true;
+        this.agentMonitorFailureReason = reason;
+        this.refreshTrayState();
+        return null;
+      }
       this.agentDashboardDesignSystem.registerIpcHandlers();
     }
     return this.agentDashboardDesignSystem;
   }
 
   /**
-   * Start the selected Agent Dashboard capture stack. The in-process
-   * design-system runtime is dynamically imported only inside the flag-on mode.
+   * Start the Agent Dashboard capture stack. The PGlite-backed runtime is
+   * dynamically imported only while the master dashboard flag is enabled.
    */
   private async startAgentCapture(): Promise<void> {
     if (!this.isAgentMonitorEnabled()) {
-      return;
-    }
-
-    if (this.agentDashboardMode === "legacy") {
-      void this.agentMonitor?.start();
-      syncAgentMonitorHooksOnBoot();
-      this.agentSessionSync.start();
       return;
     }
 
@@ -1561,18 +1498,10 @@ export class DesktopApplication {
   private async stopAgentCapture(
     options: { closeDesignSystem?: boolean } = {},
   ): Promise<void> {
-    if (this.agentDashboardMode === "legacy") {
-      await this.agentMonitor?.stop();
-    } else if (this.agentDashboardMode === "design-system") {
-      await this.agentDashboardDesignSystem?.stop();
-    }
+    await this.agentDashboardDesignSystem?.stop();
     this.agentSessionSync.stop();
-    if (
-      options.closeDesignSystem &&
-      this.agentDashboardMode === "design-system" &&
-      this.agentDashboardDesignSystem
-    ) {
-      this.agentDashboardDesignSystem.close();
+    if (options.closeDesignSystem && this.agentDashboardDesignSystem) {
+      await this.agentDashboardDesignSystem.close();
       this.agentDashboardDesignSystem = null;
     }
   }
@@ -1581,9 +1510,6 @@ export class DesktopApplication {
     this.tray.setAgentMonitorEnabled(enabled);
 
     if (enabled) {
-      if (this.agentDashboardMode === "design-system") {
-        this.desktopWindow.reloadForAgentDashboardMode("design-system");
-      }
       await this.startAgentCapture();
       return;
     }
@@ -1599,9 +1525,6 @@ export class DesktopApplication {
     }
 
     await this.stopAgentCapture({ closeDesignSystem: true });
-    if (this.agentDashboardMode === "design-system") {
-      this.desktopWindow.reloadForAgentDashboardMode("disabled");
-    }
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-tab", "settings");
@@ -1623,12 +1546,7 @@ export class DesktopApplication {
     }
     this.desktopWindow
       .getWindow()
-      ?.webContents.send(
-        "desktop:navigate-tab",
-        this.agentDashboardMode === "design-system"
-          ? "dashboard"
-          : "claude-dashboard",
-      );
+      ?.webContents.send("desktop:navigate-tab", "dashboard");
   }
 
   private notifyCommandKeysChanged(): void {
@@ -2071,7 +1989,7 @@ export class DesktopApplication {
     this.commandKeyReconciler.stop();
     await this.stopAgentCapture();
     this.costReconciliation.stop();
-    this.agentDashboardDesignSystem?.close();
+    await this.agentDashboardDesignSystem?.close();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -2826,61 +2744,15 @@ export class DesktopApplication {
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
-    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
-      if (this.agentDashboardMode !== "legacy") {
-        return null;
-      }
-      const baseUrl = this.agentMonitor?.getUrl();
-      if (!baseUrl) {
-        return null;
-      }
-      try {
-        const response = await fetch(`${baseUrl}/api/import/progress`, {
-          signal: AbortSignal.timeout(2_000),
-        });
-        if (!response.ok) {
-          return null;
-        }
-        return await response.json();
-      } catch {
-        return null;
-      }
-    });
+    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", () => null);
     ipcMain.handle("desktop:reprocess-agent-logs", async () => {
       if (!this.isAgentMonitorEnabled()) {
         return { ok: false, error: "Agent Dashboard is disabled in Settings." };
       }
-      if (this.agentDashboardMode !== "legacy" || !this.agentMonitor) {
-        return {
-          ok: false,
-          error: "Reprocessing is not available in design-system dashboard mode.",
-        };
-      }
-      try {
-        await this.agentMonitor.stop();
-        const agentMonitorDir = path.join(
-          app.getPath("userData"),
-          "agent-monitor",
-        );
-        for (const name of [
-          "dashboard.db",
-          "dashboard.db-wal",
-          "dashboard.db-shm",
-        ]) {
-          try {
-            rmSync(path.join(agentMonitorDir, name));
-          } catch {
-            /* file may not exist */
-          }
-        }
-        void this.agentMonitor.start();
-        return { ok: true };
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
+      return {
+        ok: false,
+        error: "Reprocessing is not available for the PGlite dashboard.",
+      };
     });
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
@@ -2899,7 +2771,7 @@ export class DesktopApplication {
           };
         }
         const result = setAgentMonitorHooksEnabled(enabled === true);
-        if (result.ok && this.agentDashboardMode === "design-system") {
+        if (result.ok) {
           // Hooks own live Claude capture, so toggling them must re-evaluate
           // the Claude file-watcher gating (`shouldWatchClaude`): hooks-on ⇒ no
           // Claude watcher (avoid double-counting turns), hooks-off ⇒ Claude
@@ -3005,10 +2877,6 @@ export class DesktopApplication {
         if (typeof partial.agentMonitorEnabled === "boolean") {
           nextPartial.agentMonitorEnabled = partial.agentMonitorEnabled;
         }
-        if (typeof partial.agentDashboardDesignSystemEnabled === "boolean") {
-          nextPartial.agentDashboardDesignSystemEnabled =
-            partial.agentDashboardDesignSystemEnabled;
-        }
         if (typeof partial.planExtractionEnabled === "boolean") {
           nextPartial.planExtractionEnabled = partial.planExtractionEnabled;
         }
@@ -3079,15 +2947,8 @@ export class DesktopApplication {
             normalizeScopePath(currentSettings.sandboxBaseDirectory)
         ) {
           await seedReposConfig(selectedSandbox);
-          if (this.agentDashboardMode === "legacy" && this.agentMonitor) {
-            this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
-            if (this.isAgentMonitorEnabled()) {
-              await this.agentMonitor.stop();
-              void this.agentMonitor.start();
-            }
-          }
-          // Design-system mode reads the sandbox directory through a live
-          // callback on every hook/collector event, so it needs no restart.
+          // Repo seeding is a setup convenience only; dashboard ingest is not
+          // scoped by the sandbox directory.
         }
 
         // Notify renderer of flag changes so the Feature Flags panel can refresh.

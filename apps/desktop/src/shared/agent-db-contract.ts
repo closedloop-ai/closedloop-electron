@@ -5,12 +5,10 @@
 // shared contract between main and renderer — the renderer MUST import its DB
 // response shapes from here, NOT from `src/main/database/types.ts`.
 //
-// Raw persistence rows (the untyped `Record<string, unknown>` produced by
-// `node:sqlite`) are private to `src/main/database/`. Each repository store maps
-// those raw rows into the DTOs below via its `toRow()` helper, so a SQLite
-// schema/column change is absorbed at that boundary and does not break the
-// renderer's compile-time contract. Purely-internal row types that never cross
-// IPC (e.g. `TokenUsageRow`) stay in `src/main/database/types.ts`.
+// Raw persistence rows are private to `src/main/database/`. Each repository
+// store maps those raw rows into the DTOs below, so a schema/column change is
+// absorbed at that boundary and does not break the renderer's compile-time
+// contract. Purely-internal row types that never cross IPC stay in main.
 
 export interface SessionRow {
   id: string;
@@ -211,4 +209,268 @@ export interface AgentHierarchyNode {
     summary: string | null;
     createdAt: string | null;
   }>;
+}
+
+export interface DashboardPackSummary {
+  id: string;
+  name: string;
+  harness: string;
+  installPath: string | null;
+  sourceUrl: string | null;
+  version: string | null;
+  skillCount: number;
+  toolCallCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardSkillSummary {
+  id: string;
+  packId: string | null;
+  name: string;
+  harness: string;
+  description: string | null;
+  installPath: string | null;
+  invocationCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardToolSummary {
+  toolName: string;
+  invocationCount: number;
+  sessionCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardSubAgentSummary {
+  subagentType: string;
+  total: number;
+  completed: number;
+  errors: number;
+  sessions: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardPlanSummary {
+  id: string;
+  sessionId: string | null;
+  title: string;
+  source: string | null;
+  content: string;
+  timestamp: string | null;
+  harness: string | null;
+  cwd: string | null;
+}
+
+export interface DashboardPullRequestSummary {
+  id: string;
+  sessionId: string | null;
+  sessionName: string | null;
+  prUrl: string;
+  prNumber: number;
+  repoFullName: string;
+  branchName: string | null;
+  headSha: string | null;
+  title: string | null;
+  harness: string | null;
+  observedAt: string | null;
+}
+
+export interface DashboardCoreFeatures {
+  packs: DashboardPackSummary[];
+  skills: DashboardSkillSummary[];
+  tools: DashboardToolSummary[];
+  subagents: DashboardSubAgentSummary[];
+  plans: DashboardPlanSummary[];
+  pullRequests: DashboardPullRequestSummary[];
+}
+
+// --- Catalog (FEA-1314) ---
+
+export interface CatalogEntry {
+  packId: string;
+  displayName: string;
+  category: string | null;
+  githubUrl: string;
+  marketplaceUrl: string | null;
+  description: string | null;
+  descriptionLive: string | null;
+  harnesses: string[];
+  installCommands: Record<string, string> | null;
+  uninstallCommands: Record<string, string> | null;
+  installNotes: string | null;
+  placeholderReason: string | null;
+  verified: boolean;
+  readmeExcerpt: string | null;
+  stars: number | null;
+  forks: number | null;
+  lastRelease: string | null;
+  seedVersion: number;
+  pinOrder: number | null;
+  contents: CatalogContentsConfig | null;
+  contentsCache: CatalogContentItem[] | null;
+  detectionPatterns: string[] | null;
+  harnessAgnostic: boolean;
+  projectScoped: boolean;
+  singleInstall: boolean;
+  postInstall: Record<string, unknown> | null;
+  // Joined from agent_packs
+  installedHarnesses: string[];
+  skillCount: number;
+  usageCount: number;
+  // Sparkline data
+  history: Array<{ fetchedAt: string; stars: number; forks: number }>;
+}
+
+export interface CatalogContentsConfig {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface CatalogContentItem {
+  name: string;
+  type: string;
+  description?: string;
+  path?: string;
+}
+
+export interface InstallRunRecord {
+  id: number;
+  packId: string;
+  harness: string | null;
+  action: string;
+  command: string | null;
+  exitCode: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  stdoutTail: string | null;
+  stderrTail: string | null;
+}
+
+export interface CatalogMutationResult {
+  started: boolean;
+  runId?: number;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface InstallOutputChunk {
+  runId: number;
+  type: "start" | "stdout" | "stderr" | "error" | "post_install" | "copy_command" | "complete";
+  data: unknown;
+}
+
+// --- Installed Packs (FEA-1224) ---
+
+export interface InstalledPack {
+  packId: string;
+  harnesses: string[];
+  installs: Array<{
+    harness: string;
+    installPath: string;
+    installKind: string | null;
+    sourceUrl: string | null;
+    version: string | null;
+    detectedAt: string | null;
+    lastSeenAt: string | null;
+  }>;
+  skillCount: number;
+  lastSeenAt: string | null;
+}
+
+export interface InstalledPackDetail extends InstalledPack {
+  skills: Array<{
+    skillId: string;
+    name: string | null;
+    version: string | null;
+    description: string | null;
+    harness: string | null;
+  }>;
+  associations: Array<{
+    projectPath: string;
+    detectedAt: string | null;
+    lastSeenAt: string | null;
+  }>;
+}
+
+export interface SkillWithInvocations {
+  skillId: string;
+  packId: string | null;
+  name: string;
+  harness: string | null;
+  description: string | null;
+  invocationCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface SkillInvocation {
+  eventId: string;
+  sessionId: string;
+  sessionName: string | null;
+  harness: string | null;
+  model: string | null;
+  createdAt: string | null;
+}
+
+// --- Plans (FEA-1189) ---
+
+export interface PlanRecord {
+  id: string;
+  title: string | null;
+  status: string;
+  source: string | null;
+  captureMethod: string | null;
+  harness: string | null;
+  sessionId: string | null;
+  filePath: string | null;
+  sourceLogPath: string | null;
+  needsConfirmation: boolean;
+  confidence: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+  latestContent: string | null;
+  versionCount: number;
+}
+
+export interface PlanVersionRecord {
+  id: string;
+  planId: string;
+  versionNumber: number;
+  contentMarkdown: string | null;
+  contentSha256: string | null;
+  authorType: string | null;
+  captureMethod: string | null;
+  createdAt: string | null;
+}
+
+// --- Pull Requests (FEA-1226) ---
+
+export interface PrRecord {
+  id: string;
+  sessionId: string | null;
+  prUrl: string;
+  prNumber: number | null;
+  repoFullName: string | null;
+  branchName: string | null;
+  headSha: string | null;
+  title: string | null;
+  harness: string | null;
+  observedAt: string | null;
+  createdAt: string | null;
+}
+
+export interface PrStats {
+  totalPrs: number;
+  sessionsWithPrs: number;
+  repos: number;
+}
+
+export interface PrSessionGroup {
+  sessionId: string;
+  sessionName: string | null;
+  cwd: string | null;
+  harness: string | null;
+  startedAt: string | null;
+  prs: PrRecord[];
 }

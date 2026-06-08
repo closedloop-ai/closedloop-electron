@@ -199,7 +199,7 @@ function toImportSpecifier(fromDir: string, targetJsPath: string): string {
   return specifier;
 }
 
-test("design-system dashboard side effects stay behind explicit mode gates", () => {
+test("PGlite dashboard side effects stay behind the Agent Dashboard runtime boundary", () => {
   const appSource = readSource("src/main/app.ts");
   const indexSource = readSource("src/main/index.ts");
   const preloadSource = readSource("src/main/preload.ts");
@@ -214,34 +214,60 @@ test("design-system dashboard side effects stay behind explicit mode gates", () 
   );
   assert.match(
     indexSource,
-    /if \(shouldRegisterDesignSystemScheme\(\)\) \{\s*protocol\.registerSchemesAsPrivileged/s,
+    /protocol\.registerSchemesAsPrivileged\(\[/,
   );
+  assert.doesNotMatch(indexSource, /shouldRegisterDesignSystemScheme/);
   assert.doesNotMatch(preloadSource, /desktop:db:/);
   assert.doesNotMatch(preloadCommonSource, /desktop:db:/);
   assert.match(preloadSource, /exposeDesktopApi\(\)/);
   assert.match(preloadDesignSystemSource, /desktop:db:get-sessions/);
   assert.match(preloadDesignSystemSource, /desktop:db:changed/);
+  assert.match(preloadDesignSystemSource, /desktop:db:get-core-features/);
+  assert.match(preloadDesignSystemSource, /desktop:db:get-pull-requests/);
+  assert.match(designSystemRuntimeSource(), /"agent-dashboard-ingest"/);
+  assert.doesNotMatch(
+    designSystemRuntimeSource(),
+    /stateDir:[\s\S]*"agent-monitor"/,
+  );
   assert.match(
     windowSource,
-    /agentDashboardMode === "design-system"[\s\S]*--closedloop-agent-dashboard-design-system/,
+    /--closedloop-agent-dashboard-design-system/,
   );
   assert.match(windowSource, /preload-design-system\.js/);
-  assert.match(windowSource, /preload\.js/);
-  assert.match(
-    windowSource,
-    /agentDashboardMode !== "design-system"[\s\S]*const rendererPath = resolveLegacyRendererPath\(\)[\s\S]*loadFile\(rendererPath\)/,
-  );
+  assert.match(windowSource, /DESIGN_RENDERER_URL/);
+  assert.match(windowSource, /loadURL\(DESIGN_RENDERER_URL\)/);
+  assert.doesNotMatch(windowSource, /agentDashboardMode/);
+  assert.doesNotMatch(windowSource, /resolveLegacyRendererPath/);
+  assert.doesNotMatch(windowSource, /loadFile\(rendererPath\)/);
   assert.match(designSystemRuntimeSource(), /ipcMain\.removeHandler\(channel\)/);
+  const designSystemSource = designSystemRuntimeSource();
+  const handlerRegistrationIndex = designSystemSource.indexOf(
+    "registerIpcHandlers();",
+  );
+  const databaseReadyIndex = designSystemSource.indexOf(
+    "const agentDatabase = await agentDatabasePromise;",
+  );
+  assert.ok(handlerRegistrationIndex >= 0);
+  assert.ok(databaseReadyIndex >= 0);
+  assert.ok(
+    handlerRegistrationIndex < databaseReadyIndex,
+    "design-system DB IPC handlers must be registered before awaiting PGlite startup",
+  );
+  assert.doesNotMatch(
+    designSystemSource,
+    /SELECT DISTINCT cwd[\s\S]*ORDER BY started_at/,
+    "recent-projects query must stay valid for Postgres/PGlite",
+  );
+  assert.match(
+    designSystemSource,
+    /GROUP BY cwd[\s\S]*ORDER BY MAX\(started_at\) DESC NULLS LAST/,
+  );
   assert.match(
     appSource,
     /stopAgentCapture\(\{ closeDesignSystem: true \}\)/,
   );
-  assert.match(
-    appSource,
-    /reloadForAgentDashboardMode\("disabled"\)/,
-  );
-  assert.match(windowSource, /unhandle\?\: \(scheme: string\) => void/);
-  assert.match(windowSource, /protocolWithUnhandle\.unhandle\(APP_PROTOCOL\)/);
+  assert.doesNotMatch(appSource, /AgentMonitorSidecar/);
+  assert.doesNotMatch(appSource, /reloadForAgentDashboardMode/);
 });
 
 function designSystemRuntimeSource(): string {

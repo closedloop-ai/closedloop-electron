@@ -1,3 +1,6 @@
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Button } from "@closedloop-ai/design-system/components/ui/button";
+
 interface TopbarProps {
   collapsed: boolean;
   onToggleSidebar: () => void;
@@ -11,6 +14,12 @@ const NAV_LABELS: Record<string, string> = {
   activity: "Activity",
   analytics: "Analytics",
   workflows: "Workflows",
+  packs: "Packs",
+  skills: "Skills",
+  tools: "Tools",
+  subagents: "SubAgents",
+  plans: "Plans",
+  "pull-requests": "Pull Requests",
   approvals: "Approvals",
   requests: "Requests",
   diagnostics: "Diagnostics",
@@ -25,17 +34,16 @@ export function Topbar({ collapsed, onToggleSidebar, navId, runtimeStatus }: Top
 
   return (
     <header className="flex items-center gap-3 h-12 px-3 border-b shrink-0 bg-[var(--card)]">
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
         onClick={onToggleSidebar}
-        className="p-1 rounded hover:bg-[var(--accent)] text-[var(--muted-foreground)]"
+        className="text-[var(--muted-foreground)]"
         title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
-          <rect width="18" height="18" x="3" y="3" rx="2" />
-          <path d="M9 3v18" />
-        </svg>
-      </button>
+        {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+      </Button>
 
       <div className="flex items-center gap-2 text-sm">
         <span className="text-[var(--muted-foreground)]">{section}</span>

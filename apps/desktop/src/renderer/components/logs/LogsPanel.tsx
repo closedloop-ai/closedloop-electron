@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { FileText, Pause, Play, RefreshCw, X } from "lucide-react";
 import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Card, CardContent } from "@closedloop-ai/design-system/components/ui/card";
+import { Checkbox } from "@closedloop-ai/design-system/components/ui/checkbox";
 
 interface LogEntry {
   timestamp?: string;
@@ -76,28 +78,26 @@ export function LogsPanel() {
       <Card>
         <CardContent className="pt-4">
           <div className="flex items-center gap-2 mb-3">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={verbose} onChange={(e) => setVerbose(e.target.checked)} className="rounded" />
+            <label className="flex items-center gap-2 text-sm cursor-pointer" htmlFor="verbose-logs">
+              <Checkbox
+                id="verbose-logs"
+                checked={verbose}
+                onCheckedChange={(checked) => setVerbose(checked === true)}
+              />
               Verbose
             </label>
             <div className="flex-1" />
-            <Button variant="ghost" size="sm" onClick={load} title="Refresh">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" className="size-3.5">
-                <path d="M1.5 1.5v4.5h4.5"/><path d="M2.3 10a6 6 0 1 0 .9-4.8L1.5 6"/>
-              </svg>
+            <Button variant="ghost" size="icon-sm" onClick={load} title="Refresh">
+              <RefreshCw className="size-3.5" />
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => setPaused((p) => !p)} title={paused ? "Resume" : "Pause"}>
-              {paused ? "▶" : "⏸"}
+            <Button variant="ghost" size="icon-sm" onClick={() => setPaused((p) => !p)} title={paused ? "Resume" : "Pause"}>
+              {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
             </Button>
-            <Button variant="ghost" size="sm" onClick={handleOpenFile} title="Open log file">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" className="size-3.5">
-                <path d="M9 2H4.5A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5V6"/><path d="M9 2v4h4"/><path d="M6 10h4"/>
-              </svg>
+            <Button variant="ghost" size="icon-sm" onClick={handleOpenFile} title="Open log file">
+              <FileText className="size-3.5" />
             </Button>
-            <Button variant="ghost" size="sm" onClick={handleClear} title="Clear logs">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" className="size-3.5">
-                <line x1="2" y1="2" x2="14" y2="14"/><line x1="14" y1="2" x2="2" y2="14"/>
-              </svg>
+            <Button variant="ghost" size="icon-sm" onClick={handleClear} title="Clear logs">
+              <X className="size-3.5" />
             </Button>
           </div>
 

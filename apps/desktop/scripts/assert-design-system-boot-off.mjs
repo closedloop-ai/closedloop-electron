@@ -10,33 +10,29 @@ import Module, { registerHooks } from "node:module";
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 if (process.argv[2] === "--probe-child") {
-  await runProbeChild(process.argv[3]);
+  await runProbeChild();
 } else {
   runParent();
 }
 
 function runParent() {
-  const modes = ["disabled", "legacy"];
-  const summaries = [];
-  for (const mode of modes) {
-    const output = execFileSync(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        fileURLToPath(import.meta.url),
-        "--probe-child",
-        mode,
-      ],
-      {
-        cwd: appDir,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "inherit"],
-      },
-    ).trim();
-    summaries.push(JSON.parse(lastJsonLine(output)));
-  }
-  console.log(JSON.stringify({ ok: true, modes: summaries }, null, 2));
+  const output = execFileSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      fileURLToPath(import.meta.url),
+      "--probe-child",
+    ],
+    {
+      cwd: appDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "inherit"],
+      timeout: 15_000,
+    },
+  ).trim();
+
+  console.log(JSON.stringify({ ok: true, summary: JSON.parse(lastJsonLine(output)) }, null, 2));
 }
 
 function lastJsonLine(output) {
@@ -48,15 +44,11 @@ function lastJsonLine(output) {
   return line;
 }
 
-async function runProbeChild(mode) {
-  if (mode !== "disabled" && mode !== "legacy") {
-    throw new Error(`Unknown boot probe mode: ${mode}`);
-  }
-
+async function runProbeChild() {
   const userDataPath = mkdtempSync(
-    path.join(tmpdir(), `agent-dashboard-${mode}-boot-`),
+    path.join(tmpdir(), "agent-dashboard-disabled-boot-"),
   );
-  const state = createProbeState(mode, userDataPath);
+  const state = createProbeState(userDataPath);
   globalThis.__agentDashboardBootProbeState = state;
 
   const electronCjsStub = createElectronCjsStub(state);
@@ -86,23 +78,20 @@ async function runProbeChild(mode) {
       if (specifier === "node:child_process") {
         return stub("node-child-process");
       }
-      if (specifier === "node:sqlite") {
-        return stub("node-sqlite");
-      }
       return nextResolve(specifier, context);
     },
     load(url, context, nextLoad) {
       if (url.startsWith("file:")) {
         const filePath = fileURLToPath(url);
-        if (isDesignOnlyModule(filePath)) {
-          state.loadedDesignModules.push(toAppRelative(filePath));
+        if (isAgentDashboardRuntimeModule(filePath)) {
+          state.loadedRuntimeModules.push(toAppRelative(filePath));
         }
       }
       return nextLoad(url, context);
     },
   });
 
-  let exitAfterCleanup = false;
+  let exitCode = 1;
   try {
     await import(pathToFileURL(path.join(appDir, "src/main/index.ts")).href);
     state.app.emit("ready");
@@ -110,35 +99,32 @@ async function runProbeChild(mode) {
     await settle();
 
     const summary = summarizeState(state);
-    assertNoDesignBootEffects(summary);
+    assertNoAgentDashboardBootEffects(summary);
     process.stdout.write(JSON.stringify(summary));
-    exitAfterCleanup = true;
+    exitCode = 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    process.stderr.write(`${message}\n`);
   } finally {
     rmSync(userDataPath, { recursive: true, force: true });
-    if (exitAfterCleanup) {
-      process.exit(0);
-    }
+    process.exit(exitCode);
   }
 }
 
-function createProbeState(mode, userDataPath) {
+function createProbeState(userDataPath) {
   return {
-    mode,
     userDataPath,
     app: null,
-    settingsSeed:
-      mode === "disabled"
-        ? { agentMonitorEnabled: false, agentDashboardDesignSystemEnabled: false }
-        : { agentMonitorEnabled: true, agentDashboardDesignSystemEnabled: false },
-    loadedDesignModules: [],
-    databaseOpens: [],
+    settingsSeed: {
+      agentMonitorEnabled: false,
+      cloudConnectionEnabled: false,
+      onboardingCompleted: false,
+    },
+    loadedRuntimeModules: [],
     ipcHandlers: new Set(),
     ipcRemovedHandlers: [],
-    protocolPrivilegedSchemes: [],
     protocolHandles: [],
-    protocolUnhandles: [],
     browserWindows: [],
-    loadFiles: [],
     loadUrls: [],
     exits: [],
     childProcesses: [],
@@ -197,11 +183,6 @@ function createElectronCjsStub(state) {
         additionalArguments:
           options?.webPreferences?.additionalArguments ?? [],
       });
-    }
-
-    loadFile(filePath) {
-      state.loadFiles.push(filePath);
-      return Promise.resolve();
     }
 
     loadURL(url) {
@@ -266,15 +247,11 @@ function createElectronCjsStub(state) {
       createFromPath: () => ({ setTemplateImage: () => undefined }),
     },
     protocol: {
-      registerSchemesAsPrivileged: (schemes) => {
-        state.protocolPrivilegedSchemes.push(...schemes);
-      },
+      registerSchemesAsPrivileged: () => undefined,
       handle: (scheme) => {
         state.protocolHandles.push(scheme);
       },
-      unhandle: (scheme) => {
-        state.protocolUnhandles.push(scheme);
-      },
+      unhandle: () => undefined,
     },
     ipcMain: {
       handle: (channel) => {
@@ -406,25 +383,6 @@ function stubSource(kind) {
       }
     `;
   }
-  if (kind === "node-sqlite") {
-    return `
-      export class DatabaseSync {
-        constructor(filename) {
-          this.filename = filename;
-          globalThis.__agentDashboardBootProbeState.databaseOpens.push(String(filename));
-        }
-        exec() {}
-        prepare() {
-          return {
-            all: () => [],
-            get: () => undefined,
-            run: () => ({ changes: 0, lastInsertRowid: 0 }),
-          };
-        }
-        close() {}
-      }
-    `;
-  }
   throw new Error(`Unknown stub kind: ${kind}`);
 }
 
@@ -432,81 +390,44 @@ function summarizeState(state) {
   const dbHandlers = [...state.ipcHandlers].filter((channel) =>
     channel.startsWith("desktop:db:"),
   );
-  const designDbPath = path.join(state.userDataPath, "agent-dashboard.sqlite");
+  const pgliteDataDir = path.join(state.userDataPath, "agent-dashboard.pgdata");
   return {
-    mode: state.mode,
     userDataPath: state.userDataPath,
-    loadedDesignModules: state.loadedDesignModules,
+    loadedRuntimeModules: state.loadedRuntimeModules,
     dbHandlers,
-    databaseOpens: state.databaseOpens,
-    designDatabaseFileExists: existsSync(designDbPath),
-    appProtocolPrivileged:
-      state.protocolPrivilegedSchemes.some((entry) => entry?.scheme === "app"),
-    appProtocolHandled: state.protocolHandles.includes("app"),
+    pgliteDataDirExists: existsSync(pgliteDataDir),
     browserWindows: state.browserWindows,
-    loadFiles: state.loadFiles.map(toAppRelative),
     loadUrls: state.loadUrls,
     exits: state.exits,
   };
 }
 
-function assertNoDesignBootEffects(summary) {
+function assertNoAgentDashboardBootEffects(summary) {
   const failures = [];
-  if (summary.loadedDesignModules.length > 0) {
-    failures.push(`loaded design modules: ${summary.loadedDesignModules.join(", ")}`);
+  if (summary.loadedRuntimeModules.length > 0) {
+    failures.push(`loaded Agent Dashboard runtime modules: ${summary.loadedRuntimeModules.join(", ")}`);
   }
   if (summary.dbHandlers.length > 0) {
     failures.push(`registered DB IPC handlers: ${summary.dbHandlers.join(", ")}`);
   }
-  const designDbOpens = summary.databaseOpens.filter((opened) =>
-    opened.endsWith("agent-dashboard.sqlite"),
-  );
-  if (designDbOpens.length > 0) {
-    failures.push(`opened design DB: ${designDbOpens.join(", ")}`);
-  }
-  if (summary.designDatabaseFileExists) {
-    failures.push("created agent-dashboard.sqlite under temp userData");
-  }
-  if (summary.appProtocolPrivileged) {
-    failures.push("privileged app:// protocol");
-  }
-  if (summary.appProtocolHandled) {
-    failures.push("registered app:// protocol handler");
-  }
-  const designPreloads = summary.browserWindows.filter((window) =>
-    String(window.preload).endsWith("preload-design-system.js"),
-  );
-  if (designPreloads.length > 0) {
-    failures.push("loaded design-system preload");
-  }
-  const designArgs = summary.browserWindows.filter((window) =>
-    window.additionalArguments.includes(
-      "--closedloop-agent-dashboard-design-system",
-    ),
-  );
-  if (designArgs.length > 0) {
-    failures.push("passed design-system renderer argument");
-  }
-  const appUrls = summary.loadUrls.filter((url) => String(url).startsWith("app://"));
-  if (appUrls.length > 0) {
-    failures.push(`loaded app:// URL: ${appUrls.join(", ")}`);
+  if (summary.pgliteDataDirExists) {
+    failures.push("created agent-dashboard.pgdata under temp userData");
   }
   if (summary.exits.some((code) => code !== 0)) {
     failures.push(`boot called app.exit with non-zero code: ${summary.exits.join(", ")}`);
   }
   if (failures.length > 0) {
-    throw new Error(`${summary.mode} boot no-load assertion failed: ${failures.join("; ")}`);
+    throw new Error(`disabled Agent Dashboard boot assertion failed: ${failures.join("; ")}`);
   }
 }
 
-function isDesignOnlyModule(filePath) {
+function isAgentDashboardRuntimeModule(filePath) {
   const relative = toAppRelative(filePath);
   return (
     relative === "src/main/agent-dashboard-design-system-runtime.ts" ||
     relative === "src/main/agent-monitor-listener.ts" ||
     relative.startsWith("src/main/collectors/") ||
-    relative.startsWith("src/main/database/") ||
-    relative === "src/main/preload-design-system.ts"
+    relative.startsWith("src/main/database/")
   );
 }
 

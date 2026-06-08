@@ -45,17 +45,14 @@ This rule does NOT apply to internal contracts that ship as a single unit with t
 - **[mistake]**: Never fabricate history in changelogs, commit messages, or comments. Do not claim code "replaces" or "fixes" a prior implementation unless that implementation verifiably exists in the codebase or git history. (context: changelog|hallucination|fabrication)
 - **[mistake]**: Before adding a fallback or recovery path, verify the triggering condition can actually occur. Dead fallbacks that read from files never written or variables never set create false confidence in error handling. (context: dead-code|fallback|unreachable)
 
-### Agent Monitor & Sidecar Security
-- **[mistake]**: Treat localhost sidecar routes and iframe messages as privileged surfaces. Mutating routes need origin/trusted-action guards, explicit target origins, and regression coverage. (context: agent-monitor|sidecar|security)
+### Agent Monitor Security
+- **[mistake]**: Treat localhost Agent Monitor hook/listener routes and renderer IPC as privileged surfaces. Mutating routes need explicit local-only binding, trusted-action guards where applicable, and regression coverage. (context: agent-monitor|listener|ipc|security)
 
 ### Process Spawning & Secrets
 - **[mistake]**: Keep large or sensitive data out of spawned argv/env. Use stdin or files for prompts, quote shell args, set approved cwd, and pass minimal child environments. (context: spawn|argv|env|secrets)
 
 ### Boundary Validation
 - **[mistake]**: Runtime-validate gateway, IPC, and persisted payloads before path or file use. TypeScript casts and preload promise types do not protect missing or null fields. (context: validation|ipc|gateway)
-
-### Generated Agent Monitor Runtime
-- **[pattern]**: When generated sidecar overlays, snippets, or patch inputs change, update stamp/materialization inputs and verify generated output so stale assets or bypassed patches cannot ship. (context: agent-monitor|generated|build)
 
 ### State & Lifecycle
 - **[mistake]**: Setting toggles must update persisted state and in-memory side effects together. Avoid one-way restart guards, stale tray state, or stale cloud presence. (context: settings|lifecycle|state)
