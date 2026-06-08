@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { BrowserWindow } from "electron";
 import type { Results } from "@electric-sql/pglite";
+import type { CatalogEntry } from "../../shared/agent-db-contract.js";
 import { gatewayLog } from "../gateway-logger.js";
 import {
   getCatalog,
@@ -84,17 +85,6 @@ interface TrustedActionResult {
   ok: boolean;
   statusCode?: number;
   error?: { code: string; message: string };
-}
-
-interface CatalogEntry {
-  pack_id: string;
-  single_install?: number;
-  project_scoped?: boolean | number;
-  harnesses?: string[];
-  install_commands?: Record<string, string>;
-  uninstall_commands?: Record<string, string>;
-  post_install?: unknown;
-  [key: string]: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +285,7 @@ export function pickSingleInstallCommand(
   action: "install" | "uninstall",
 ): { command: string | null; registerHarnesses: string[] } {
   const cmdMap =
-    action === "uninstall" ? entry.uninstall_commands : entry.install_commands;
+    action === "uninstall" ? entry.uninstallCommands : entry.installCommands;
   const harnesses = Array.isArray(entry.harnesses) ? entry.harnesses : [];
 
   if (action === "uninstall") {
@@ -426,7 +416,7 @@ export async function streamRun(db: DbClient, opts: StreamRunOptions): Promise<S
   // Placeholder runId for error events sent before a DB row exists
   const errorRunId = -1;
 
-  const entry = await getCatalog(db, pack_id) as CatalogEntry | null;
+  const entry = await getCatalog(db, pack_id);
   if (!entry) {
     sendIpc(getWindow, errorRunId, "error", {
       message: `pack_id not in catalog: ${pack_id}`,
@@ -442,7 +432,7 @@ export async function streamRun(db: DbClient, opts: StreamRunOptions): Promise<S
   // pack scanner registration after successful install).
   let _resolvedHarnesses: string[] = [harness];
 
-  if (entry.single_install === 1 && harness === "auto") {
+  if (entry.singleInstall && harness === "auto") {
     const picked = pickSingleInstallCommand(entry, action);
     command = picked.command;
     _resolvedHarnesses = picked.registerHarnesses;
@@ -467,7 +457,7 @@ export async function streamRun(db: DbClient, opts: StreamRunOptions): Promise<S
     }
   } else {
     const commandMap =
-      action === "uninstall" ? entry.uninstall_commands : entry.install_commands;
+      action === "uninstall" ? entry.uninstallCommands : entry.installCommands;
     command = commandMap && commandMap[harness];
     if (!command) {
       const msg = `no ${action} command for harness '${harness}' on pack '${pack_id}'`;
@@ -504,17 +494,13 @@ export async function streamRun(db: DbClient, opts: StreamRunOptions): Promise<S
 
   // Project-scoped guard
   const requiresProjectCwd =
-    entry.project_scoped === true ||
-    entry.project_scoped === 1 ||
-    looksProjectRelative(command);
+    entry.projectScoped || looksProjectRelative(command);
   if (requiresProjectCwd && !resolvedCwd) {
     sendIpc(getWindow, errorRunId, "copy_command", {
       pack_id,
       command,
       reason:
-        entry.project_scoped === true || entry.project_scoped === 1
-          ? "project_scoped"
-          : "looks_project_relative",
+        entry.projectScoped ? "project_scoped" : "looks_project_relative",
     });
     const msg =
       `pack '${pack_id}' is project-scoped (command operates on cwd). ` +
@@ -599,8 +585,8 @@ export async function streamRun(db: DbClient, opts: StreamRunOptions): Promise<S
 
     // On successful install: surface the pack's post_install block before the
     // complete event so the client can render a "next steps" screen.
-    if (!killed && exitCode === 0 && action === "install" && entry.post_install) {
-      sendIpc(getWindow, runId, "post_install", entry.post_install);
+    if (!killed && exitCode === 0 && action === "install" && entry.postInstall) {
+      sendIpc(getWindow, runId, "post_install", entry.postInstall);
     }
 
     sendIpc(getWindow, runId, "complete", {

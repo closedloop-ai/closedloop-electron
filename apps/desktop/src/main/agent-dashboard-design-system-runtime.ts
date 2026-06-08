@@ -429,7 +429,7 @@ function registerDesignSystemDbIpcHandlers(
   ipcMain.handle("desktop:db:get-catalog-readme", withStoreDb(async (dbForStores, packId: unknown) => {
     if (typeof packId !== "string") return null;
     const entry = await catalogStore.getCatalog(dbForStores, packId);
-    return entry?.readme_excerpt ?? null;
+    return entry?.readmeExcerpt ?? null;
   }));
 
   ipcMain.handle("desktop:db:get-catalog-contents", withStoreDb(async (dbForStores, packId: unknown) => {
@@ -438,7 +438,7 @@ function registerDesignSystemDbIpcHandlers(
     if (!entry) return null;
     await refreshCatalogContents(dbForStores, entry);
     const refreshed = await catalogStore.getCatalog(dbForStores, packId);
-    return refreshed?.contents_cache ?? null;
+    return refreshed?.contentsCache ?? null;
   }));
 
   ipcMain.handle("desktop:db:get-catalog-history", withStoreDb((dbForStores, packId: unknown) => {

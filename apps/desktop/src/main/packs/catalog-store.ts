@@ -17,6 +17,12 @@
  */
 
 import type { Results } from "@electric-sql/pglite";
+import type {
+  CatalogContentItem,
+  CatalogContentsConfig,
+  CatalogEntry,
+  InstallRunRecord,
+} from "../../shared/agent-db-contract.js";
 
 /** Minimal subset of PgliteClient / PgliteExecutor used by catalog-store. */
 type DbClient = {
@@ -133,23 +139,6 @@ interface SeedDoc {
 }
 
 // ---------------------------------------------------------------------------
-// Hydration — PGlite JSONB columns return parsed objects, so no JSON.parse.
-// Provide safe fallback defaults for nullable JSONB fields.
-// ---------------------------------------------------------------------------
-
-function hydrateRow(row: CatalogRow) {
-  return {
-    ...row,
-    harnesses: row.harnesses ?? [],
-    install_commands: row.install_commands ?? {},
-    uninstall_commands: row.uninstall_commands ?? {},
-    contents: row.contents ?? null,
-    contents_cache: row.contents_cache ?? null,
-    post_install: row.post_install ?? null,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Usage attribution (best-effort)
 // ---------------------------------------------------------------------------
 
@@ -167,6 +156,116 @@ async function loadUsageMap(
   // pack-store with listPackUsage is not yet ported to the first-party app.
   // Return an empty map until the dependency is available.
   return new Map();
+}
+
+function stringRecordOrNull(
+  value: Record<string, unknown> | null,
+): Record<string, string> | null {
+  if (!value) {
+    return null;
+  }
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string",
+  );
+  return Object.fromEntries(entries);
+}
+
+function catalogContentsOrNull(
+  value: Record<string, unknown> | null,
+): CatalogContentsConfig | null {
+  if (!value || typeof value.type !== "string") {
+    return null;
+  }
+  return { ...value, type: value.type };
+}
+
+function isCatalogContentItem(value: unknown): value is CatalogContentItem {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const item = value as { name?: unknown; type?: unknown };
+  return typeof item.name === "string" && typeof item.type === "string";
+}
+
+function catalogContentItemsOrNull(value: unknown[] | null): CatalogContentItem[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  return value.filter(isCatalogContentItem);
+}
+
+function splitInstalledHarnesses(value: string | null): string[] {
+  if (!value) {
+    return [];
+  }
+  return value.split(",").filter(Boolean);
+}
+
+function toHistoryEntry(row: HistoryRow): CatalogEntry["history"][number] {
+  return {
+    fetchedAt: row.fetched_at,
+    stars: row.stars ?? 0,
+    forks: row.forks ?? 0,
+  };
+}
+
+function toCatalogEntry(
+  row: CatalogRow,
+  {
+    history = [],
+    usage = null,
+  }: {
+    history?: CatalogEntry["history"];
+    usage?: PackUsage | null;
+  } = {},
+): CatalogEntry {
+  return {
+    packId: row.pack_id,
+    displayName: row.display_name,
+    category: row.category,
+    githubUrl: row.github_url,
+    marketplaceUrl: row.marketplace_url,
+    description: row.description,
+    descriptionLive: row.description_live,
+    harnesses: row.harnesses ?? [],
+    installCommands: stringRecordOrNull(row.install_commands),
+    uninstallCommands: stringRecordOrNull(row.uninstall_commands),
+    installNotes: row.install_notes,
+    placeholderReason: row.placeholder_reason,
+    verified: row.verified,
+    readmeExcerpt: row.readme_excerpt,
+    stars: row.stars,
+    forks: row.forks,
+    lastRelease: row.last_release,
+    seedVersion: row.seed_version,
+    pinOrder: row.pin_order,
+    contents: catalogContentsOrNull(row.contents),
+    contentsCache: catalogContentItemsOrNull(row.contents_cache),
+    detectionPatterns: row.detection_patterns,
+    harnessAgnostic: row.harness_agnostic,
+    projectScoped: row.project_scoped,
+    singleInstall: row.single_install,
+    postInstall: row.post_install,
+    installedHarnesses: splitInstalledHarnesses(row.installed_harnesses),
+    skillCount: row.installed_skill_count ?? 0,
+    usageCount: usage?.tool_calls ?? 0,
+    history,
+  };
+}
+
+function toInstallRunRecord(row: InstallRunRow): InstallRunRecord {
+  return {
+    id: row.id,
+    packId: row.pack_id,
+    harness: row.harness,
+    action: row.action,
+    command: row.command,
+    exitCode: row.exit_code,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    stdoutTail: row.stdout_tail,
+    stderrTail: row.stderr_tail,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +386,7 @@ export async function upsertCatalogSeed(
  * Installed status is decorated via subquery joins against `agent_packs` and
  * `skills`.
  */
-export async function listCatalog(db: DbClient) {
+export async function listCatalog(db: DbClient): Promise<CatalogEntry[]> {
   const result = await db.query<CatalogRow>(
     `SELECT
        c.*,
@@ -313,13 +412,9 @@ export async function listCatalog(db: DbClient) {
 
   const usage = await loadUsageMap(db);
 
-  return rows.map((r) => ({
-    ...hydrateRow(r),
-    installed_harnesses: r.installed_harnesses
-      ? r.installed_harnesses.split(",")
-      : [],
-    usage: usage.get(r.pack_id) || null,
-  }));
+  return rows.map((row) =>
+    toCatalogEntry(row, { usage: usage.get(row.pack_id) ?? null }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +426,7 @@ export async function getCatalog(
   db: DbClient,
   packId: string,
   { historyDays = 30 }: { historyDays?: number } = {},
-) {
+): Promise<CatalogEntry | null> {
   const result = await db.query<CatalogRow>(
     `SELECT
        c.*,
@@ -355,14 +450,10 @@ export async function getCatalog(
 
   const usage = await loadUsageMap(db);
 
-  return {
-    ...hydrateRow(row),
-    installed_harnesses: row.installed_harnesses
-      ? row.installed_harnesses.split(",")
-      : [],
-    usage: usage.get(packId) || null,
+  return toCatalogEntry(row, {
+    usage: usage.get(packId) ?? null,
     history: await listHistory(db, packId, historyDays),
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +464,7 @@ export async function listHistory(
   db: DbClient,
   packId: string,
   days = 30,
-): Promise<HistoryRow[]> {
+): Promise<CatalogEntry["history"]> {
   const since = new Date(
     Date.now() - days * 24 * 60 * 60 * 1000,
   ).toISOString();
@@ -384,7 +475,7 @@ export async function listHistory(
      ORDER BY fetched_at ASC`,
     [packId, since],
   );
-  return result.rows;
+  return result.rows.map(toHistoryEntry);
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +666,7 @@ export async function listInstallRuns(
     limit = 50,
     offset = 0,
   }: { pack_id?: string | null; limit?: number; offset?: number } = {},
-): Promise<InstallRunRow[]> {
+): Promise<InstallRunRecord[]> {
   if (pack_id) {
     const result = await db.query<InstallRunRow>(
       `SELECT * FROM pack_install_runs
@@ -584,7 +675,7 @@ export async function listInstallRuns(
        LIMIT $2 OFFSET $3`,
       [pack_id, limit, offset],
     );
-    return result.rows;
+    return result.rows.map(toInstallRunRecord);
   }
   const result = await db.query<InstallRunRow>(
     `SELECT * FROM pack_install_runs
@@ -592,7 +683,7 @@ export async function listInstallRuns(
      LIMIT $1 OFFSET $2`,
     [limit, offset],
   );
-  return result.rows;
+  return result.rows.map(toInstallRunRecord);
 }
 
 export async function deleteInstallRun(

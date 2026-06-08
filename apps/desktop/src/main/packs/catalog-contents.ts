@@ -17,7 +17,7 @@
  *                                  (claude-plugins-official entries)
  *   - none                      — pack has no skill/command listing (RTK, claude-code-router)
  *
- * Returns [{ name, kind, description?, path? }]. kind is one of
+ * Returns [{ name, type, description?, path? }]. type is one of
  * 'skill', 'command', 'agent', 'plugin'.
  */
 
@@ -44,7 +44,7 @@ export type ContentItemKind = "skill" | "command" | "agent" | "plugin";
 
 export interface ContentItem {
   name: string;
-  kind: ContentItemKind;
+  type: ContentItemKind;
   description?: string | null;
   path?: string;
   category?: string;
@@ -78,10 +78,10 @@ interface ContentsSpec {
 }
 
 export interface CatalogEntry {
-  pack_id: string;
-  github_url: string;
-  contents: ContentsSpec | null;
-  contents_fetched_at?: string | null;
+  packId: string;
+  githubUrl: string;
+  contents: Record<string, unknown> | null;
+  contentsFetchedAt?: string | null;
 }
 
 interface GitHubTreeEntry {
@@ -106,6 +106,31 @@ type DbClient = {
 type CatalogDb = DbClient;
 
 // ---------- low-level GitHub helpers ----------
+
+function readString(
+  value: Record<string, unknown>,
+  key: keyof ContentsSpec,
+): string | undefined {
+  const raw = value[key];
+  return typeof raw === "string" ? raw : undefined;
+}
+
+function readStringArray(
+  value: Record<string, unknown>,
+  key: keyof ContentsSpec,
+): string[] {
+  const raw = value[key];
+  return Array.isArray(raw)
+    ? raw.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function readKind(value: Record<string, unknown>): ContentItemKind | undefined {
+  const raw = value.kind;
+  return raw === "skill" || raw === "command" || raw === "agent" || raw === "plugin"
+    ? raw
+    : undefined;
+}
 
 function parseGithubUrl(url: string | null | undefined): ParsedRepo | null {
   const m = String(url || "").match(/github\.com[/:]([^/]+)\/([^/?#.]+)/);
@@ -226,13 +251,13 @@ async function fetchSkillTree(
       `repos/${owner}/${repo}/contents/${encodeURI(entry.path)}/${skillMarker}`,
     );
     if (!file || !file.content) {
-      skills.push({ name: entry.name, kind: "skill", path: entry.path });
+      skills.push({ name: entry.name, type: "skill", path: entry.path });
       continue;
     }
     const meta = parseSkillFrontmatterFromBase64(file.content);
     skills.push({
       name: meta.name || entry.name,
-      kind: "skill",
+      type: "skill",
       description: meta.description || null,
       path: entry.path,
     });
@@ -259,7 +284,7 @@ async function fetchFlatMd(
     )
     .map((e) => ({
       name: e.name.replace(/\.md$/, ""),
-      kind: kind || "command",
+      type: kind || "command",
       path: e.path,
     }));
 }
@@ -288,7 +313,7 @@ async function fetchNestedMd(
       if (file.name.toLowerCase().startsWith("readme")) continue;
       items.push({
         name: file.name.replace(/\.md$/, ""),
-        kind: kind || "agent",
+        type: kind || "agent",
         category: cat.name,
         path: file.path,
       });
@@ -327,7 +352,7 @@ async function fetchClaudeMarketplace(
       if (Array.isArray(parsed.plugins)) {
         const items: ContentItem[] = parsed.plugins.map((p) => ({
           name: p.name,
-          kind: "plugin" as const,
+          type: "plugin" as const,
           description: p.description || null,
         }));
         // If a plugins_root is declared, walk each plugin's skills/ dir for a
@@ -416,7 +441,7 @@ async function fetchNestedSkillTree(
       if (skillDir.type !== "dir") continue;
       items.push({
         name: skillDir.name,
-        kind: "skill",
+        type: "skill",
         category: teamDir.name,
         path: skillDir.path,
       });
@@ -431,37 +456,54 @@ async function fetchNestedSkillTree(
 
 export async function fetchContents(entry: CatalogEntry): Promise<ContentItem[]> {
   const contents = entry.contents;
-  if (!contents || !contents.type) return [];
-  const parsed = parseGithubUrl(entry.github_url);
+  const type = contents ? readString(contents, "type") : undefined;
+  if (!contents || !type) return [];
+  const parsed = parseGithubUrl(entry.githubUrl);
   if (!parsed) return [];
   const { owner, repo } = parsed;
 
-  switch (contents.type) {
-    case "github-skill-tree":
-      return fetchSkillTree(owner, repo, contents.skills_path!, contents.skill_marker);
-    case "github-multi-skill-tree":
-      return fetchMultiSkillTree(owner, repo, contents.skill_paths, contents.skill_marker);
-    case "github-flat-md":
-      return fetchFlatMd(owner, repo, contents.md_path!, contents.kind);
-    case "github-nested-md":
-      return fetchNestedMd(owner, repo, contents.root_path!, contents.kind);
+  switch (type) {
+    case "github-skill-tree": {
+      const skillsPath = readString(contents, "skills_path");
+      if (!skillsPath) return [];
+      return fetchSkillTree(owner, repo, skillsPath, readString(contents, "skill_marker"));
+    }
+    case "github-multi-skill-tree": {
+      const skillPaths = readStringArray(contents, "skill_paths");
+      if (skillPaths.length === 0) return [];
+      return fetchMultiSkillTree(owner, repo, skillPaths, readString(contents, "skill_marker"));
+    }
+    case "github-flat-md": {
+      const mdPath = readString(contents, "md_path");
+      if (!mdPath) return [];
+      return fetchFlatMd(owner, repo, mdPath, readKind(contents));
+    }
+    case "github-nested-md": {
+      const rootPath = readString(contents, "root_path");
+      if (!rootPath) return [];
+      return fetchNestedMd(owner, repo, rootPath, readKind(contents));
+    }
     case "github-nested-skill-tree":
-      return fetchNestedSkillTree(owner, repo, contents.match_pattern);
+      return fetchNestedSkillTree(owner, repo, readString(contents, "match_pattern"));
     case "claude-marketplace": {
-      const repoFromContents = contents.marketplace_repo
-        ? parseGithubUrl(`https://github.com/${contents.marketplace_repo}`)
+      const marketplaceRepo = readString(contents, "marketplace_repo");
+      const repoFromContents = marketplaceRepo
+        ? parseGithubUrl(`https://github.com/${marketplaceRepo}`)
         : null;
       const mkO = repoFromContents ? repoFromContents.owner : owner;
       const mkR = repoFromContents ? repoFromContents.repo : repo;
-      return fetchClaudeMarketplace(mkO, mkR, contents.plugins_root);
+      return fetchClaudeMarketplace(mkO, mkR, readString(contents, "plugins_root"));
     }
     case "github-claude-plugin": {
-      const repoFromContents = contents.marketplace_repo
-        ? parseGithubUrl(`https://github.com/${contents.marketplace_repo}`)
+      const marketplaceRepo = readString(contents, "marketplace_repo");
+      const repoFromContents = marketplaceRepo
+        ? parseGithubUrl(`https://github.com/${marketplaceRepo}`)
         : null;
       const pluginO = repoFromContents ? repoFromContents.owner : owner;
       const pluginR = repoFromContents ? repoFromContents.repo : repo;
-      return fetchClaudePlugin(pluginO, pluginR, contents.plugin_path!);
+      const pluginPath = readString(contents, "plugin_path");
+      if (!pluginPath) return [];
+      return fetchClaudePlugin(pluginO, pluginR, pluginPath);
     }
     case "none":
       return [];
@@ -479,13 +521,13 @@ export async function refreshCatalogContents(
   catalogEntry: CatalogEntry,
 ): Promise<ContentItem[]> {
   const items = await fetchContents(catalogEntry);
-  await applyContentsFetch(db, { pack_id: catalogEntry.pack_id, items });
+  await applyContentsFetch(db, { pack_id: catalogEntry.packId, items });
   return items;
 }
 
 export function isContentsFresh(entry: CatalogEntry): boolean {
-  if (!entry.contents_fetched_at) return false;
+  if (!entry.contentsFetchedAt) return false;
   return (
-    Date.now() - new Date(entry.contents_fetched_at).getTime() < CONTENTS_TTL_MS
+    Date.now() - new Date(entry.contentsFetchedAt).getTime() < CONTENTS_TTL_MS
   );
 }

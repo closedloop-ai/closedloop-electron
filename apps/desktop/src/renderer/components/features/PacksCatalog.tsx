@@ -118,31 +118,31 @@ export function PacksCatalog() {
   const lowerSearch = search.toLowerCase();
 
   const filteredCatalog = useMemo(() => {
-    if (!catalog) return [];
-    if (!lowerSearch) return catalog;
-    return catalog.filter(
+    const entries = Array.isArray(catalog) ? catalog : [];
+    if (!lowerSearch) return entries;
+    return entries.filter(
       (e) =>
-        e.displayName.toLowerCase().includes(lowerSearch) ||
+        catalogDisplayName(e).toLowerCase().includes(lowerSearch) ||
         e.description?.toLowerCase().includes(lowerSearch) ||
         e.category?.toLowerCase().includes(lowerSearch) ||
-        e.packId.toLowerCase().includes(lowerSearch),
+        catalogPackId(e).toLowerCase().includes(lowerSearch),
     );
   }, [catalog, lowerSearch]);
 
   const installedEntries = useMemo(
-    () => filteredCatalog.filter((e) => e.installedHarnesses.length > 0),
+    () => filteredCatalog.filter((e) => catalogInstalledHarnesses(e).length > 0),
     [filteredCatalog],
   );
 
   const discoverEntries = useMemo(
-    () => filteredCatalog.filter((e) => e.installedHarnesses.length === 0),
+    () => filteredCatalog.filter((e) => catalogInstalledHarnesses(e).length === 0),
     [filteredCatalog],
   );
 
   const hasProjectScopedActions = useMemo(
     () =>
       filteredCatalog.some((entry) =>
-        entry.harnesses.some(
+        catalogHarnesses(entry).some(
           (harness) =>
             requiresProjectCwd(entry, harness, "install") ||
             requiresProjectCwd(entry, harness, "uninstall"),
@@ -474,11 +474,13 @@ function PackDetailView({
   const displayName = catalogEntry?.displayName ?? packId;
   const description = catalogEntry?.descriptionLive ?? catalogEntry?.description;
   const starHistory = catalogEntry?.history?.map((h) => h.stars) ?? [];
-  const hasProjectScopedActions = catalogEntry?.harnesses.some(
-    (harness) =>
-      requiresProjectCwd(catalogEntry, harness, "install") ||
-      requiresProjectCwd(catalogEntry, harness, "uninstall"),
-  ) ?? false;
+  const hasProjectScopedActions = catalogEntry
+    ? catalogHarnesses(catalogEntry).some(
+        (harness) =>
+          requiresProjectCwd(catalogEntry, harness, "install") ||
+          requiresProjectCwd(catalogEntry, harness, "uninstall"),
+      )
+    : false;
 
   return (
     <PageShell title={displayName} description={description ?? "Pack detail"}>
@@ -541,8 +543,8 @@ function PackDetailView({
       {catalogEntry && (
         <DashboardCard title="Harnesses">
           <div className="flex flex-wrap gap-3">
-            {catalogEntry.harnesses.map((harness) => {
-              const installed = catalogEntry.installedHarnesses.includes(harness);
+            {catalogHarnesses(catalogEntry).map((harness) => {
+              const installed = catalogInstalledHarnesses(catalogEntry).includes(harness);
               const busy = installing[`${packId}:${harness}`] ?? false;
 
               return (
@@ -723,6 +725,22 @@ function requiresProjectCwd(
     (typeof command === "string" &&
       PROJECT_RELATIVE_HINTS.some((hint) => command.includes(hint)))
   );
+}
+
+function catalogHarnesses(entry: CatalogEntry): string[] {
+  return Array.isArray(entry.harnesses) ? entry.harnesses : [];
+}
+
+function catalogInstalledHarnesses(entry: CatalogEntry): string[] {
+  return Array.isArray(entry.installedHarnesses) ? entry.installedHarnesses : [];
+}
+
+function catalogDisplayName(entry: CatalogEntry): string {
+  return typeof entry.displayName === "string" ? entry.displayName : catalogPackId(entry);
+}
+
+function catalogPackId(entry: CatalogEntry): string {
+  return typeof entry.packId === "string" ? entry.packId : "";
 }
 
 function resolveProjectCwdForAction(

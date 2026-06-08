@@ -20,7 +20,9 @@ export function CatalogCard({
   onClick,
   installing,
 }: CatalogCardProps) {
-  const isInstalled = entry.installedHarnesses.length > 0;
+  const harnesses = catalogHarnesses(entry);
+  const installedHarnesses = catalogInstalledHarnesses(entry);
+  const isInstalled = installedHarnesses.length > 0;
   const starHistory = entry.history?.map((h) => h.stars) ?? [];
 
   return (
@@ -84,7 +86,7 @@ export function CatalogCard({
 
         {/* Harness badges */}
         <div className="flex flex-wrap gap-1">
-          {entry.harnesses.map((h) => (
+          {harnesses.map((h) => (
             <Badge key={h} variant="outline" className="text-[10px]">{h}</Badge>
           ))}
         </div>
@@ -95,8 +97,8 @@ export function CatalogCard({
         className="mt-3 flex flex-wrap gap-2 border-t border-[var(--border)] pt-3"
         onClick={(e) => e.stopPropagation()}
       >
-        {entry.harnesses.map((harness) => {
-          const installed = entry.installedHarnesses.includes(harness);
+        {harnesses.map((harness) => {
+          const installed = installedHarnesses.includes(harness);
           const busy = installing?.[`${entry.packId}:${harness}`] ?? false;
 
           return installed ? (
@@ -129,6 +131,14 @@ export function CatalogCard({
       </div>
     </DashboardCard>
   );
+}
+
+function catalogHarnesses(entry: CatalogEntry): string[] {
+  return Array.isArray(entry.harnesses) ? entry.harnesses : [];
+}
+
+function catalogInstalledHarnesses(entry: CatalogEntry): string[] {
+  return Array.isArray(entry.installedHarnesses) ? entry.installedHarnesses : [];
 }
 
 function formatCount(n: number): string {
