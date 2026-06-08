@@ -52,6 +52,77 @@ test("PGlite dashboard database starts empty and fills from hook events", async 
   }
 });
 
+test("PGlite close drains queued lifecycle writes before closing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-dashboard-pglite-"));
+  const dataDir = path.join(dir, "agent-dashboard.pgdata");
+  const db = await openPgliteAgentDatabase({
+    dataDir,
+    detectBillingMode: () => "metered_api",
+    now: () => "2026-06-07T12:00:00.000Z",
+  });
+
+  try {
+    const write = db.processEvent(
+      "SessionStart",
+      {
+        session_id: "close-drain-session",
+        cwd: "/workspace/project",
+        model: "claude-sonnet-4-5",
+      },
+      "claude",
+    );
+    await db.close();
+    assert.equal(await write, true);
+
+    const reopened = await openPgliteAgentDatabase({
+      dataDir,
+      detectBillingMode: () => "metered_api",
+    });
+    try {
+      assert.equal((await reopened.sessions.getById("close-drain-session"))?.id, "close-drain-session");
+    } finally {
+      await reopened.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("PGlite live hook event data is capped before storage", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-dashboard-pglite-"));
+  const dataDir = path.join(dir, "agent-dashboard.pgdata");
+  const db = await openPgliteAgentDatabase({
+    dataDir,
+    detectBillingMode: () => "metered_api",
+    now: () => "2026-06-07T12:00:00.000Z",
+  });
+
+  try {
+    await db.processEvent(
+      "SessionStart",
+      {
+        session_id: "large-event-session",
+        cwd: "/workspace/project",
+        tool_input: "x".repeat(70 * 1024),
+      },
+      "claude",
+    );
+
+    const events = await db.events.getBySession("large-event-session");
+    assert.deepEqual(JSON.parse(events[0].data ?? "{}"), {
+      truncated: true,
+      bytes: JSON.stringify({
+        session_id: "large-event-session",
+        cwd: "/workspace/project",
+        tool_input: "x".repeat(70 * 1024),
+      }).length,
+    });
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("PGlite workflow queries satisfy PostgreSQL GROUP BY rules", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-dashboard-pglite-"));
   const dataDir = path.join(dir, "agent-dashboard.pgdata");

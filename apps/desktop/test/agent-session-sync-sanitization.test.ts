@@ -37,6 +37,7 @@ test("agent-session sync sends all source sessions and sanitizes event content",
   assert.equal(sent.length, 1);
   assert.equal(sent[0].sessions[0].externalSessionId, "outside-sandbox");
   assert.equal(sent[0].sessions[0].cwd, "/outside/sandbox/project");
+  assert.equal(sent[0].sessions[0].events[0].summary, null);
   assert.deepEqual(sent[0].sessions[0].events[0].data, {
     exitCode: 0,
     nested: { safe: "preserved" },
@@ -47,6 +48,7 @@ test("sanitizeSessionForSync strips content-bearing keys recursively", () => {
   const sanitized = sanitizeSessionForSync(makeSyncedSession());
   const data = sanitized.events[0].data as Record<string, unknown>;
 
+  assert.equal(sanitized.events[0].summary, null);
   for (const key of [
     "arguments", "command", "content", "new_string", "old_string",
     "output", "patch", "prompt", "reasoning", "stderr", "stdout", "text",
@@ -70,6 +72,7 @@ function makeSyncedSession(): SyncedAgentSession {
         externalEventId: "event-1",
         eventType: "PostToolUse",
         toolName: "Bash",
+        summary: "raw tool error text",
         createdAt: "2026-06-08T12:01:00.000Z",
         data: {
           arguments: "shell command args",

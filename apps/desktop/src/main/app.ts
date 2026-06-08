@@ -1442,22 +1442,34 @@ export class DesktopApplication {
       const { createAgentDashboardDesignSystemRuntime } = await import(
         "./agent-dashboard-design-system-runtime.js"
       );
-      this.agentDashboardDesignSystem =
-        await createAgentDashboardDesignSystemRuntime({
-          userDataPath: app.getPath("userData"),
-          getWindow: () => this.desktopWindow.getWindow(),
-          onTerminalFailure: (reason) => {
-            const notification = new Notification({
-              title: "ClosedLoop Agent Monitor",
-              body: reason,
-            });
-            notification.show();
-            this.agentMonitorFailed = true;
-            this.agentMonitorFailureReason = reason;
-            this.refreshTrayState();
-          },
-          log: (scope, message) => gatewayLog.info(scope, message),
-        });
+      try {
+        this.agentDashboardDesignSystem =
+          await createAgentDashboardDesignSystemRuntime({
+            userDataPath: app.getPath("userData"),
+            getWindow: () => this.desktopWindow.getWindow(),
+            onTerminalFailure: (reason) => {
+              const notification = new Notification({
+                title: "ClosedLoop Agent Monitor",
+                body: reason,
+              });
+              notification.show();
+              this.agentMonitorFailed = true;
+              this.agentMonitorFailureReason = reason;
+              this.refreshTrayState();
+            },
+            log: (scope, message) => gatewayLog.info(scope, message),
+          });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        gatewayLog.error(
+          "agent-monitor",
+          `failed to initialize Agent Monitor runtime: ${reason}`,
+        );
+        this.agentMonitorFailed = true;
+        this.agentMonitorFailureReason = reason;
+        this.refreshTrayState();
+        return null;
+      }
       this.agentDashboardDesignSystem.registerIpcHandlers();
     }
     return this.agentDashboardDesignSystem;

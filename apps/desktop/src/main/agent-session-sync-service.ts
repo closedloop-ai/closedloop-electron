@@ -735,6 +735,7 @@ export function sanitizeSessionForSync(
     })),
     events: session.events.map((event) => ({
       ...event,
+      summary: null,
       data: stripDataContent(event.data),
     })),
   };

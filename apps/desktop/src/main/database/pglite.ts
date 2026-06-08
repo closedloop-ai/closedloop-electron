@@ -293,7 +293,10 @@ export async function openPgliteAgentDatabase(
     }).processEvent,
     loadMeteredUsageRows: (cutoffIso: string) =>
       loadPgliteMeteredUsageRows(db, cutoffIso),
-    close: () => db.close(),
+    close: async () => {
+      await queue.drain();
+      await db.close();
+    },
   };
 
   return database;
@@ -309,6 +312,9 @@ function createWriteQueue() {
         () => undefined,
       );
       return next;
+    },
+    drain(): Promise<void> {
+      return tail;
     },
   };
 }
@@ -2074,7 +2080,7 @@ async function insertEvent(
       eventType,
       data.tool_name ?? null,
       summary ?? null,
-      safe(() => JSON.stringify(data)) ?? null,
+      importEventData(data),
       now,
     ],
   );
