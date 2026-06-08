@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { test } from "node:test";
-import { openPgliteAgentDatabase, type PgliteAgentDatabase } from "../src/main/database/pglite.js";
-import { AgentHookListener } from "../src/main/agent-monitor-listener.js";
+import {
+  AgentHookListener,
+  type AgentHookLifecycle,
+} from "../src/main/agent-monitor-listener.js";
+import type { HookData } from "../src/main/agent-dashboard-db-types.js";
 
 interface PostResult {
   status: number;
@@ -62,24 +62,52 @@ interface ListenerDiagnostics {
   logs: string[];
 }
 
+interface CapturedSession {
+  id: string;
+  harness: string;
+  cwd: string | null;
+}
+
+class InMemoryHookLifecycle implements AgentHookLifecycle {
+  readonly sessions = {
+    getAll: async (): Promise<CapturedSession[]> => [...this.sessionRows.values()],
+    getById: async (id: string): Promise<CapturedSession | null> =>
+      this.sessionRows.get(id) ?? null,
+  };
+
+  private readonly sessionRows = new Map<string, CapturedSession>();
+
+  constructor(private readonly diagnostics: ListenerDiagnostics) {}
+
+  processEvent(hookType: string, data: HookData, harness: string): boolean {
+    if (hookType !== "SessionStart") {
+      return false;
+    }
+    const sessionId = data.session_id;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      return false;
+    }
+    this.sessionRows.set(sessionId, {
+      id: sessionId,
+      harness,
+      cwd: typeof data.cwd === "string" ? data.cwd : null,
+    });
+    this.diagnostics.emits.push(sessionId);
+    return true;
+  }
+}
+
 async function withListener(
   run: (
     url: string,
-    db: PgliteAgentDatabase,
+    lifecycle: InMemoryHookLifecycle,
     diagnostics: ListenerDiagnostics,
   ) => Promise<void>,
 ): Promise<void> {
-  const dir = await mkdtemp(path.join(tmpdir(), "cl-listener-"));
   const diagnostics: ListenerDiagnostics = { emits: [], logs: [] };
-  const db = await openPgliteAgentDatabase({
-    dataDir: path.join(dir, "agent-dashboard.pgdata"),
-    detectBillingMode: () => "api",
-    extractTranscript: () => null,
-    emit: (sessionId) => diagnostics.emits.push(sessionId),
-    log: (message) => diagnostics.logs.push(message),
-  });
+  const lifecycle = new InMemoryHookLifecycle(diagnostics);
   const listener = new AgentHookListener({
-    lifecycle: db,
+    lifecycle,
     log: (message) => diagnostics.logs.push(message),
     port: 0,
   });
@@ -87,19 +115,17 @@ async function withListener(
   const url = listener.getUrl();
   assert.ok(url, "listener bound to an ephemeral port");
   try {
-    await run(url!, db, diagnostics);
+    await run(url!, lifecycle, diagnostics);
   } finally {
     await listener.stop();
-    await db.close();
-    await rm(dir, { recursive: true, force: true });
   }
 }
 
 async function assertNoWritesOrEmits(
-  db: PgliteAgentDatabase,
+  lifecycle: InMemoryHookLifecycle,
   diagnostics: ListenerDiagnostics,
 ): Promise<void> {
-  assert.equal((await db.sessions.getAll()).length, 0, "no session rows written");
+  assert.equal((await lifecycle.sessions.getAll()).length, 0, "no session rows written");
   assert.deepEqual(diagnostics.emits, [], "no live DB-change emits");
 }
 
