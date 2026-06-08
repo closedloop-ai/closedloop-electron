@@ -1,4 +1,6 @@
-name: Release Desktop
+# Disabled by FEA-1546: Desktop GitHub Releases are now published from
+# closedloop-ai/symphony-alpha after the release-ownership cutover.
+name: Release Desktop (disabled)
 
 on:
   workflow_dispatch:
@@ -12,6 +14,7 @@ env:
 
 jobs:
   release:
+    if: ${{ false }}
     runs-on: macos-latest
     timeout-minutes: 30
     permissions:
