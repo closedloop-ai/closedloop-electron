@@ -28,6 +28,7 @@ function runParent() {
       cwd: appDir,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "inherit"],
+      timeout: 15_000,
     },
   ).trim();
 
@@ -90,7 +91,7 @@ async function runProbeChild() {
     },
   });
 
-  let exitAfterCleanup = false;
+  let exitCode = 1;
   try {
     await import(pathToFileURL(path.join(appDir, "src/main/index.ts")).href);
     state.app.emit("ready");
@@ -100,12 +101,13 @@ async function runProbeChild() {
     const summary = summarizeState(state);
     assertNoAgentDashboardBootEffects(summary);
     process.stdout.write(JSON.stringify(summary));
-    exitAfterCleanup = true;
+    exitCode = 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    process.stderr.write(`${message}\n`);
   } finally {
     rmSync(userDataPath, { recursive: true, force: true });
-    if (exitAfterCleanup) {
-      process.exit(0);
-    }
+    process.exit(exitCode);
   }
 }
 
