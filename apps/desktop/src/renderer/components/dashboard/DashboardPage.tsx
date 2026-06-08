@@ -3,9 +3,11 @@ import { MonitorDot, Bot, Zap, Layers } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import { SessionsView } from "../sessions/SessionsView";
 import type { DashboardSummary } from "../../../shared/agent-db-contract";
-
-const SUMMARY_CARD_CLASS_NAME =
-  "min-h-0 rounded-xl border-border/70 bg-card shadow-sm [&>div:first-child]:px-5 [&>div:first-child]:pt-4 [&>div:first-child]:pb-2 [&_[data-slot='card-description']]:text-[10px] [&_[data-slot='card-title']]:text-[1.7rem] [&>div:last-child]:px-5 [&>div:last-child]:pb-4 [&>div:last-child]:text-xs";
+import {
+  DASHBOARD_GRID_CLASS_NAME,
+  DASHBOARD_METRIC_CARD_CLASS_NAME,
+  PageShell,
+} from "../layout/page-shell";
 
 export function DashboardPage() {
   const { data: summary, error } = useQueryCache<DashboardSummary>(
@@ -32,23 +34,19 @@ export function DashboardPage() {
 
   return (
     <div className="h-full overflow-auto">
-      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 p-6">
-        <section className="space-y-1">
-          <h1 className="text-[1.8rem] font-semibold tracking-tight text-[var(--foreground)]">Sessions</h1>
-          <p className="text-sm text-[var(--muted-foreground)]">
-            High-level loop volume and direct access to the session explorer.
-          </p>
-        </section>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Sessions" value={summary.totalSessions} detail={`${summary.activeSessions} active`} icon={MonitorDot} />
-          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Agents" value={summary.totalAgents} icon={Bot} />
-          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Events" value={summary.totalEvents} icon={Zap} />
-          <MetricCard className={SUMMARY_CARD_CLASS_NAME} label="Event Types" value={summary.eventTypeCount} icon={Layers} />
+      <PageShell
+        title="Sessions"
+        description="High-level loop volume and direct access to the session explorer."
+      >
+        <div className={DASHBOARD_GRID_CLASS_NAME}>
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Sessions" value={summary.totalSessions} detail={`${summary.activeSessions} active`} icon={MonitorDot} />
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Agents" value={summary.totalAgents} icon={Bot} />
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Events" value={summary.totalEvents} icon={Zap} />
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Event Types" value={summary.eventTypeCount} icon={Layers} />
         </div>
 
         <SessionsView showOverview={false} />
-      </div>
+      </PageShell>
     </div>
   );
 }

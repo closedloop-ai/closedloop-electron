@@ -242,6 +242,7 @@ export interface OpenPgliteAgentDatabaseOptions {
   detectBillingMode: (harness: string) => string;
   emit?: (sessionId: string) => void;
   extractTranscript?: (path: string) => TranscriptExtract | null;
+  getUserIdentity?: () => { userId: string | null; organizationId: string | null } | null;
   log?: (message: string) => void;
   now?: () => string;
   staleMinutes?: number;
@@ -285,6 +286,7 @@ export async function openPgliteAgentDatabase(
       detectBillingMode: options.detectBillingMode,
       emit: options.emit,
       extractTranscript: options.extractTranscript,
+      getUserIdentity: options.getUserIdentity,
       log,
       now: nowFn,
       staleMinutes: options.staleMinutes,
@@ -335,7 +337,7 @@ function createPgliteSessionStore(db: PgliteClient) {
           s.*,
           COALESCE(ac.agent_count, 0)::int as agent_count,
           COALESCE(ec.event_count, 0)::int as event_count,
-          COALESCE(tt.total_tokens, 0)::int as total_tokens
+          COALESCE(tt.total_tokens, 0) as total_tokens
         FROM sessions s
         LEFT JOIN agent_counts ac ON ac.session_id = s.id
         LEFT JOIN event_counts ec ON ec.session_id = s.id
@@ -350,7 +352,7 @@ function createPgliteSessionStore(db: PgliteClient) {
           s.*,
           COALESCE(ac.agent_count, 0)::int as agent_count,
           COALESCE(ec.event_count, 0)::int as event_count,
-          COALESCE(tt.total_tokens, 0)::int as total_tokens
+          COALESCE(tt.total_tokens, 0) as total_tokens
         FROM sessions s
         LEFT JOIN agent_counts ac ON ac.session_id = s.id
         LEFT JOIN event_counts ec ON ec.session_id = s.id
@@ -369,7 +371,7 @@ function createPgliteSessionStore(db: PgliteClient) {
           s.*,
           COALESCE(ac.agent_count, 0)::int as agent_count,
           COALESCE(ec.event_count, 0)::int as event_count,
-          COALESCE(tt.total_tokens, 0)::int as total_tokens
+          COALESCE(tt.total_tokens, 0) as total_tokens
         FROM sessions s
         LEFT JOIN agent_counts ac ON ac.session_id = s.id
         LEFT JOIN event_counts ec ON ec.session_id = s.id
@@ -398,7 +400,7 @@ function createPgliteSessionStore(db: PgliteClient) {
           s.*,
           COALESCE(ac.agent_count, 0)::int as agent_count,
           COALESCE(ec.event_count, 0)::int as event_count,
-          COALESCE(tt.total_tokens, 0)::int as total_tokens
+          COALESCE(tt.total_tokens, 0) as total_tokens
         FROM sessions s
         LEFT JOIN agent_counts ac ON ac.session_id = s.id
         LEFT JOIN event_counts ec ON ec.session_id = s.id
@@ -670,7 +672,7 @@ function createPgliteDashboardQueries(db: PgliteClient) {
         count(db, "SELECT COUNT(*)::int as count FROM agents"),
         count(db, "SELECT COUNT(*)::int as count FROM events"),
         count(db, "SELECT COUNT(DISTINCT event_type)::int as count FROM events"),
-        scalarNumber(db, "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)::int as total FROM token_usage", "total"),
+        scalarNumber(db, "SELECT COALESCE(SUM(input_tokens::bigint + output_tokens::bigint), 0) as total FROM token_usage", "total"),
         db.query<{
           id: string;
           name: string | null;
@@ -704,10 +706,10 @@ function createPgliteDashboardQueries(db: PgliteClient) {
         total_cache_read: number;
         total_cache_write: number;
       }>(`
-        SELECT COALESCE(SUM(input_tokens), 0)::int as total_input,
-          COALESCE(SUM(output_tokens), 0)::int as total_output,
-          COALESCE(SUM(cache_read_tokens), 0)::int as total_cache_read,
-          COALESCE(SUM(cache_write_tokens), 0)::int as total_cache_write
+        SELECT COALESCE(SUM(input_tokens), 0) as total_input,
+          COALESCE(SUM(output_tokens), 0) as total_output,
+          COALESCE(SUM(cache_read_tokens), 0) as total_cache_read,
+          COALESCE(SUM(cache_write_tokens), 0) as total_cache_write
         FROM token_usage
       `);
       const byModel = await db.query<{
@@ -717,13 +719,13 @@ function createPgliteDashboardQueries(db: PgliteClient) {
         sessions: number;
       }>(`
         SELECT model,
-          SUM(input_tokens)::int as input_tokens,
-          SUM(output_tokens)::int as output_tokens,
+          SUM(input_tokens) as input_tokens,
+          SUM(output_tokens) as output_tokens,
           COUNT(DISTINCT session_id)::int as sessions
         FROM token_usage
         WHERE model IS NOT NULL
         GROUP BY model
-        ORDER BY SUM(input_tokens + output_tokens) DESC
+        ORDER BY SUM(input_tokens::bigint + output_tokens::bigint) DESC
       `);
       const byDay = await db.query<{
         day: string;
@@ -731,8 +733,8 @@ function createPgliteDashboardQueries(db: PgliteClient) {
         output_tokens: number;
       }>(`
         SELECT (created_at::timestamp::date)::text as day,
-          SUM(input_tokens)::int as input_tokens,
-          SUM(output_tokens)::int as output_tokens
+          SUM(input_tokens) as input_tokens,
+          SUM(output_tokens) as output_tokens
         FROM token_usage
         WHERE created_at IS NOT NULL
         GROUP BY created_at::timestamp::date
@@ -1159,6 +1161,7 @@ function createPgliteLifecycle(
     detectBillingMode: (harness: string) => string;
     emit?: (sessionId: string) => void;
     extractTranscript?: (path: string) => TranscriptExtract | null;
+    getUserIdentity?: () => { userId: string | null; organizationId: string | null } | null;
     log: (message: string) => void;
     now: () => string;
     staleMinutes?: number;
@@ -1195,6 +1198,7 @@ function createPgliteLifecycle(
               tokenUsage,
               transcript,
               detectBillingMode: deps.detectBillingMode,
+              getUserIdentity: deps.getUserIdentity,
             });
           });
           return true;
@@ -1229,11 +1233,12 @@ async function handleHook(
     tokenUsage: ReturnType<typeof createPgliteTokenUsageStore>;
     transcript: TranscriptExtract | null;
     detectBillingMode: (harness: string) => string;
+    getUserIdentity?: () => { userId: string | null; organizationId: string | null } | null;
   },
 ): Promise<void> {
   const { data, hookType, harness, now, sessionId } = options;
   const main = mainAgentId(sessionId);
-  await ensureSession(tx, sessionId, data, harness, now, options.detectBillingMode);
+  await ensureSession(tx, sessionId, data, harness, now, options.detectBillingMode, options.getUserIdentity);
   const session = await getSession(tx, sessionId);
   if (!session) {
     return;
@@ -1571,6 +1576,8 @@ async function loadPgliteSyncedSessions(
     metadata: string | null;
     harness: string | null;
     billing_mode: string | null;
+    user_id: string | null;
+    organization_id: string | null;
   }>(
     db,
     `
@@ -1586,7 +1593,9 @@ async function loadPgliteSyncedSessions(
         awaiting_input_since,
         metadata,
         harness,
-        billing_mode
+        billing_mode,
+        user_id,
+        organization_id
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -1721,6 +1730,8 @@ async function loadPgliteSyncedSessions(
         endedAt: row.ended_at,
         awaitingInputSince: row.awaiting_input_since,
         metadata: parseJsonObjectText(row.metadata),
+        ...(row.user_id ? { userId: row.user_id } : {}),
+        ...(row.organization_id ? { organizationId: row.organization_id } : {}),
         ...(attribution ? { attribution } : {}),
         agents: (agentsBySessionId.get(id) ?? []).map((agentRow) => ({
           externalAgentId: agentRow.id,
@@ -1848,7 +1859,7 @@ function sessionDetailsCtes(): string {
     token_totals AS (
       SELECT
         session_id,
-        COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)::int as total_tokens
+        COALESCE(SUM(COALESCE(input_tokens, 0)::bigint + COALESCE(output_tokens, 0)::bigint), 0) as total_tokens
       FROM token_usage
       GROUP BY session_id
     )
@@ -1987,14 +1998,19 @@ async function ensureSession(
   harness: string,
   now: string,
   detectBillingMode: (harness: string) => string,
+  getUserIdentity?: () => { userId: string | null; organizationId: string | null } | null,
 ): Promise<void> {
   if (await getSession(tx, sessionId)) {
     return;
   }
   const billingMode = safe(() => detectBillingMode(harness)) ?? "unknown";
+  const identity = safe(() => getUserIdentity?.()) ?? null;
   await tx.query(
-    `INSERT INTO sessions (id, name, status, cwd, model, started_at, updated_at, harness, billing_mode)
-     VALUES ($1, $2, 'active', $3, $4, $5, $5, $6, $7)`,
+    `INSERT INTO sessions (
+       id, name, status, cwd, model, started_at, updated_at, harness,
+       billing_mode, user_id, organization_id
+     )
+     VALUES ($1, $2, 'active', $3, $4, $5, $5, $6, $7, $8, $9)`,
     [
       sessionId,
       data.session_name ?? null,
@@ -2003,6 +2019,8 @@ async function ensureSession(
       now,
       harness,
       billingMode,
+      identity?.userId ?? null,
+      identity?.organizationId ?? null,
     ],
   );
   await tx.query(

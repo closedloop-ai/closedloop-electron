@@ -1,6 +1,14 @@
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
+import { EmptyState } from "@closedloop-ai/design-system/components/ui/empty-state";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
+import {
+  Table as DsTable,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@closedloop-ai/design-system/components/ui/table";
 import {
   Bot,
   ClipboardList,
@@ -20,6 +28,15 @@ import type {
   DashboardToolSummary,
 } from "../../../shared/agent-db-contract";
 import { useQueryCache } from "../../hooks/useQueryCache";
+import {
+  DASHBOARD_METRIC_CARD_CLASS_NAME,
+  DASHBOARD_TABLE_CLASS_NAME,
+  DASHBOARD_WIDE_GRID_CLASS_NAME,
+  DashboardCard,
+  LoadingState,
+  PageShell,
+  cx,
+} from "../layout/page-shell";
 
 type FeatureKind = "packs" | "skills" | "tools" | "subagents" | "plans" | "pull-requests";
 
@@ -132,27 +149,19 @@ function FeatureView({ kind }: { kind: FeatureKind }) {
   }), [packs, skills, tools, subagents, plans, pullRequests]);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <p className="text-sm text-[var(--muted-foreground)]">Loading {labels.title.toLowerCase()}...</p>
-      </div>
-    );
+    return <LoadingState label={labels.title.toLowerCase()} />;
   }
 
   return (
-    <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-xl font-bold text-[var(--foreground)]">{labels.title}</h1>
-        <p className="text-sm text-[var(--muted-foreground)]">{labels.description}</p>
-      </div>
+    <PageShell title={labels.title} description={labels.description}>
 
-      <div className="grid grid-cols-3 gap-4 lg:grid-cols-6">
-        <MetricCard label="Packs" value={stats.packCount} icon={Package} />
-        <MetricCard label="Skills" value={stats.skillCount} icon={Sparkles} />
-        <MetricCard label="Tools" value={stats.toolCount} icon={Wrench} />
-        <MetricCard label="SubAgents" value={stats.subagentCount} icon={Bot} />
-        <MetricCard label="Plans" value={stats.planCount} icon={ClipboardList} />
-        <MetricCard label="PRs" value={stats.pullRequestCount} icon={GitPullRequest} />
+      <div className={DASHBOARD_WIDE_GRID_CLASS_NAME}>
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Packs" value={stats.packCount} icon={Package} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Skills" value={stats.skillCount} icon={Sparkles} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Tools" value={stats.toolCount} icon={Wrench} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Subagents" value={stats.subagentCount} icon={Bot} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Plans" value={stats.planCount} icon={ClipboardList} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="PRs" value={stats.pullRequestCount} icon={GitPullRequest} />
       </div>
 
       {kind === "packs" && <PacksTable rows={packs ?? []} />}
@@ -161,7 +170,7 @@ function FeatureView({ kind }: { kind: FeatureKind }) {
       {kind === "subagents" && <SubAgentsTable rows={subagents ?? []} />}
       {kind === "plans" && <PlansTable rows={plans ?? []} />}
       {kind === "pull-requests" && <PullRequestsTable rows={pullRequests ?? []} />}
-    </div>
+    </PageShell>
   );
 }
 
@@ -169,24 +178,24 @@ function PacksTable({ rows }: { rows: DashboardPackSummary[] }) {
   return (
     <FeatureCard title="Pack Activity" empty={rows.length === 0 ? "No pack usage captured yet." : null}>
       <Table>
-        <thead>
-          <tr>
+        <TableHeader>
+          <TableRow>
             <Header>Name</Header>
             <Header>Harness</Header>
             <Header align="right">Skills</Header>
             <Header align="right">Calls</Header>
             <Header>Last Used</Header>
-          </tr>
-        </thead>
-        <tbody>{rows.map((row) => (
-          <tr key={row.id} className="border-b border-[var(--border)]">
+          </TableRow>
+        </TableHeader>
+        <TableBody>{rows.map((row) => (
+          <TableRow key={row.id}>
             <Cell className="font-medium">{row.name}</Cell>
             <Cell><Badge variant="outline">{row.harness}</Badge></Cell>
             <Cell align="right">{row.skillCount}</Cell>
             <Cell align="right">{row.toolCallCount}</Cell>
             <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </tr>
-        ))}</tbody>
+          </TableRow>
+        ))}</TableBody>
       </Table>
     </FeatureCard>
   );
@@ -196,24 +205,24 @@ function SkillsTable({ rows }: { rows: DashboardSkillSummary[] }) {
   return (
     <FeatureCard title="Skill Invocations" empty={rows.length === 0 ? "No skill invocations captured yet." : null}>
       <Table>
-        <thead>
-          <tr>
+        <TableHeader>
+          <TableRow>
             <Header>Name</Header>
             <Header>Pack</Header>
             <Header>Harness</Header>
             <Header align="right">Calls</Header>
             <Header>Last Used</Header>
-          </tr>
-        </thead>
-        <tbody>{rows.map((row) => (
-          <tr key={row.id} className="border-b border-[var(--border)]">
+          </TableRow>
+        </TableHeader>
+        <TableBody>{rows.map((row) => (
+          <TableRow key={row.id}>
             <Cell className="font-medium">{row.name}</Cell>
             <Cell>{row.packId ?? "-"}</Cell>
             <Cell><Badge variant="outline">{row.harness}</Badge></Cell>
             <Cell align="right">{row.invocationCount}</Cell>
             <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </tr>
-        ))}</tbody>
+          </TableRow>
+        ))}</TableBody>
       </Table>
     </FeatureCard>
   );
@@ -223,22 +232,22 @@ function ToolsTable({ rows }: { rows: DashboardToolSummary[] }) {
   return (
     <FeatureCard title="Tool Usage" empty={rows.length === 0 ? "No tool calls captured yet." : null}>
       <Table>
-        <thead>
-          <tr>
+        <TableHeader>
+          <TableRow>
             <Header>Tool</Header>
             <Header align="right">Calls</Header>
             <Header align="right">Sessions</Header>
             <Header>Last Used</Header>
-          </tr>
-        </thead>
-        <tbody>{rows.map((row) => (
-          <tr key={row.toolName} className="border-b border-[var(--border)]">
+          </TableRow>
+        </TableHeader>
+        <TableBody>{rows.map((row) => (
+          <TableRow key={row.toolName}>
             <Cell className="font-mono text-xs">{row.toolName}</Cell>
             <Cell align="right">{row.invocationCount}</Cell>
             <Cell align="right">{row.sessionCount}</Cell>
             <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </tr>
-        ))}</tbody>
+          </TableRow>
+        ))}</TableBody>
       </Table>
     </FeatureCard>
   );
@@ -248,26 +257,26 @@ function SubAgentsTable({ rows }: { rows: DashboardSubAgentSummary[] }) {
   return (
     <FeatureCard title="SubAgent Outcomes" empty={rows.length === 0 ? "No subagent activity captured yet." : null}>
       <Table>
-        <thead>
-          <tr>
+        <TableHeader>
+          <TableRow>
             <Header>Role</Header>
             <Header align="right">Total</Header>
             <Header align="right">Completed</Header>
             <Header align="right">Errors</Header>
             <Header align="right">Sessions</Header>
             <Header>Last Used</Header>
-          </tr>
-        </thead>
-        <tbody>{rows.map((row) => (
-          <tr key={row.subagentType} className="border-b border-[var(--border)]">
+          </TableRow>
+        </TableHeader>
+        <TableBody>{rows.map((row) => (
+          <TableRow key={row.subagentType}>
             <Cell className="font-mono text-xs">{row.subagentType}</Cell>
             <Cell align="right">{row.total}</Cell>
             <Cell align="right" className="text-[var(--success)]">{row.completed}</Cell>
             <Cell align="right" className="text-[var(--destructive)]">{row.errors}</Cell>
             <Cell align="right">{row.sessions}</Cell>
             <Cell>{formatDate(row.lastUsedAt)}</Cell>
-          </tr>
-        ))}</tbody>
+          </TableRow>
+        ))}</TableBody>
       </Table>
     </FeatureCard>
   );
@@ -299,16 +308,16 @@ function PullRequestsTable({ rows }: { rows: DashboardPullRequestSummary[] }) {
   return (
     <FeatureCard title="Pull Request Artifacts" empty={rows.length === 0 ? "No pull request artifacts captured yet." : null}>
       <Table>
-        <thead>
-          <tr>
+        <TableHeader>
+          <TableRow>
             <Header>Pull Request</Header>
             <Header>Repo</Header>
             <Header>Harness</Header>
             <Header>Observed</Header>
-          </tr>
-        </thead>
-        <tbody>{rows.map((row) => (
-          <tr key={row.id} className="border-b border-[var(--border)]">
+          </TableRow>
+        </TableHeader>
+        <TableBody>{rows.map((row) => (
+          <TableRow key={row.id}>
             <Cell>
               <a className="font-medium text-[var(--primary)] hover:underline" href={row.prUrl} target="_blank" rel="noreferrer">
                 #{row.prNumber}{row.title ? ` ${row.title}` : ""}
@@ -317,8 +326,8 @@ function PullRequestsTable({ rows }: { rows: DashboardPullRequestSummary[] }) {
             <Cell className="font-mono text-xs">{row.repoFullName}</Cell>
             <Cell>{row.harness ? <Badge variant="outline">{row.harness}</Badge> : "-"}</Cell>
             <Cell>{formatDate(row.observedAt)}</Cell>
-          </tr>
-        ))}</tbody>
+          </TableRow>
+        ))}</TableBody>
       </Table>
     </FeatureCard>
   );
@@ -334,19 +343,20 @@ function FeatureCard({
   children: ReactNode;
 }) {
   return (
-    <Card>
-      <CardHeader><CardTitle>{title}</CardTitle></CardHeader>
-      <CardContent>
-        {empty ? (
-          <div className="py-12 text-center text-sm text-[var(--muted-foreground)]">{empty}</div>
-        ) : children}
-      </CardContent>
-    </Card>
+    <DashboardCard title={title} contentClassName="p-0">
+      {empty ? (
+        <EmptyState icon={Package} title={empty} className="py-12" />
+      ) : children}
+    </DashboardCard>
   );
 }
 
 function Table({ children }: { children: ReactNode }) {
-  return <table className="w-full text-sm">{children}</table>;
+  return (
+    <div className="overflow-auto">
+      <DsTable className={DASHBOARD_TABLE_CLASS_NAME}>{children}</DsTable>
+    </div>
+  );
 }
 
 function Header({
@@ -357,9 +367,9 @@ function Header({
   children: ReactNode;
 }) {
   return (
-    <th className={`border-b py-2 font-medium text-[var(--muted-foreground)] ${align === "right" ? "text-right" : "text-left"}`}>
+    <TableHead className={cx("px-5", align === "right" ? "text-right" : "text-left")}>
       {children}
-    </th>
+    </TableHead>
   );
 }
 
@@ -373,9 +383,9 @@ function Cell({
   children: ReactNode;
 }) {
   return (
-    <td className={`py-2 ${align === "right" ? "text-right" : "text-left"} ${className}`}>
+    <TableCell className={cx("px-5", align === "right" ? "text-right" : "text-left", className)}>
       {children}
-    </td>
+    </TableCell>
   );
 }
 

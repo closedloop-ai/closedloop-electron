@@ -1,10 +1,10 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
 import { LineChart } from "@closedloop-ai/design-system/components/ui/primitives/line-chart";
 import { DonutChart } from "@closedloop-ai/design-system/components/ui/primitives/donut-chart";
 import { RankedBar } from "@closedloop-ai/design-system/components/ui/primitives/ranked-bar";
 import { ActivityHeatmap } from "@closedloop-ai/design-system/components/ui/primitives/activity-heatmap";
 import { SegmentedBar } from "@closedloop-ai/design-system/components/ui/primitives/segmented-bar";
 import type { AnalyticsData } from "../../../shared/agent-db-contract";
+import { DashboardCard } from "../layout/page-shell";
 
 const PALETTE = [
   "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",
@@ -78,72 +78,52 @@ export function AnalyticsDetails({ data }: { data: AnalyticsData }) {
   return (
     <>
       {dailyEvents.length > 0 && (
-        <Card>
-          <CardHeader><CardTitle>Activity Heatmap</CardTitle></CardHeader>
-          <CardContent>
-            <ActivityHeatmap weeks={heatmapWeeks} />
-          </CardContent>
-        </Card>
+        <DashboardCard title="Activity Heatmap">
+          <ActivityHeatmap weeks={heatmapWeeks} />
+        </DashboardCard>
       )}
 
-      <div className="grid grid-cols-2 gap-6">
-        <Card>
-          <CardHeader><CardTitle>Token Distribution</CardTitle></CardHeader>
-          <CardContent>
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+        <DashboardCard title="Token Distribution">
             {tokenSegments.length > 0 ? (
               <DonutChart segments={tokenSegments} formatTotal={(t) => t.toLocaleString()} centerLabel="Tokens" />
             ) : (
               <p className="py-8 text-sm text-center text-[var(--muted-foreground)]">No token data</p>
             )}
-          </CardContent>
-        </Card>
+        </DashboardCard>
 
-        <Card>
-          <CardHeader><CardTitle>Sessions by Status</CardTitle></CardHeader>
-          <CardContent>
+        <DashboardCard title="Sessions by Status">
             {sessionSegments.length > 0 ? (
               <DonutChart segments={sessionSegments} formatTotal={(t) => `${t}`} centerLabel="Sessions" />
             ) : (
               <p className="py-8 text-sm text-center text-[var(--muted-foreground)]">No session data</p>
             )}
-          </CardContent>
-        </Card>
+        </DashboardCard>
 
-        <Card>
-          <CardHeader><CardTitle>Agents by Status</CardTitle></CardHeader>
-          <CardContent>
+        <DashboardCard title="Agents by Status">
             {agentStatusSegments.length > 0 ? (
               <DonutChart segments={agentStatusSegments} formatTotal={(t) => `${t}`} centerLabel="Agents" />
             ) : (
               <p className="py-8 text-sm text-center text-[var(--muted-foreground)]">No agent data</p>
             )}
-          </CardContent>
-        </Card>
+        </DashboardCard>
 
-        <Card>
-          <CardHeader><CardTitle>Events by Type</CardTitle></CardHeader>
-          <CardContent>
+        <DashboardCard title="Events by Type">
             {eventSegments.length > 0 ? (
               <DonutChart segments={eventSegments} formatTotal={(t) => t.toLocaleString()} centerLabel="Events" />
             ) : (
               <p className="py-8 text-sm text-center text-[var(--muted-foreground)]">No event data</p>
             )}
-          </CardContent>
-        </Card>
+        </DashboardCard>
       </div>
 
       {agentTypeSegments.length > 0 && (
-        <Card>
-          <CardHeader><CardTitle>Agent Type Distribution</CardTitle></CardHeader>
-          <CardContent>
-            <SegmentedBar segments={agentTypeSegments} total={agentTypeTotal} />
-          </CardContent>
-        </Card>
+        <DashboardCard title="Agent Type Distribution">
+          <SegmentedBar segments={agentTypeSegments} total={agentTypeTotal} />
+        </DashboardCard>
       )}
 
-      <Card>
-        <CardHeader><CardTitle>Tool Usage</CardTitle></CardHeader>
-        <CardContent>
+      <DashboardCard title="Tool Usage">
           {toolUsage.length > 0 ? (
             <div className="space-y-2">
               {toolUsage.slice(0, 15).map((t) => (
@@ -158,12 +138,9 @@ export function AnalyticsDetails({ data }: { data: AnalyticsData }) {
           ) : (
             <p className="py-8 text-sm text-center text-[var(--muted-foreground)]">No tool usage data</p>
           )}
-        </CardContent>
-      </Card>
+      </DashboardCard>
 
-      <Card>
-        <CardHeader><CardTitle>Token Usage by Model</CardTitle></CardHeader>
-        <CardContent>
+      <DashboardCard title="Token Usage by Model">
           {tokens.byModel.length > 0 ? (
             <div className="space-y-2">
               {tokens.byModel.map((m) => {
@@ -183,28 +160,21 @@ export function AnalyticsDetails({ data }: { data: AnalyticsData }) {
           ) : (
             <p className="py-8 text-sm text-center text-[var(--muted-foreground)]">No model data</p>
           )}
-        </CardContent>
-      </Card>
+      </DashboardCard>
 
       {dayPoints.length > 0 && (
-        <Card>
-          <CardHeader><CardTitle>Daily Token Usage (Last 30 Days)</CardTitle></CardHeader>
-          <CardContent>
-            <div className="h-48">
-              <LineChart points={dayPoints} color={PALETTE[0]} valueFormatter={(v) => v.toLocaleString()} />
-            </div>
-          </CardContent>
-        </Card>
+        <DashboardCard title="Daily Token Usage (Last 30 Days)">
+          <div className="h-48">
+            <LineChart points={dayPoints} color={PALETTE[0]} valueFormatter={(v) => v.toLocaleString()} />
+          </div>
+        </DashboardCard>
       )}
 
-      <Card>
-        <CardHeader><CardTitle>At a Glance</CardTitle></CardHeader>
-        <CardContent className="text-sm text-[var(--muted-foreground)]">
+      <DashboardCard title="At a Glance" contentClassName="text-sm text-[var(--muted-foreground)]">
           {cacheTokens > 0
             ? `${Math.round((cacheTokens / (totalTokens + cacheTokens)) * 100)}% of total token traffic was cache-related.`
             : "No cache token activity recorded yet."}
-        </CardContent>
-      </Card>
+      </DashboardCard>
     </>
   );
 }

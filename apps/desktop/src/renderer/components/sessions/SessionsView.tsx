@@ -1,14 +1,19 @@
 import { useEffect, useState } from "react";
 import { Button } from "@closedloop-ai/design-system/components/ui/button";
+import { Input } from "@closedloop-ai/design-system/components/ui/input";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
 import { SessionTable } from "@closedloop-ai/design-system/components/ui/composites/session-table";
 import { MonitorDot, Activity, Bot, Coins } from "lucide-react";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import type { SessionRow } from "@closedloop-ai/design-system/components/ui/types";
 import type { DashboardSummary, SessionPage, SessionWithAgents } from "../../../shared/agent-db-contract";
-
-const OVERVIEW_CARD_CLASS_NAME =
-  "min-h-0 gap-0 rounded-xl border-border/70 bg-card shadow-sm [&>div:first-child]:px-5 [&>div:first-child]:pt-4 [&>div:first-child]:pb-2 [&_[data-slot='card-description']]:text-[10px] [&_[data-slot='card-title']]:text-[1.75rem] [&>div:last-child]:px-5 [&>div:last-child]:pb-4 [&>div:last-child]:text-xs";
+import {
+  DASHBOARD_GRID_CLASS_NAME,
+  DASHBOARD_METRIC_CARD_CLASS_NAME,
+  DashboardCard,
+  LoadingState,
+  PageShell,
+} from "../layout/page-shell";
 
 function adaptSession(raw: SessionWithAgents): SessionRow {
   return {
@@ -70,67 +75,49 @@ export function SessionsView({ showOverview = true }: SessionsViewProps) {
   const to = Math.min((page + 1) * PAGE_SIZE, total);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <p className="text-sm text-[var(--muted-foreground)]">Loading sessions...</p>
-      </div>
-    );
+    return <LoadingState label="sessions" />;
   }
 
-  return (
-    <div className={showOverview ? "mx-auto flex w-full max-w-[1500px] flex-col gap-6 p-6" : "flex flex-col gap-5"}>
+  const content = (
+    <>
       {showOverview ? (
-        <>
-          <div className="space-y-1">
-            <h1 className="text-[1.75rem] font-semibold tracking-tight text-[var(--foreground)]">Sessions</h1>
-            <p className="text-sm text-[var(--muted-foreground)]">
-              All agent sessions ({summary?.totalSessions ?? total} total)
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricCard className={OVERVIEW_CARD_CLASS_NAME} label="Total Sessions" value={summary?.totalSessions ?? total} icon={MonitorDot} />
-            <MetricCard className={OVERVIEW_CARD_CLASS_NAME} label="Active" value={summary?.activeSessions ?? 0} icon={Activity} />
-            <MetricCard className={OVERVIEW_CARD_CLASS_NAME} label="Agents" value={summary?.totalAgents ?? 0} icon={Bot} />
-            <MetricCard className={OVERVIEW_CARD_CLASS_NAME} label="Tokens" value={(summary?.totalTokens ?? 0).toLocaleString()} icon={Coins} />
-          </div>
-        </>
+        <div className={DASHBOARD_GRID_CLASS_NAME}>
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Total Sessions" value={summary?.totalSessions ?? total} icon={MonitorDot} />
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Active" value={summary?.activeSessions ?? 0} icon={Activity} />
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Agents" value={summary?.totalAgents ?? 0} icon={Bot} />
+          <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Tokens" value={(summary?.totalTokens ?? 0).toLocaleString()} icon={Coins} />
+        </div>
       ) : null}
 
-      <section className="rounded-[1.25rem] border border-border/80 bg-card/96 shadow-sm">
-        <div className="flex flex-col gap-4 border-b border-border/70 px-5 py-4 lg:flex-row lg:items-end lg:justify-between">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight text-[var(--foreground)]">Session Explorer</h2>
-            <p className="text-sm text-[var(--muted-foreground)]">
-              Search, filter, and drill into recorded loops and agent runs.
-            </p>
-          </div>
-          <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-            {from.toLocaleString()}-{to.toLocaleString()} of {total.toLocaleString()} shown
-          </div>
-        </div>
-
+      <DashboardCard
+        title="Session Explorer"
+        description="Search, filter, and drill into recorded loops and agent runs."
+        contentClassName="p-0"
+      >
         <div className="flex flex-col gap-3 px-5 py-4 xl:flex-row xl:items-center">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search sessions..."
-          className="h-11 flex-1 rounded-xl border border-[var(--input-border)] bg-[var(--background)] px-4 text-sm text-[var(--foreground)] shadow-sm placeholder:text-[var(--muted-foreground)]"
-        />
-        <div className="flex flex-wrap gap-2">
-          {STATUS_OPTIONS.map((s) => (
-            <Button
-              key={s}
-              variant={statusFilter === s ? "default" : "outline"}
-              size="sm"
-              onClick={() => setStatusFilter(s)}
-              className="min-w-[5.5rem] rounded-full"
-            >
-              {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
-            </Button>
-          ))}
-        </div>
+          <Input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search sessions..."
+            className="h-11 flex-1 rounded-xl bg-[var(--background)]"
+          />
+          <div className="flex flex-wrap gap-2">
+            {STATUS_OPTIONS.map((s) => (
+              <Button
+                key={s}
+                variant={statusFilter === s ? "default" : "outline"}
+                size="sm"
+                onClick={() => setStatusFilter(s)}
+                className="min-w-[5.5rem] rounded-full"
+              >
+                {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+              </Button>
+            ))}
+          </div>
+          <div className="shrink-0 text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+            {from.toLocaleString()}-{to.toLocaleString()} of {total.toLocaleString()}
+          </div>
         </div>
 
         <div className="px-3 pb-3">
@@ -173,7 +160,20 @@ export function SessionsView({ showOverview = true }: SessionsViewProps) {
             </div>
           ) : null}
         </div>
-      </section>
-    </div>
+      </DashboardCard>
+    </>
+  );
+
+  if (!showOverview) {
+    return <div className="flex flex-col gap-5">{content}</div>;
+  }
+
+  return (
+    <PageShell
+      title="Sessions"
+      description={`All agent sessions (${summary?.totalSessions ?? total} total)`}
+    >
+      {content}
+    </PageShell>
   );
 }

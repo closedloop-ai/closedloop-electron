@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  appendFileSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -94,20 +95,27 @@ test("first-party catchup cache persists unchanged source fingerprints", () => {
   try {
     const cachePath = join(dir, "ingest-cache-codex.json");
     const source = join(dir, "codex.jsonl");
+    const removedSource = join(dir, "removed.jsonl");
     writeFileSync(source, "session one\n");
+    writeFileSync(removedSource, "remove me\n");
 
     const first = createCatchupCache({ persistPath: cachePath });
     const firstStatus = first.isUnchanged(source);
     assert.equal(firstStatus.unchanged, false);
     first.markSeenWith(source, firstStatus.stat);
+    first.markSeen(removedSource);
+    assert.equal(first.size(), 2);
+    first.pruneTo([source]);
+    assert.equal(first.size(), 1);
     first.flush();
     assert.equal(existsSync(cachePath), true);
 
     const second = createCatchupCache({ persistPath: cachePath });
     assert.equal(second.isUnchanged(source).unchanged, true);
 
-    writeFileSync(source, "session one changed\n");
+    appendFileSync(source, "session one changed\n");
     assert.equal(second.isUnchanged(source).unchanged, false);
+    assert.equal(second.isUnchanged(removedSource).unchanged, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

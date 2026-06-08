@@ -1,9 +1,25 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
+import { EmptyState } from "@closedloop-ai/design-system/components/ui/empty-state";
+import { Input } from "@closedloop-ai/design-system/components/ui/input";
 import { MetricCard } from "@closedloop-ai/design-system/components/ui/primitives/metric-card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@closedloop-ai/design-system/components/ui/select";
 import { Zap, Wrench, AlertCircle, Layers } from "lucide-react";
 import type { EventRow } from "../../../shared/agent-db-contract";
+import {
+  DASHBOARD_GRID_CLASS_NAME,
+  DASHBOARD_METRIC_CARD_CLASS_NAME,
+  DashboardCard,
+  LoadingState,
+  PageShell,
+} from "../layout/page-shell";
 
 const EVENT_TYPE_TONES: Record<string, string> = {
   tool_use: "bg-blue-500/10 text-blue-600",
@@ -74,22 +90,12 @@ export function ActivityFeedView() {
   const errorCount = events.filter((e) => e.eventType === "error").length;
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <p className="text-sm text-[var(--muted-foreground)]">Loading activity feed...</p>
-      </div>
-    );
+    return <LoadingState label="activity feed" />;
   }
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-[var(--foreground)]">Activity Feed</h1>
-          <p className="text-sm text-[var(--muted-foreground)]">
-            Real-time agent event stream
-          </p>
-        </div>
+    <PageShell title="Activity Feed" description="Real-time agent event stream">
+      <div className="flex justify-end">
         <Button
           variant={paused ? "default" : "outline"}
           size="sm"
@@ -99,74 +105,80 @@ export function ActivityFeedView() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
-        <MetricCard label="Events" value={events.length} icon={Zap} />
-        <MetricCard label="Tool Calls" value={toolCount} icon={Wrench} />
-        <MetricCard label="Errors" value={errorCount} icon={AlertCircle} />
-        <MetricCard label="Types" value={eventTypes.length} icon={Layers} />
+      <div className={DASHBOARD_GRID_CLASS_NAME}>
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Events" value={events.length} icon={Zap} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Tool Calls" value={toolCount} icon={Wrench} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Errors" value={errorCount} icon={AlertCircle} />
+        <MetricCard className={DASHBOARD_METRIC_CARD_CLASS_NAME} label="Types" value={eventTypes.length} icon={Layers} />
       </div>
 
-      <div className="flex items-center gap-3">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search events..."
-          className="flex-1 bg-[var(--input)] border border-[var(--input-border)] rounded-md px-3 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
-        />
-        <select
-          value={typeFilter}
-          onChange={(e) => setTypeFilter(e.target.value)}
-          className="bg-[var(--input)] border border-[var(--input-border)] rounded-md px-3 py-1.5 text-sm text-[var(--foreground)]"
-        >
-          <option value="all">All types</option>
-          {eventTypes.map((t) => (
-            <option key={t} value={t}>{t}</option>
-          ))}
-        </select>
-      </div>
+      <DashboardCard title="Events" contentClassName="p-0">
+        <div className="flex flex-col gap-3 border-b border-border/70 px-5 py-4 md:flex-row md:items-center">
+          <Input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search events..."
+            className="h-11 flex-1 rounded-xl bg-[var(--background)]"
+          />
+          <Select value={typeFilter} onValueChange={setTypeFilter}>
+            <SelectTrigger className="h-11 w-full rounded-xl bg-[var(--background)] md:w-[12rem]">
+              <SelectValue placeholder="Event type" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All types</SelectItem>
+              {eventTypes.map((t) => (
+                <SelectItem key={t} value={t}>{t}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
 
-      <div className="space-y-1">
-        {filtered.length === 0 && (
-          <div className="py-12 text-center text-sm text-[var(--muted-foreground)]">
-            {search || typeFilter !== "all" ? "No events match the current filters." : "No events recorded yet."}
-          </div>
-        )}
-        {filtered.map((event) => (
-          <div key={event.id}>
-            <div
-              className="flex items-start gap-3 rounded-lg border p-3 text-sm cursor-pointer hover:bg-[var(--accent)]"
-              onClick={() => setExpandedId(expandedId === event.id ? null : event.id)}
-            >
-              <span
-                className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${eventTypeColor(event.eventType)}`}
+        <div className="space-y-1 p-3">
+          {filtered.length === 0 && (
+            <EmptyState
+              icon={Zap}
+              title={search || typeFilter !== "all" ? "No matching events" : "No events recorded yet"}
+              description={search || typeFilter !== "all" ? "Adjust the current filters to widen the event feed." : undefined}
+              className="py-12"
+            />
+          )}
+          {filtered.map((event) => (
+            <div key={event.id}>
+              <div
+                className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/70 bg-[var(--background)] p-3 text-sm transition-colors hover:bg-[var(--accent)]"
+                onClick={() => setExpandedId(expandedId === event.id ? null : event.id)}
               >
-                {event.eventType.replace(/_/g, " ").slice(0, 12)}
-              </span>
-              <div className="min-w-0 flex-1 space-y-0.5">
-                {event.summary && (
-                  <p className="truncate text-[var(--foreground)]">{event.summary}</p>
-                )}
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
-                  {event.sessionName && <span>{event.sessionName}</span>}
-                  {event.toolName && <span className="font-mono">{event.toolName}</span>}
-                  {event.createdAt && <span>{new Date(event.createdAt).toLocaleTimeString()}</span>}
+                <span
+                  className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${eventTypeColor(event.eventType)}`}
+                >
+                  {event.eventType.replace(/_/g, " ").slice(0, 12)}
+                </span>
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  {event.summary && (
+                    <p className="truncate text-[var(--foreground)]">{event.summary}</p>
+                  )}
+                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
+                    {event.sessionName && <span>{event.sessionName}</span>}
+                    {event.toolName && <span className="font-mono">{event.toolName}</span>}
+                    {event.createdAt && <span>{new Date(event.createdAt).toLocaleTimeString()}</span>}
+                  </div>
                 </div>
+                {event.toolName && (
+                  <Badge variant="outline" className="shrink-0 text-[10px]">{event.toolName}</Badge>
+                )}
               </div>
-              {event.toolName && (
-                <Badge variant="outline" className="shrink-0 text-[10px]">{event.toolName}</Badge>
+              {expandedId === event.id && event.data && (
+                <div className="mx-3 mb-2 mt-1 max-h-48 overflow-auto rounded-xl bg-[var(--muted)] p-3 font-mono text-xs">
+                  <pre className="whitespace-pre-wrap break-all text-[var(--foreground)]">
+                    {(() => { try { return JSON.stringify(JSON.parse(event.data), null, 2); } catch { return event.data; } })()}
+                  </pre>
+                </div>
               )}
             </div>
-            {expandedId === event.id && event.data && (
-              <div className="ml-10 mt-1 mb-2 p-3 bg-[var(--muted)] rounded text-xs font-mono overflow-auto max-h-48">
-                <pre className="whitespace-pre-wrap break-all text-[var(--foreground)]">
-                  {(() => { try { return JSON.stringify(JSON.parse(event.data), null, 2); } catch { return event.data; } })()}
-                </pre>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
+          ))}
+        </div>
+      </DashboardCard>
+    </PageShell>
   );
 }

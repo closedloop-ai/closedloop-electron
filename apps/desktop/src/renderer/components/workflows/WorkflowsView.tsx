@@ -1,13 +1,27 @@
 import { useQueryCache } from "../../hooks/useQueryCache";
-import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
 import { WorkflowStatTile } from "@closedloop-ai/design-system/components/ui/primitives/workflow-stat-tile";
 import { OrchestrationDag } from "@closedloop-ai/design-system/components/ui/composites/orchestration-dag";
 import { SankeyGraph } from "@closedloop-ai/design-system/components/ui/primitives/sankey-graph";
 import { AgentCollaborationNetwork } from "@closedloop-ai/design-system/components/ui/composites/agent-collaboration-network";
 import { RankedBar } from "@closedloop-ai/design-system/components/ui/primitives/ranked-bar";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@closedloop-ai/design-system/components/ui/table";
 import { Monitor, Bot, GitFork, Target, Layers, Timer } from "lucide-react";
 import type { WorkflowQueryData } from "../../../shared/agent-db-contract";
+import {
+  DASHBOARD_TABLE_CLASS_NAME,
+  DASHBOARD_WIDE_GRID_CLASS_NAME,
+  DashboardCard,
+  LoadingState,
+  PageShell,
+} from "../layout/page-shell";
 
 function formatDuration(sec: number): string {
   if (sec < 60) return `${Math.round(sec)}s`;
@@ -23,11 +37,7 @@ export function WorkflowsView() {
   );
 
   if (loading || !data) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <p className="text-sm text-[var(--muted-foreground)]">Loading workflows...</p>
-      </div>
-    );
+    return <LoadingState label="workflows" />;
   }
 
   const { stats, orchestration, toolFlow, effectiveness, cooccurrence } = data;
@@ -39,15 +49,11 @@ export function WorkflowsView() {
   const maxToolCount = toolFlow.toolCounts.length > 0 ? toolFlow.toolCounts[0].count : 1;
 
   return (
-    <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-xl font-bold text-[var(--foreground)]">Workflows</h1>
-        <p className="text-sm text-[var(--muted-foreground)]">
-          Agent orchestration patterns, tool flows, and effectiveness
-        </p>
-      </div>
-
-      <div className="grid grid-cols-3 gap-4 lg:grid-cols-6">
+    <PageShell
+      title="Workflows"
+      description="Agent orchestration patterns, tool flows, and effectiveness"
+    >
+      <div className={DASHBOARD_WIDE_GRID_CLASS_NAME}>
         <WorkflowStatTile label="Sessions" value={stats.totalSessions} icon={Monitor} />
         <WorkflowStatTile label="Agents" value={stats.totalAgents} description={`${stats.totalSubagents} subagents`} icon={Bot} />
         <WorkflowStatTile label="Avg Subagents" value={stats.avgSubagents.toFixed(1)} icon={GitFork} />
@@ -57,8 +63,7 @@ export function WorkflowsView() {
       </div>
 
       {stats.topFlow && (
-        <Card>
-          <CardContent className="py-3">
+        <DashboardCard contentClassName="py-3">
             <p className="text-sm text-[var(--muted-foreground)]">
               Top tool flow: <span className="font-mono text-[var(--foreground)]">{stats.topFlow.source}</span>
               {" → "}
@@ -66,82 +71,67 @@ export function WorkflowsView() {
               {" "}
               <Badge variant="secondary">{stats.topFlow.count}x</Badge>
             </p>
-          </CardContent>
-        </Card>
+        </DashboardCard>
       )}
 
       {hasOrchestration && (
-        <Card>
-          <CardHeader><CardTitle>Orchestration DAG</CardTitle></CardHeader>
-          <CardContent>
-            <OrchestrationDag data={orchestration} />
-          </CardContent>
-        </Card>
+        <DashboardCard title="Orchestration DAG">
+          <OrchestrationDag data={orchestration} />
+        </DashboardCard>
       )}
 
       {hasToolFlow && (
-        <Card>
-          <CardHeader><CardTitle>Tool Execution Flow</CardTitle></CardHeader>
-          <CardContent>
-            <SankeyGraph
-              flows={toolFlow.transitions}
-              totals={toolFlow.toolCounts.map((t) => ({ id: t.toolName, value: t.count }))}
-              ariaLabel="Tool execution flow"
-              emptyMessage="No tool transitions recorded"
-            />
-          </CardContent>
-        </Card>
+        <DashboardCard title="Tool Execution Flow">
+          <SankeyGraph
+            flows={toolFlow.transitions}
+            totals={toolFlow.toolCounts.map((t) => ({ id: t.toolName, value: t.count }))}
+            ariaLabel="Tool execution flow"
+            emptyMessage="No tool transitions recorded"
+          />
+        </DashboardCard>
       )}
 
       {hasCooccurrence && hasEffectiveness && (
-        <Card>
-          <CardHeader><CardTitle>Agent Collaboration Network</CardTitle></CardHeader>
-          <CardContent>
-            <AgentCollaborationNetwork data={effectiveness} edges={cooccurrence} />
-          </CardContent>
-        </Card>
+        <DashboardCard title="Agent Collaboration Network">
+          <AgentCollaborationNetwork data={effectiveness} edges={cooccurrence} />
+        </DashboardCard>
       )}
 
       {hasEffectiveness && (
-        <Card>
-          <CardHeader><CardTitle>Subagent Effectiveness</CardTitle></CardHeader>
-          <CardContent>
+        <DashboardCard title="Subagent Effectiveness" contentClassName="p-0">
             <div className="overflow-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-[var(--muted-foreground)]">
-                    <th className="py-2 text-left font-medium">Agent Type</th>
-                    <th className="py-2 text-right font-medium">Total</th>
-                    <th className="py-2 text-right font-medium">Completed</th>
-                    <th className="py-2 text-right font-medium">Errors</th>
-                    <th className="py-2 text-right font-medium">Success Rate</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <Table className={DASHBOARD_TABLE_CLASS_NAME}>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="px-5">Agent Type</TableHead>
+                    <TableHead className="px-5 text-right">Total</TableHead>
+                    <TableHead className="px-5 text-right">Completed</TableHead>
+                    <TableHead className="px-5 text-right">Errors</TableHead>
+                    <TableHead className="px-5 text-right">Success Rate</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {effectiveness.map((e) => (
-                    <tr key={e.subagentType} className="border-b border-[var(--border)]">
-                      <td className="py-2 font-mono text-xs">{e.subagentType}</td>
-                      <td className="py-2 text-right">{e.total}</td>
-                      <td className="py-2 text-right text-[var(--success)]">{e.completed}</td>
-                      <td className="py-2 text-right text-[var(--destructive)]">{e.errors}</td>
-                      <td className="py-2 text-right">
+                    <TableRow key={e.subagentType}>
+                      <TableCell className="px-5 font-mono text-xs">{e.subagentType}</TableCell>
+                      <TableCell className="px-5 text-right">{e.total}</TableCell>
+                      <TableCell className="px-5 text-right text-[var(--success)]">{e.completed}</TableCell>
+                      <TableCell className="px-5 text-right text-[var(--destructive)]">{e.errors}</TableCell>
+                      <TableCell className="px-5 text-right">
                         <Badge variant={e.successRate >= 80 ? "default" : "secondary"}>
                           {e.successRate.toFixed(0)}%
                         </Badge>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </div>
-          </CardContent>
-        </Card>
+        </DashboardCard>
       )}
 
       {toolFlow.toolCounts.length > 0 && (
-        <Card>
-          <CardHeader><CardTitle>Tool Invocation Counts</CardTitle></CardHeader>
-          <CardContent>
+        <DashboardCard title="Tool Invocation Counts">
             <div className="space-y-2">
               {toolFlow.toolCounts.slice(0, 15).map((t) => (
                 <RankedBar
@@ -152,17 +142,14 @@ export function WorkflowsView() {
                 />
               ))}
             </div>
-          </CardContent>
-        </Card>
+        </DashboardCard>
       )}
 
       {!hasOrchestration && !hasToolFlow && !hasEffectiveness && (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-[var(--muted-foreground)]">
+        <DashboardCard contentClassName="py-12 text-center text-sm text-[var(--muted-foreground)]">
             No workflow data yet. Agent orchestration patterns will appear here once sessions with subagents are recorded.
-          </CardContent>
-        </Card>
+        </DashboardCard>
       )}
-    </div>
+    </PageShell>
   );
 }
