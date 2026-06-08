@@ -13,6 +13,7 @@ import { useCallback, useMemo, useState } from "react";
 import type { PlanRecord, PlanVersionRecord } from "../../../shared/agent-db-contract";
 import { useQueryCache, invalidateCache } from "../../hooks/useQueryCache";
 import { DashboardCard, LoadingState, PageShell, cx } from "../layout/page-shell";
+import { formatDate } from "./format";
 
 export function PlansView() {
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
@@ -314,12 +315,6 @@ function StatusBadge({
       : "outline";
 
   return <Badge variant={variant} className="text-[10px]">{status}</Badge>;
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
 }
 
 function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {

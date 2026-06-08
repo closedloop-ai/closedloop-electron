@@ -242,6 +242,10 @@ function toSkillInvocation(row: SkillInvocationRow): SkillInvocation {
   };
 }
 
+function likeContainsLiteral(value: string): string {
+  return `%${value.replace(/[\\%_]/g, (match) => `\\${match}`)}%`;
+}
+
 /**
  * List all packs, collapsed to one row per `pack_id` (the user-facing handle).
  * Includes harness fan-out and skill count.
@@ -618,8 +622,8 @@ export async function listPackUsage(db: DbClient): Promise<PackUsageRow[]> {
 
   const out: PackUsageRow[] = [];
   for (const [packId, packPaths] of byPack) {
-    const likeClauses = packPaths.map((_, i) => `e.data LIKE $${i + 1}`).join(" OR ");
-    const likeParams = packPaths.map((p) => `%${p}%`);
+    const likeClauses = packPaths.map((_, i) => `e.data LIKE $${i + 1} ESCAPE '\\'`).join(" OR ");
+    const likeParams = packPaths.map(likeContainsLiteral);
     const result = await db.query<{
       tool_calls: number;
       sessions: number;
@@ -671,8 +675,8 @@ export async function listPackSessions(
   const packPaths = byPack.get(packId);
   if (!packPaths || packPaths.length === 0) return [];
 
-  const likeClauses = packPaths.map((_, i) => `e.data LIKE $${i + 1}`).join(" OR ");
-  const likeParams: unknown[] = packPaths.map((p) => `%${p}%`);
+  const likeClauses = packPaths.map((_, i) => `e.data LIKE $${i + 1} ESCAPE '\\'`).join(" OR ");
+  const likeParams: unknown[] = packPaths.map(likeContainsLiteral);
 
   const limitIdx = likeParams.length + 1;
   const offsetIdx = likeParams.length + 2;
@@ -709,8 +713,8 @@ export async function countPackSessions(
   const packPaths = byPack.get(packId);
   if (!packPaths || packPaths.length === 0) return 0;
 
-  const likeClauses = packPaths.map((_, i) => `e.data LIKE $${i + 1}`).join(" OR ");
-  const likeParams = packPaths.map((p) => `%${p}%`);
+  const likeClauses = packPaths.map((_, i) => `e.data LIKE $${i + 1} ESCAPE '\\'`).join(" OR ");
+  const likeParams = packPaths.map(likeContainsLiteral);
 
   const result = await db.query<{ n: number }>(
     `SELECT COUNT(DISTINCT e.session_id)::int AS n

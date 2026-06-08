@@ -17,13 +17,17 @@
  *  - Security-hardened minimal env for child processes (no leaked tokens)
  */
 
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { BrowserWindow } from "electron";
 import type { Results } from "@electric-sql/pglite";
 import type { CatalogEntry } from "../../shared/agent-db-contract.js";
+import {
+  resolveBinaryFromLoginShellSync,
+  type BinaryName,
+} from "../../server/shell-path.js";
 import { gatewayLog } from "../gateway-logger.js";
 import {
   getCatalog,
@@ -45,15 +49,6 @@ type DbClient = {
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const TAIL_BYTES = 4096;
-
-const TRUSTED_ACTION_HEADER = "x-agent-dashboard-trusted-action";
-const TRUSTED_ACTION_VALUE = "catalog-mutate";
-const ALLOWED_ORIGIN_HOSTS = new Set([
-  "localhost",
-  "127.0.0.1",
-  "::1",
-  "0.0.0.0",
-]);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,12 +73,6 @@ export interface StreamRunOptions {
 export interface StreamRunResult {
   started: boolean;
   runId?: number;
-  error?: { code: string; message: string };
-}
-
-interface TrustedActionResult {
-  ok: boolean;
-  statusCode?: number;
   error?: { code: string; message: string };
 }
 
@@ -225,7 +214,7 @@ export function resolveSpawnCwd(requestedCwd: string | undefined | null): string
 // Harness detection
 // ---------------------------------------------------------------------------
 
-const HARNESS_CLI_BINARIES: Record<string, string> = {
+const HARNESS_CLI_BINARIES: Record<string, BinaryName> = {
   claude: "claude",
   codex: "codex",
 };
@@ -238,15 +227,7 @@ const HARNESS_CLI_BINARIES: Record<string, string> = {
 export function isHarnessInstalled(harness: string): boolean {
   const bin = HARNESS_CLI_BINARIES[harness];
   if (!bin) return false;
-  try {
-    const out = execFileSync("/usr/bin/which", [bin], {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 1000,
-    });
-    return Boolean(out.toString().trim());
-  } catch {
-    return false;
-  }
+  return resolveBinaryFromLoginShellSync(bin).source !== "fallback";
 }
 
 // ---------------------------------------------------------------------------
@@ -321,79 +302,6 @@ export function pickSingleInstallCommand(
     }
   }
   return { command: null, registerHarnesses: [] };
-}
-
-// ---------------------------------------------------------------------------
-// Origin / trusted-action validation (ported from catalog-action-handler.js)
-// ---------------------------------------------------------------------------
-
-function firstHeaderValue(raw: string | string[] | undefined | null): string | null {
-  if (Array.isArray(raw)) {
-    return raw.length > 0 ? raw[0] : null;
-  }
-  return typeof raw === "string" ? raw : null;
-}
-
-export function isAllowedDashboardOrigin(
-  origin: string | null,
-  expectedPort?: string,
-): boolean {
-  if (!origin || origin === "null") return false;
-  try {
-    const url = new URL(origin);
-    const port = expectedPort ?? String(process.env.DASHBOARD_PORT || "4820");
-    return (
-      url.protocol === "http:" &&
-      ALLOWED_ORIGIN_HOSTS.has(url.hostname) &&
-      url.port === port
-    );
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Validate that a request comes from a trusted dashboard origin and carries
- * the trusted-action header. Used as a guard before install/uninstall
- * mutations.
- */
-export function validateTrustedAction(
-  origin: string | string[] | undefined | null,
-  trustedActionHeader: string | string[] | undefined | null,
-): TrustedActionResult {
-  const originStr = firstHeaderValue(origin);
-  if (!originStr || originStr === "null") {
-    return {
-      ok: false,
-      statusCode: 403,
-      error: {
-        code: "EORIGINREQUIRED",
-        message: "Origin header required for catalog install/uninstall",
-      },
-    };
-  }
-  if (!isAllowedDashboardOrigin(originStr)) {
-    return {
-      ok: false,
-      statusCode: 403,
-      error: {
-        code: "EBADORIGIN",
-        message: "cross-origin requests are not allowed",
-      },
-    };
-  }
-  const trustedAction = firstHeaderValue(trustedActionHeader);
-  if (trustedAction !== TRUSTED_ACTION_VALUE) {
-    return {
-      ok: false,
-      statusCode: 403,
-      error: {
-        code: "EUNTRUSTEDACTION",
-        message: "missing trusted action header",
-      },
-    };
-  }
-  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -607,15 +515,6 @@ export async function streamRun(db: DbClient, opts: StreamRunOptions): Promise<S
 
   return { started: true, runId };
 }
-
-// ---------------------------------------------------------------------------
-// Exports
-// ---------------------------------------------------------------------------
-
-export {
-  TRUSTED_ACTION_HEADER,
-  TRUSTED_ACTION_VALUE,
-};
 
 // Test-only internals (mirrors the old _internals export for unit tests)
 export const _internals = {

@@ -142,10 +142,21 @@ function ghCliAvailable(): boolean {
   return result.source !== "fallback" && result.source !== "override_invalid";
 }
 
+function ghCliPath(): string | null {
+  const result = resolveBinaryFromLoginShellSync("gh");
+  return result.source === "fallback" || result.source === "override_invalid"
+    ? null
+    : result.path;
+}
+
 function ghApi<T = unknown>(endpoint: string): T | null {
+  const ghPath = ghCliPath();
+  if (!ghPath) {
+    return null;
+  }
   try {
     const out = execFileSync(
-      "gh",
+      ghPath,
       ["api", endpoint, "--header", "Accept: application/vnd.github+json"],
       { timeout: REQUEST_TIMEOUT_MS, stdio: ["ignore", "pipe", "ignore"] },
     );

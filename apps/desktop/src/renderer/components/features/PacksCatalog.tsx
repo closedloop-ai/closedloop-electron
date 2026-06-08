@@ -48,6 +48,7 @@ import {
   cx,
 } from "../layout/page-shell";
 import { CatalogCard } from "./CatalogCard";
+import { formatDate } from "./format";
 import { InstallModal } from "./InstallModal";
 import { Sparkline } from "./Sparkline";
 
@@ -682,12 +683,6 @@ function PackDetailView({
       )}
     </PageShell>
   );
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
 }
 
 function ProjectCwdSelect({

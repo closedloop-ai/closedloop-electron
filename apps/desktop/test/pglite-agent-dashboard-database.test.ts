@@ -573,6 +573,83 @@ test("PGlite importer is idempotent and can append new historical events", async
   }
 });
 
+test("PGlite importer refreshes metadata when a session is re-imported", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-dashboard-pglite-"));
+  const dataDir = path.join(dir, "agent-dashboard.pgdata");
+  const db = await openPgliteAgentDatabase({
+    dataDir,
+    detectBillingMode: () => "api",
+    now: () => "2026-06-07T12:00:00.000Z",
+  });
+
+  try {
+    const session = makeNormalizedSession();
+    assert.equal((await db.importer.importSession(session, "codex")).skipped, false);
+
+    const updated: NormalizedSession = {
+      ...session,
+      plans: [
+        {
+          source: "codex",
+          content: "## Refreshed dashboard plan\n\n- Include plans added after first import",
+          timestamp: "2026-06-07T11:03:00.000Z",
+        },
+      ],
+      artifacts: {
+        prs: [{ number: "276", repo: "closedloop-ai/closedloop-electron" }],
+        issues: [],
+        repo: "closedloop-ai/closedloop-electron",
+      },
+    };
+
+    assert.equal((await db.importer.importSession(updated, "codex")).skipped, true);
+
+    const features = await db.dashboard.getCoreFeatures();
+    assert.equal(features.plans[0].title, "Refreshed dashboard plan");
+    assert.equal(features.pullRequests[0].prNumber, 276);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("PGlite historical session details refresh after cache invalidation", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-dashboard-pglite-"));
+  const dataDir = path.join(dir, "agent-dashboard.pgdata");
+  const db = await openPgliteAgentDatabase({
+    dataDir,
+    detectBillingMode: () => "api",
+    now: () => "2026-06-07T12:00:00.000Z",
+  });
+
+  try {
+    await insertPgliteSession(db, "cached-history-1", {
+      startedAt: "2026-06-07T10:00:00.000Z",
+    });
+    assert.deepEqual(
+      (await db.sessions.getHistoricalWithDetails()).map((session) => session.id),
+      ["cached-history-1"],
+    );
+
+    await insertPgliteSession(db, "cached-history-2", {
+      startedAt: "2026-06-07T11:00:00.000Z",
+    });
+    assert.deepEqual(
+      (await db.sessions.getHistoricalWithDetails()).map((session) => session.id),
+      ["cached-history-1"],
+    );
+
+    db.sessions.invalidateHistoricalDetails();
+    assert.deepEqual(
+      (await db.sessions.getHistoricalWithDetails()).map((session) => session.id),
+      ["cached-history-2", "cached-history-1"],
+    );
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 async function insertPgliteSession(
   db: Awaited<ReturnType<typeof openPgliteAgentDatabase>>,
   id: string,

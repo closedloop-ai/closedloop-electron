@@ -263,6 +263,11 @@ test("PGlite dashboard side effects stay behind the Agent Dashboard runtime boun
     /GROUP BY cwd[\s\S]*ORDER BY MAX\(started_at\) DESC NULLS LAST/,
   );
   assert.match(
+    designSystemSource,
+    /emit: \(sessionId\?: string\) => \{[\s\S]*agentDatabase\.sessions\.invalidateHistoricalDetails\(\);[\s\S]*desktop:db:changed/,
+    "collector imports must invalidate historical details before notifying the renderer",
+  );
+  assert.match(
     appSource,
     /stopAgentCapture\(\{ closeDesignSystem: true \}\)/,
   );

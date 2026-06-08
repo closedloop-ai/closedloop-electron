@@ -23,7 +23,7 @@ import * as packStore from "./packs/pack-store.js";
 import { runPackScanner } from "./packs/pack-scanner.js";
 import { streamRun } from "./packs/install-orchestrator.js";
 import { runCatalogFetch, scheduleCatalogFetch } from "./packs/catalog-fetcher.js";
-import { refreshCatalogContents } from "./packs/catalog-contents.js";
+import { isContentsFresh, refreshCatalogContents } from "./packs/catalog-contents.js";
 import * as planStore from "./plans/plan-store.js";
 import * as prStore from "./pull-requests/pr-store.js";
 import catalogSeed from "./packs/catalog-seed.json" with { type: "json" };
@@ -199,6 +199,11 @@ export async function createAgentDashboardDesignSystemRuntime(
     detectBillingMode,
     stateDir: path.join(options.userDataPath ?? app.getPath("userData"), "agent-dashboard-ingest"),
     emit: (sessionId?: string) => {
+      if (sessionId) {
+        void agentDatabase.sessions.handleSessionMutation(sessionId);
+      } else {
+        agentDatabase.sessions.invalidateHistoricalDetails();
+      }
       options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });
     },
     shouldWatchClaude: () => !isAgentMonitorHooksEnabled(),
@@ -436,6 +441,9 @@ function registerDesignSystemDbIpcHandlers(
     if (typeof packId !== "string") return null;
     const entry = await catalogStore.getCatalog(dbForStores, packId);
     if (!entry) return null;
+    if (isContentsFresh(entry)) {
+      return entry.contentsCache ?? null;
+    }
     await refreshCatalogContents(dbForStores, entry);
     const refreshed = await catalogStore.getCatalog(dbForStores, packId);
     return refreshed?.contentsCache ?? null;

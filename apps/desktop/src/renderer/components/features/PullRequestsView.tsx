@@ -33,6 +33,7 @@ import {
   PageShell,
   cx,
 } from "../layout/page-shell";
+import { formatDate } from "./format";
 
 export function PullRequestsView() {
   const { data: stats, loading: statsLoading } = useQueryCache<PrStats>(
@@ -276,12 +277,6 @@ function PrTable({
 }
 
 // ---- Helpers ----
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
-}
 
 function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];

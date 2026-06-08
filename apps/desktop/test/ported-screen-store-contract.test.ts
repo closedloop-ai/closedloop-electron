@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
   getPack,
+  listPackUsage,
   listPacks,
   listSkillInvocations,
   listSkills,
@@ -208,6 +209,47 @@ describe("ported screen store contracts", () => {
     assert.equal(skills[0]?.invocationCount, 4);
     assert.equal(invocations[0]?.eventId, "event-1");
     assert.equal(invocations[0]?.sessionName, "Session");
+  });
+
+  test("pack usage path matching escapes LIKE metacharacters", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const db: StubDb = {
+      async query<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>> {
+        queries.push({ sql, params });
+        if (sql.includes("FROM agent_packs") && sql.includes("install_path")) {
+          return rows<T>([
+            {
+              pack_id: "demo-pack",
+              install_path: "/tmp/demo_%/pack",
+            },
+          ]);
+        }
+        if (sql.includes("FROM project_pack_associations")) {
+          return rows<T>([]);
+        }
+        if (sql.includes("FROM pack_catalog")) {
+          return rows<T>([]);
+        }
+        if (sql.includes("FROM events e")) {
+          return rows<T>([
+            {
+              tool_calls: 1,
+              sessions: 1,
+              first_used_at: "2026-06-08T12:00:00.000Z",
+              last_used_at: "2026-06-08T13:00:00.000Z",
+            },
+          ]);
+        }
+        return rows<T>([]);
+      },
+    };
+
+    const usage = await listPackUsage(db);
+    const usageQuery = queries.find((query) => query.sql.includes("FROM events e"));
+
+    assert.equal(usage[0]?.pack_id, "demo-pack");
+    assert.match(usageQuery?.sql ?? "", /LIKE \$1 ESCAPE '\\'/);
+    assert.deepEqual(usageQuery?.params, ["%/tmp/demo\\_\\%/pack%"]);
   });
 
   test("plan store returns renderer DTO fields", async () => {

@@ -22,6 +22,7 @@ import type {
   SkillWithInvocations,
 } from "../../../shared/agent-db-contract";
 import { useQueryCache } from "../../hooks/useQueryCache";
+import { formatDate } from "./format";
 import {
   DASHBOARD_METRIC_CARD_CLASS_NAME,
   DASHBOARD_TABLE_CLASS_NAME,
@@ -280,14 +281,6 @@ function Cell({
       {children}
     </TableCell>
   );
-}
-
-function formatDate(value: string | null): string {
-  if (!value) {
-    return "-";
-  }
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
 }
 
 function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {

@@ -95,6 +95,13 @@ export function ghCliAvailable(): boolean {
   return result.source !== "fallback" && result.source !== "override_invalid";
 }
 
+function ghCliPath(): string | null {
+  const result = resolveBinaryFromLoginShellSync("gh");
+  return result.source === "fallback" || result.source === "override_invalid"
+    ? null
+    : result.path;
+}
+
 /**
  * Parse owner/repo out of a github URL.
  *   https://github.com/owner/repo            -> { owner, repo }
@@ -109,9 +116,13 @@ export function parseGithubUrl(url: string | null | undefined): ParsedRepo | nul
 }
 
 function ghFetch(owner: string, repo: string): GitHubRepoResponse | null {
+  const ghPath = ghCliPath();
+  if (!ghPath) {
+    return null;
+  }
   try {
     const out = execFileSync(
-      "gh",
+      ghPath,
       ["api", `repos/${owner}/${repo}`, "--header", "Accept: application/vnd.github+json"],
       { timeout: REQUEST_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] },
     );
@@ -122,9 +133,13 @@ function ghFetch(owner: string, repo: string): GitHubRepoResponse | null {
 }
 
 function ghFetchLatestRelease(owner: string, repo: string): string | null {
+  const ghPath = ghCliPath();
+  if (!ghPath) {
+    return null;
+  }
   try {
     const out = execFileSync(
-      "gh",
+      ghPath,
       ["api", `repos/${owner}/${repo}/releases/latest`],
       { timeout: REQUEST_TIMEOUT_MS, stdio: ["ignore", "pipe", "ignore"] },
     );
@@ -199,9 +214,13 @@ function ghFetchPluginManifest(
   repo: string,
   pluginPath: string,
 ): PluginManifest | null {
+  const ghPath = ghCliPath();
+  if (!ghPath) {
+    return null;
+  }
   try {
     const out = execFileSync(
-      "gh",
+      ghPath,
       [
         "api",
         `repos/${owner}/${repo}/contents/${encodeURI(pluginPath)}/.claude-plugin/plugin.json`,
@@ -330,10 +349,14 @@ export async function runCatalogFetch(db: CatalogDb): Promise<FetchSummary> {
         : null;
       const manifestOwner = mkRepo ? mkRepo.owner : parsed.owner;
       const manifestRepo = mkRepo ? mkRepo.repo : parsed.repo;
+      if (!contents.plugin_path) {
+        summary.skipped += 1;
+        continue;
+      }
       const manifest = await fetchPluginManifest(
         manifestOwner,
         manifestRepo,
-        contents.plugin_path!,
+        contents.plugin_path,
         summary.used_gh_cli,
       );
       if (!manifest) {

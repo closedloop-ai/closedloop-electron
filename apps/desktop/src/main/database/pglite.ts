@@ -1,3 +1,4 @@
+// Hand-written PGlite-backed Agent Dashboard store and query layer.
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -63,6 +64,7 @@ const TERMINAL_STATUSES = "('completed', 'abandoned', 'error')";
 const TERMINAL_STATUS_SET = new Set(["completed", "abandoned", "error"]);
 const MAX_SESSION_PAGE_LIMIT = 100;
 const DEFAULT_SESSION_PAGE_LIMIT = 25;
+const DASHBOARD_SKILL_EVENT_LIMIT = 10_000;
 const COMPACTION_RE = /compact|compress|context.*(reduc|truncat|summar)/i;
 const WAITING_INPUT_RE =
   /needs your permission|waiting for your input|is waiting|requires approval|permission to use/i;
@@ -1089,44 +1091,19 @@ function createPgliteDashboardQueries(db: PgliteClient) {
       };
     },
     async getCoreFeatures(): Promise<DashboardCoreFeatures> {
-      const [packs, skills, tools, subagents, plans, pullRequests] =
+      const [skills, tools, subagents, plans, pullRequests] =
         await Promise.all([
-          this.getPacks(),
           this.getSkills(),
           this.getTools(),
           this.getSubAgents(),
           this.getPlans(),
           this.getPullRequests(),
         ]);
+      const packs = packsFromSkills(skills);
       return { packs, skills, tools, subagents, plans, pullRequests };
     },
     async getPacks(): Promise<DashboardPackSummary[]> {
-      const skills = await this.getSkills();
-      const packs = new Map<string, DashboardPackSummary>();
-      for (const skill of skills) {
-        if (!skill.packId) {
-          continue;
-        }
-        const existing = packs.get(skill.packId);
-        if (existing) {
-          existing.skillCount++;
-          existing.toolCallCount += skill.invocationCount;
-          existing.lastUsedAt = maxIso(existing.lastUsedAt, skill.lastUsedAt);
-          continue;
-        }
-        packs.set(skill.packId, {
-          id: skill.packId,
-          name: titleFromId(skill.packId),
-          harness: skill.harness,
-          installPath: null,
-          sourceUrl: null,
-          version: null,
-          skillCount: 1,
-          toolCallCount: skill.invocationCount,
-          lastUsedAt: skill.lastUsedAt,
-        });
-      }
-      return [...packs.values()].sort(compareLastUsedThenName);
+      return packsFromSkills(await this.getSkills());
     },
     async getSkills(): Promise<DashboardSkillSummary[]> {
       const result = await db.query<{
@@ -1140,6 +1117,7 @@ function createPgliteDashboardQueries(db: PgliteClient) {
         LEFT JOIN sessions s ON s.id = e.session_id
         WHERE e.tool_name = 'Skill'
         ORDER BY e.created_at DESC
+        LIMIT ${DASHBOARD_SKILL_EVENT_LIMIT}
       `);
       const grouped = new Map<string, DashboardSkillSummary>();
       for (const row of result.rows) {
@@ -1594,14 +1572,16 @@ async function importSessionWithTx(
         cwd = COALESCE(cwd, $3),
         harness = CASE WHEN COALESCE(harness, '') = '' THEN $4 ELSE harness END,
         billing_mode = CASE WHEN COALESCE(billing_mode, '') IN ('', 'unknown') THEN $5 ELSE billing_mode END,
-        updated_at = $6
-       WHERE id = $7`,
+        metadata = $6,
+        updated_at = $7
+       WHERE id = $8`,
       [
         session.name ?? null,
         session.model ?? null,
         session.cwd ?? null,
         harness,
         billingMode,
+        buildImportMetadata(session, harness),
         now,
         session.sessionId,
       ],
@@ -2491,6 +2471,34 @@ function titleFromId(id: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ") || id;
+}
+
+function packsFromSkills(skills: DashboardSkillSummary[]): DashboardPackSummary[] {
+  const packs = new Map<string, DashboardPackSummary>();
+  for (const skill of skills) {
+    if (!skill.packId) {
+      continue;
+    }
+    const existing = packs.get(skill.packId);
+    if (existing) {
+      existing.skillCount++;
+      existing.toolCallCount += skill.invocationCount;
+      existing.lastUsedAt = maxIso(existing.lastUsedAt, skill.lastUsedAt);
+      continue;
+    }
+    packs.set(skill.packId, {
+      id: skill.packId,
+      name: titleFromId(skill.packId),
+      harness: skill.harness,
+      installPath: null,
+      sourceUrl: null,
+      version: null,
+      skillCount: 1,
+      toolCallCount: skill.invocationCount,
+      lastUsedAt: skill.lastUsedAt,
+    });
+  }
+  return [...packs.values()].sort(compareLastUsedThenName);
 }
 
 function titleFromPlan(content: string): string {
