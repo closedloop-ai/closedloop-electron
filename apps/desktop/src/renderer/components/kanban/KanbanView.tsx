@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { KanbanBoardLayout, KanbanColumn, KanbanCardFrame } from "@closedloop-ai/design-system/components/ui/layout/kanban-board";
 import { useQueryCache } from "../../hooks/useQueryCache";
 import type { KanbanPages, SessionWithAgents } from "../../../shared/agent-db-contract";
@@ -67,27 +68,31 @@ export function KanbanView() {
                     key={session.id}
                     active={session.id === selectedId}
                   >
-                    <button
-                      className="w-full text-left"
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-auto w-full justify-start p-0 text-left hover:bg-transparent"
                       onClick={() => setSelectedId(selectedId === session.id ? null : session.id)}
                     >
-                      <p className="truncate text-sm font-medium text-[var(--foreground)]">
-                        {session.name ?? "Unnamed"}
-                      </p>
-                      {session.model && (
-                        <p className="truncate text-xs text-[var(--muted-foreground)] mt-0.5">
-                          {session.model}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-[var(--foreground)]">
+                          {session.name ?? "Unnamed"}
                         </p>
-                      )}
-                      <div className="flex items-center gap-2 mt-1.5">
-                        <span className="text-[11px] text-[var(--muted-foreground)]">
-                          {session.agentCount} agents
-                        </span>
-                        <span className="text-[11px] text-[var(--muted-foreground)]">
-                          {session.totalTokens.toLocaleString()} tokens
-                        </span>
+                        {session.model && (
+                          <p className="truncate text-xs text-[var(--muted-foreground)] mt-0.5">
+                            {session.model}
+                          </p>
+                        )}
+                        <div className="flex items-center gap-2 mt-1.5">
+                          <span className="text-[11px] text-[var(--muted-foreground)]">
+                            {session.agentCount} agents
+                          </span>
+                          <span className="text-[11px] text-[var(--muted-foreground)]">
+                            {session.totalTokens.toLocaleString()} tokens
+                          </span>
+                        </div>
                       </div>
-                    </button>
+                    </Button>
                   </KanbanCardFrame>
                 ))}
                 {(page?.total ?? 0) > items.length ? (

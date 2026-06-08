@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@closedloop-ai/design-system/components/ui/card";
 import { Badge } from "@closedloop-ai/design-system/components/ui/badge";
+import { Checkbox } from "@closedloop-ai/design-system/components/ui/checkbox";
 
 interface ActivityEvent {
   id: string;
@@ -115,12 +116,20 @@ export function ActivityPanel() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-center gap-4 text-sm">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={showRegular} onChange={(e) => setShowRegular(e.target.checked)} className="rounded" />
+            <label className="flex items-center gap-2 cursor-pointer" htmlFor="show-regular-events">
+              <Checkbox
+                id="show-regular-events"
+                checked={showRegular}
+                onCheckedChange={(checked) => setShowRegular(checked === true)}
+              />
               Show Regular Events
             </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={showSecurity} onChange={(e) => setShowSecurity(e.target.checked)} className="rounded" />
+            <label className="flex items-center gap-2 cursor-pointer" htmlFor="show-security-events">
+              <Checkbox
+                id="show-security-events"
+                checked={showSecurity}
+                onCheckedChange={(checked) => setShowSecurity(checked === true)}
+              />
               Show Security Events
             </label>
           </div>

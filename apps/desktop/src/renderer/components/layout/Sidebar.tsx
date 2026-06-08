@@ -1,3 +1,4 @@
+import { Button } from "@closedloop-ai/design-system/components/ui/button";
 import type { NavId } from "../../App";
 
 interface NavItem {
@@ -83,11 +84,12 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)] px-2 pb-1">Agents</div>
         )}
         {agentItems.map((item) => (
-          <button
+          <Button
             key={item.id}
             type="button"
+            variant="ghost"
             onClick={() => onNavigate(item.id)}
-            className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-sm transition-colors ${
+            className={`h-auto w-full justify-start gap-2.5 px-2 py-1.5 text-sm transition-colors ${
               activeNav === item.id
                 ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)] font-medium"
                 : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]/60"
@@ -96,7 +98,7 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           >
             <NavIcon name={item.icon} />
             {!collapsed && <span className="truncate">{item.label}</span>}
-          </button>
+          </Button>
         ))}
 
         {collapsed ? (
@@ -105,11 +107,12 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)] px-2 pt-3 pb-1">Gateway</div>
         )}
         {gatewayItems.map((item) => (
-          <button
+          <Button
             key={item.id}
             type="button"
+            variant="ghost"
             onClick={() => onNavigate(item.id)}
-            className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-sm transition-colors ${
+            className={`h-auto w-full justify-start gap-2.5 px-2 py-1.5 text-sm transition-colors ${
               activeNav === item.id
                 ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)] font-medium"
                 : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]/60"
@@ -118,7 +121,7 @@ export function Sidebar({ collapsed, activeNav, onNavigate, runtimeHealthy }: Si
           >
             <NavIcon name={item.icon} />
             {!collapsed && <span className="truncate">{item.label}</span>}
-          </button>
+          </Button>
         ))}
       </nav>
 

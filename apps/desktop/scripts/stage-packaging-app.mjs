@@ -15,8 +15,6 @@ const packageJsonFile = path.join(appDir, "package.json");
 const repoNpmrcFile = path.join(repoRoot, ".npmrc");
 const stageRootPackageJsonFile = path.join(stageRoot, "package.json");
 const stageBuildOutputDir = path.join(stageAppDir, "dist");
-const rendererEntryFile = path.join(appDir, "src/renderer/index.html");
-const stageRendererDir = path.join(stageAppDir, "src/renderer");
 const stageNpmrcFile = path.join(stageAppDir, ".npmrc");
 
 function resolveStageDependencySpec(packageJson, dependencyName, dependency) {
@@ -165,5 +163,3 @@ await stat(buildOutputDir).catch(() => {
 });
 
 await cp(buildOutputDir, stageBuildOutputDir, { recursive: true });
-await mkdir(stageRendererDir, { recursive: true });
-await cp(rendererEntryFile, path.join(stageRendererDir, "index.html"));
