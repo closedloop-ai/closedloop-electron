@@ -6,9 +6,9 @@
  * `importSession` into the shared in-process DB. Started/stopped alongside the
  * hook listener via the `agentMonitorEnabled` toggle.
  *
- * Gating (fail-closed, FEA-1407): every parsed session is checked against the
- * sandbox base directory BEFORE any write — an out-of-sandbox `cwd` (or an empty
- * sandbox) drops the session, exactly like the hook path. Do not ungate.
+ * Local import is ungated — all sessions from all five harnesses are imported
+ * into the local DB regardless of the sandbox directory. Sandbox enforcement
+ * is applied exclusively on the cloud-sync path in AgentSessionSyncService.
  *
  * Claude has a live hook path; its live watcher is therefore gated OFF when hooks
  * are installed (hooks own live capture — a concurrent file watcher would
@@ -16,7 +16,6 @@
  * against any hook-written events.
  */
 import type { AgentDatabase } from "../database/index.js";
-import { isSessionInSandbox } from "../agent-session-sync-service.js";
 import { createImporter, type Importer } from "./import-session.js";
 import { createCatchupCache, type CatchupCache } from "./catchup-cache.js";
 import { ingestCachePath, ingestOpencodeFingerprintPath } from "./ingest-paths.js";
@@ -32,8 +31,6 @@ export interface CollectorManagerOptions {
   agentDatabase: AgentDatabase;
   /** Resolve a billing mode for a harness at session creation (FEA-1434). */
   detectBillingMode: (harness: string) => string;
-  /** FEA-1407 sandbox base directory (empty ⇒ capture nothing). Read live. */
-  getSandboxBaseDirectory: () => string;
   /** Durable dir for persisted catchup caches (e.g. userData/agent-monitor). */
   stateDir: string;
   /** Push a renderer live-update after an import batch wrote rows. */
@@ -124,10 +121,6 @@ export class CollectorManager {
     this.started = false;
   }
 
-  private gate(session: NormalizedSession): boolean {
-    return isSessionInSandbox(session.cwd, this.options.getSandboxBaseDirectory());
-  }
-
   private async runImportFor(collector: HarnessCollector): Promise<void> {
     if (this.stopped) return;
     try {
@@ -167,7 +160,6 @@ export class CollectorManager {
 
       for (const session of sessions) {
         if (this.stopped) break;
-        if (!this.gate(session)) continue; // FEA-1407 fail-closed
         const result = this.importer.importSession(session, collector.key);
         if (!(result.skipped && !result.reactivated)) imported++;
       }

@@ -3,7 +3,6 @@ import type { AddressInfo } from "node:net";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
-import { isSessionInSandbox } from "./agent-session-sync-service.js";
 import type { createLifecycle, HookData } from "./database/lifecycle.js";
 
 // CLOSEDLOOP-TICKET FEA-1500: remove legacy HTTP hook listener on 4820 after
@@ -30,8 +29,6 @@ const HookEnvelopeSchema = z.object({
 export interface AgentHookListenerOptions {
   /** The lifecycle processor that owns all DB writes. */
   lifecycle: ReturnType<typeof createLifecycle>;
-  /** FEA-1407 sandbox base directory (empty string ⇒ capture nothing). */
-  getSandboxBaseDirectory: () => string;
   /** Key-free diagnostic sink (gatewayLog). */
   log?: (message: string) => void;
   /**
@@ -53,9 +50,9 @@ export interface AgentHookListenerOptions {
  *   - `POST /api/hooks/codex/event` → Codex `{ hook_type, data }`
  *
  * Every request responds 200 fail-soft so a hook never blocks an agent turn.
- * FEA-1407 sandbox gating is enforced BEFORE any DB write — with no sandbox
- * configured, nothing is captured (fail-closed; do not ungate — defense in
- * depth so out-of-sandbox sessions never enter the local DB). Provider
+ * Local import is ungated — all hook events are written to the local DB
+ * regardless of the sandbox directory. Sandbox enforcement is applied
+ * exclusively on the cloud-sync path in AgentSessionSyncService. Provider
  * attribution is route-owned; payload-level provider hints are rejected as
  * spoofable data before lifecycle writes or live DB-change emits.
  */
@@ -169,15 +166,6 @@ export class AgentHookListener {
           // provider hint is spoofable and rejected before lifecycle writes.
           if (Object.prototype.hasOwnProperty.call(data, PROVIDER_HINT_FIELD)) {
             this.json(res, 200, { ok: true, skipped: "invalid-provider-hint" });
-            return;
-          }
-
-          // FEA-1407: gate LOCAL capture on the sandbox BEFORE any write. Empty
-          // sandbox ⇒ isSessionInSandbox returns false ⇒ nothing is captured.
-          const sandboxBase = this.options.getSandboxBaseDirectory();
-          const cwd = typeof data.cwd === "string" ? data.cwd : null;
-          if (!isSessionInSandbox(cwd, sandboxBase)) {
-            this.json(res, 200, { ok: true, skipped: "out-of-sandbox" });
             return;
           }
 

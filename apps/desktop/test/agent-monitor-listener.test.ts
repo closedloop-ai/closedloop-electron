@@ -64,7 +64,6 @@ interface ListenerDiagnostics {
 }
 
 async function withListener(
-  sandboxBaseRef: { value: string },
   run: (
     url: string,
     db: ReturnType<typeof openAgentDatabase>,
@@ -83,7 +82,6 @@ async function withListener(
   });
   const listener = new AgentHookListener({
     lifecycle,
-    getSandboxBaseDirectory: () => sandboxBaseRef.value,
     log: (message) => diagnostics.logs.push(message),
     port: 0,
   });
@@ -108,17 +106,15 @@ function assertNoWritesOrEmits(
 }
 
 test("listener: GET /api/health returns 200 ok", async () => {
-  const sandbox = { value: "/work" };
-  await withListener(sandbox, async (url) => {
+  await withListener(async (url) => {
     const res = await request(`${url}/api/health`, "GET");
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { ok: true });
   });
 });
 
-test("listener: in-sandbox SessionStart writes a session with harness=claude", async () => {
-  const sandbox = { value: "/work" };
-  await withListener(sandbox, async (url, db, diagnostics) => {
+test("listener: SessionStart writes a session with harness=claude", async () => {
+  await withListener(async (url, db, diagnostics) => {
     const res = await request(`${url}/api/hooks/event`, "POST", {
       hook_type: "SessionStart",
       data: { session_id: "s1", cwd: "/work/project" },
@@ -132,8 +128,7 @@ test("listener: in-sandbox SessionStart writes a session with harness=claude", a
 });
 
 test("listener: Codex route stamps harness=codex without payload provider hint", async () => {
-  const sandbox = { value: "/work" };
-  await withListener(sandbox, async (url, db, diagnostics) => {
+  await withListener(async (url, db, diagnostics) => {
     const res = await request(`${url}/api/hooks/codex/event`, "POST", {
       hook_type: "SessionStart",
       data: { session_id: "cx1", cwd: "/work/project" },
@@ -145,8 +140,7 @@ test("listener: Codex route stamps harness=codex without payload provider hint",
 });
 
 test("listener: payload provider hints are rejected before writes on every hook route", async () => {
-  const sandbox = { value: "/work" };
-  await withListener(sandbox, async (url, db, diagnostics) => {
+  await withListener(async (url, db, diagnostics) => {
     for (const route of ["/api/hooks/event", "/api/hooks/codex/event"]) {
       const res = await request(`${url}${route}`, "POST", {
         hook_type: "SessionStart",
@@ -160,8 +154,7 @@ test("listener: payload provider hints are rejected before writes on every hook 
 });
 
 test("listener: malformed, invalid, and oversized payloads fail soft without writes", async () => {
-  const sandbox = { value: "/work" };
-  await withListener(sandbox, async (url, db, diagnostics) => {
+  await withListener(async (url, db, diagnostics) => {
     const malformed = await requestRaw(
       `${url}/api/hooks/event`,
       "POST",
@@ -198,28 +191,16 @@ test("listener: malformed, invalid, and oversized payloads fail soft without wri
   });
 });
 
-test("listener: out-of-sandbox event is dropped (no write)", async () => {
-  const sandbox = { value: "/work" };
-  await withListener(sandbox, async (url, db, diagnostics) => {
+test("listener: sessions from any directory are captured (no sandbox gating)", async () => {
+  await withListener(async (url, db, diagnostics) => {
     const res = await request(`${url}/api/hooks/event`, "POST", {
       hook_type: "SessionStart",
-      data: { session_id: "outside", cwd: "/somewhere/else" },
-    });
-    assert.equal(res.status, 200, "still acks so the hook never blocks");
-    assert.deepEqual(res.body, { ok: true, skipped: "out-of-sandbox" });
-    assertNoWritesOrEmits(db, diagnostics);
-  });
-});
-
-test("listener: empty sandbox captures nothing (fail-closed)", async () => {
-  const sandbox = { value: "" };
-  await withListener(sandbox, async (url, db, diagnostics) => {
-    const res = await request(`${url}/api/hooks/event`, "POST", {
-      hook_type: "SessionStart",
-      data: { session_id: "s1", cwd: "/work/project" },
+      data: { session_id: "anywhere", cwd: "/somewhere/else" },
     });
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { ok: true, skipped: "out-of-sandbox" });
-    assertNoWritesOrEmits(db, diagnostics);
+    assert.deepEqual(res.body, { ok: true });
+    const session = db.sessions.getById("anywhere");
+    assert.ok(session, "session from any directory is imported");
+    assert.deepEqual(diagnostics.emits, ["anywhere"]);
   });
 });
