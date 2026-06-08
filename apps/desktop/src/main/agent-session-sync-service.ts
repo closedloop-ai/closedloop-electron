@@ -55,7 +55,7 @@ export function estimateSessionPayloadBytes(session: SyncedAgentSession): number
 
 const { app } = electron;
 
-type SessionCursorRow = {
+export type SessionCursorRow = {
   id: string;
   updated_at: string;
 };
@@ -120,6 +120,18 @@ export type SessionAttributionResolverCache = {
   repoFullNameByPath: Map<string, string | null>;
 };
 
+export interface AgentSessionSyncSource {
+  listAllSessionCursorRows(): SessionCursorRow[] | Promise<SessionCursorRow[]>;
+  listUpdatedSessionCursorRows(
+    sinceUpdatedAt: string,
+  ): SessionCursorRow[] | Promise<SessionCursorRow[]>;
+  loadSyncedSessions(
+    ids: string[],
+    cache: SessionAttributionResolverCache,
+  ): SyncedAgentSession[] | Promise<SyncedAgentSession[]>;
+  close?: () => void | Promise<void>;
+}
+
 export type AgentSessionSyncTelemetryEvent = {
   outcome: "failure";
   reason: DesktopAgentSessionsAckReason;
@@ -136,12 +148,13 @@ export interface AgentSessionSyncServiceOptions {
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
   /**
-   * The optional design-system in-process DB connection. When provided, the
-   * service reads through it (no per-cycle open/close, no path resolution, no
-   * existsSync guard). When omitted or null, the service falls back to the
-   * legacy sidecar dashboard.db path from getUserDataPath.
+   * Optional SQLite compatibility source. When omitted or null and getSource is
+   * also absent, the service falls back to the legacy sidecar dashboard.db path
+   * from getUserDataPath.
    */
   getConnection?: () => DatabaseSync | null;
+  /** Optional live dashboard source for async backends such as PGlite. */
+  getSource?: () => AgentSessionSyncSource | null;
   onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
 }
 
@@ -289,11 +302,12 @@ export class AgentSessionSyncService {
     this.syncing = true;
 
     try {
-      // The caller owns the dashboard source by mode: design-system injects an
-      // in-process connection, legacy falls back to dashboard.db on disk, and
-      // disabled mode stops this service before it reaches the source lookup.
+      // The caller owns the dashboard source by mode: design-system injects a
+      // live source, legacy falls back to dashboard.db on disk, and disabled
+      // mode stops this service before it reaches the source lookup.
       const sharedDb = this.options.getConnection?.() ?? null;
-      const dbPath = sharedDb
+      const injectedSource = this.options.getSource?.() ?? null;
+      const dbPath = sharedDb || injectedSource
         ? null
         : resolveAgentMonitorDatabasePath(this.options.getUserDataPath?.());
       if (dbPath && !existsSync(dbPath)) {
@@ -331,13 +345,13 @@ export class AgentSessionSyncService {
         syncIds = [sessionId];
         // Skip DB access — go straight to send.
       } else {
-        const db = sharedDb ?? new DatabaseSync(dbPath!);
+        const source = injectedSource ?? createSqliteSessionSyncSource(
+          sharedDb ?? new DatabaseSync(dbPath!),
+          !sharedDb,
+        );
         try {
-          if (!sharedDb) {
-            db.exec("PRAGMA busy_timeout = 5000");
-          }
-          this.initializeBackfillQueueIfNeeded(db);
-          this.enqueueIncrementalUpdates(db);
+          await this.initializeBackfillQueueIfNeeded(source);
+          await this.enqueueIncrementalUpdates(source);
 
           const nowMs = Date.now();
           let candidateIds: string[] = [];
@@ -384,12 +398,12 @@ export class AgentSessionSyncService {
 
           const chunkedSyncEnabled = this.options.isChunkedSyncEnabled?.() ?? false;
 
-          // Load all candidate sessions from SQLite, then accumulate into the
-          // batch until adding the next session would exceed the 256 KiB cap.
+          // Load all candidate sessions from the selected dashboard source,
+          // then accumulate into the batch until adding the next session would
+          // exceed the 256 KiB cap.
           // Sessions that individually exceed the cap are either chunked (if
           // the feature flag is on) or skipped/dead-lettered.
-          const rawSessions = loadSyncedSessions(
-            db,
+          const rawSessions = await source.loadSyncedSessions(
             candidateIds,
             this.attributionCache,
           );
@@ -475,9 +489,7 @@ export class AgentSessionSyncService {
             sessions,
           };
         } finally {
-          if (!sharedDb) {
-            db.close();
-          }
+          await source.close?.();
         }
       }
 
@@ -511,12 +523,14 @@ export class AgentSessionSyncService {
     }
   }
 
-  private initializeBackfillQueueIfNeeded(db: DatabaseSync): void {
+  private async initializeBackfillQueueIfNeeded(
+    source: AgentSessionSyncSource,
+  ): Promise<void> {
     if (this.observedTopUpdatedAt !== null) {
       return;
     }
 
-    const rows = listAllSessionCursorRows(db);
+    const rows = await source.listAllSessionCursorRows();
     if (rows.length === 0) {
       return;
     }
@@ -540,14 +554,16 @@ export class AgentSessionSyncService {
     );
   }
 
-  private enqueueIncrementalUpdates(db: DatabaseSync): void {
+  private async enqueueIncrementalUpdates(
+    source: AgentSessionSyncSource,
+  ): Promise<void> {
     if (!this.observedTopUpdatedAt) {
       return;
     }
 
     const previousTopUpdatedAt = this.observedTopUpdatedAt;
     const previousTopIds = new Set(this.observedIdsAtTopUpdatedAt);
-    const rows = listUpdatedSessionCursorRows(db, previousTopUpdatedAt);
+    const rows = await source.listUpdatedSessionCursorRows(previousTopUpdatedAt);
     if (rows.length === 0) {
       return;
     }
@@ -836,9 +852,14 @@ export function sanitizeSessionForSync(
 }
 
 const STRIPPED_LEAF_KEYS = new Set([
-  "prompt", "content", "stdout", "stderr",
-  "text", "output", "reasoning",
-  "old_string", "new_string", "patch", "command", "arguments",
+  "command",
+  "content",
+  "output",
+  "prompt",
+  "reasoning",
+  "stderr",
+  "stdout",
+  "text",
 ]);
 
 function stripDataContent(data: SyncJsonValue | undefined): SyncJsonValue | undefined {
@@ -866,6 +887,29 @@ export function resolveAgentMonitorDatabasePath(
   userDataPath = app.getPath("userData"),
 ): string {
   return path.join(userDataPath, "agent-monitor", "dashboard.db");
+}
+
+function createSqliteSessionSyncSource(
+  db: DatabaseSync,
+  ownsConnection: boolean,
+): AgentSessionSyncSource {
+  if (ownsConnection) {
+    db.exec("PRAGMA busy_timeout = 5000");
+  }
+  return {
+    listAllSessionCursorRows: () => listAllSessionCursorRows(db),
+    listUpdatedSessionCursorRows: (sinceUpdatedAt: string) =>
+      listUpdatedSessionCursorRows(db, sinceUpdatedAt),
+    loadSyncedSessions: (
+      ids: string[],
+      cache: SessionAttributionResolverCache,
+    ) => loadSyncedSessions(db, ids, cache),
+    close: () => {
+      if (ownsConnection) {
+        db.close();
+      }
+    },
+  };
 }
 
 export function listAllSessionCursorRows(db: DatabaseSync): SessionCursorRow[] {
@@ -923,12 +967,6 @@ export function loadSyncedSessions(
     return [];
   }
 
-  const hasIdentityCols =
-    columnExists(db, "sessions", "user_id")
-    && columnExists(db, "sessions", "organization_id");
-  const identityColsSql = hasIdentityCols
-    ? "user_id, organization_id"
-    : "NULL AS user_id, NULL AS organization_id";
   const sessionRows = selectRowsByIds<SessionRow>(
     db,
     `
@@ -945,7 +983,8 @@ export function loadSyncedSessions(
         metadata,
         harness,
         billing_mode,
-        ${identityColsSql}
+        user_id,
+        organization_id
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -1052,9 +1091,9 @@ export function loadSyncedSessions(
         endedAt: row.ended_at,
         awaitingInputSince: row.awaiting_input_since,
         metadata: parseJsonObjectText(row.metadata),
+        ...(row.user_id ? { userId: row.user_id } : {}),
+        ...(row.organization_id ? { organizationId: row.organization_id } : {}),
         ...(attribution ? { attribution } : {}),
-        ...(row.user_id != null ? { userId: row.user_id } : {}),
-        ...(row.organization_id != null ? { organizationId: row.organization_id } : {}),
         agents: (agentsBySessionId.get(id) ?? []).map((agentRow) => ({
           externalAgentId: agentRow.id,
           name: agentRow.name,
@@ -1113,22 +1152,13 @@ export function estimateTokenUsageCostUsd(
  * 'unknown') by best-effort detecting from the live desktop environment. A
  * stored, definite mode always wins over re-detection.
  */
-export function resolveBillingModeForRow(row: SessionRow): BillingMode {
+export function resolveBillingModeForRow(
+  row: Pick<SessionRow, "billing_mode" | "harness">,
+): BillingMode {
   return resolveBillingMode({
     billingMode: row.billing_mode,
     harness: row.harness,
   });
-}
-
-function columnExists(
-  db: DatabaseSync,
-  table: string,
-  column: string,
-): boolean {
-  const rows = db
-    .prepare(`PRAGMA table_info(${table})`)
-    .all() as Array<{ name: string }>;
-  return rows.some((row) => row.name === column);
 }
 
 function selectRowsByIds<T>(
@@ -1157,7 +1187,7 @@ function groupRowsBySessionId<
   return grouped;
 }
 
-function resolveSessionAttribution(
+export function resolveSessionAttribution(
   cwd: string | null,
   cache: SessionAttributionResolverCache,
 ): SyncedAgentSessionAttribution | undefined {
@@ -1238,7 +1268,7 @@ function findLaunchMetadataRoot(
   }
 }
 
-function parseJsonValueText(value: string | null): SyncJsonValue | null {
+export function parseJsonValueText(value: string | null): SyncJsonValue | null {
   if (!value || value.trim().length === 0) {
     return null;
   }
@@ -1250,7 +1280,7 @@ function parseJsonValueText(value: string | null): SyncJsonValue | null {
   }
 }
 
-function parseJsonObjectText(value: string | null): SyncJsonObject | null {
+export function parseJsonObjectText(value: string | null): SyncJsonObject | null {
   const parsed = parseJsonValueText(value);
   return isSyncJsonObject(parsed) ? parsed : null;
 }

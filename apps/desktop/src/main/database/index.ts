@@ -10,6 +10,7 @@ import { createDashboardQueries } from "./dashboard.js";
 import type { DashboardSummary } from "../../shared/agent-db-contract.js";
 
 export interface AgentDatabase {
+  backend: "sqlite";
   /**
    * The underlying single shared connection. All in-process access — hook
    * writes (lifecycle), IPC reads, the cloud relay, and cost reconciliation —
@@ -76,6 +77,7 @@ export function openAgentDatabase(dbPath: string): AgentDatabase {
   const dashboard = createDashboardQueries(db);
 
   return {
+    backend: "sqlite",
     connection: db,
     sessions,
     agents,

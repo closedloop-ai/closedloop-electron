@@ -2,22 +2,16 @@ import path from "node:path";
 import { app, ipcMain, type BrowserWindow } from "electron";
 import { AgentHookListener } from "./agent-monitor-listener.js";
 import { CollectorManager } from "./collectors/collector-manager.js";
-import {
-  loadMeteredUsageRows,
-  type MeteredUsageRow,
-} from "./reconciliation-worker.js";
+import type { MeteredUsageRow } from "./reconciliation-worker.js";
+import type { AgentSessionSyncSource } from "./agent-session-sync-service.js";
 import type { SessionPageRequest } from "../shared/agent-db-contract.js";
 import { detectBillingMode } from "./billing-mode-detector.js";
-import { openAgentDatabase, type AgentDatabase } from "./database/index.js";
-import { coerceDbId } from "./database/ipc-validation.js";
-import { createLifecycle } from "./database/lifecycle.js";
 import {
-  resolveAgentDashboardDatabasePathForUserData,
-  type AgentDashboardDatabaseStartupResult,
-} from "./agent-dashboard-database-startup.js";
+  openPgliteAgentDatabase,
+  type PgliteAgentDatabase,
+} from "./database/pglite.js";
+import { coerceDbId } from "./database/ipc-validation.js";
 import { isAgentMonitorHooksEnabled } from "./agent-monitor-hooks.js";
-
-export { prepareAgentDashboardDatabaseStartup } from "./agent-dashboard-database-startup.js";
 
 const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
   "desktop:db:get-sessions",
@@ -43,11 +37,11 @@ export interface AgentDashboardDesignSystemRuntimeOptions {
   onTerminalFailure: (reason: string) => void;
   userDataPath?: string;
   log?: (scope: string, message: string) => void;
-  startupResult?: AgentDashboardDatabaseStartupResult;
 }
 
 export interface AgentDashboardDesignSystemRuntime {
-  connection: AgentDatabase["connection"];
+  connection: null;
+  syncSource: AgentSessionSyncSource | null;
   getUrl: () => string | null;
   isReady: () => boolean;
   start: () => void;
@@ -55,77 +49,57 @@ export interface AgentDashboardDesignSystemRuntime {
   close: () => void;
   restartCollectors: () => void;
   registerIpcHandlers: () => void;
-  loadMeteredUsageRows: (cutoffIso: string) => MeteredUsageRow[];
+  loadMeteredUsageRows: (cutoffIso: string) => MeteredUsageRow[] | Promise<MeteredUsageRow[]>;
 }
 
 /**
  * Resolve the opt-in design-system dashboard database. This helper lives inside
  * the dynamic boundary so default/legacy boot never imports code that can create
- * or migrate `agent-dashboard.sqlite`.
+ * the PGlite data directory.
  */
 export function resolveAgentDashboardDatabasePath(
   userDataPath = app.getPath("userData"),
 ): string {
-  return resolveAgentDashboardDatabasePathForUserData(userDataPath);
+  return path.join(userDataPath, "agent-dashboard.pgdata");
 }
 
 /**
  * Create the in-process design-system dashboard runtime. Import this module only
  * after the Labs flag has selected design-system mode; all imports below this
- * boundary can open SQLite, bind the hook port, register IPC, or start watchers.
+ * boundary can open PGlite, bind the hook port, register IPC, or start watchers.
  */
-export function createAgentDashboardDesignSystemRuntime(
+export async function createAgentDashboardDesignSystemRuntime(
   options: AgentDashboardDesignSystemRuntimeOptions,
-): AgentDashboardDesignSystemRuntime {
+): Promise<AgentDashboardDesignSystemRuntime> {
   const log = options.log ?? (() => {});
-  const startupResult = options.startupResult;
-
-  if (startupResult?.backend === "pglite") {
-    log(
-      "agent-dashboard-migration",
-      "PGlite migration kicked off in background; SQLite runtime active during migration",
-    );
-    void startupResult.migrationPromise.then((migration) => {
-      if (migration.status === "failed") {
-        log(
-          "agent-dashboard-migration",
-          `PGlite migration failed: ${migration.error}`,
-        );
-      } else {
-        log(
-          "agent-dashboard-migration",
-          `PGlite migration completed (${migration.status === "migrated" ? `${migration.rowCounts.sessions} sessions` : "skipped"})`,
-        );
-      }
-    });
-  }
-
-  const agentDatabase = openAgentDatabase(
-    resolveAgentDashboardDatabasePath(options.userDataPath),
+  let pgliteDatabase: PgliteAgentDatabase | null = null;
+  const agentDatabase = await openPgliteAgentDatabase({
+    dataDir: resolveAgentDashboardDatabasePath(options.userDataPath),
+    detectBillingMode,
+    emit: (sessionId: string) => {
+      void pgliteDatabase?.sessions.handleSessionMutation(sessionId);
+      options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });
+    },
+    log: (message: string) => log("agent-pglite", message),
+  });
+  pgliteDatabase = agentDatabase;
+  log(
+    "agent-dashboard",
+    "PGlite runtime active for Agent Dashboard database",
   );
   let dbIpcRegistered = false;
   let closed = false;
 
-  const lifecycle = createLifecycle(agentDatabase.connection, {
-    tokenUsage: agentDatabase.tokenUsage,
-    detectBillingMode,
-    emit: (sessionId: string) => {
-      agentDatabase.sessions.handleSessionMutation(sessionId);
-      options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });
-    },
-    log: (message: string) => log("agent-lifecycle", message),
-  });
-
   const hookListener = new AgentHookListener({
-    lifecycle,
+    lifecycle: { processEvent: agentDatabase.processEvent },
     log: (message: string) => log("agent-monitor-listener", message),
     onBindError: options.onTerminalFailure,
   });
 
   const collectorManager = new CollectorManager({
-    agentDatabase,
+    importer: agentDatabase.importer,
     detectBillingMode,
-    stateDir: path.join(options.userDataPath ?? app.getPath("userData"), "agent-monitor"),
+    stateDir: path.join(options.userDataPath ?? app.getPath("userData"), "agent-dashboard-ingest"),
     emit: (sessionId?: string) => {
       options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });
     },
@@ -135,6 +109,7 @@ export function createAgentDashboardDesignSystemRuntime(
 
   const runtime: AgentDashboardDesignSystemRuntime = {
     connection: agentDatabase.connection,
+    syncSource: agentDatabase.syncSource,
     getUrl: () => hookListener.getUrl(),
     isReady: () => hookListener.isReady(),
     start: () => {
@@ -157,7 +132,7 @@ export function createAgentDashboardDesignSystemRuntime(
       }
       closed = true;
       unregisterDesignSystemDbIpcHandlers();
-      agentDatabase.close();
+      void agentDatabase.close();
     },
     restartCollectors: () => {
       if (closed) {
@@ -174,13 +149,13 @@ export function createAgentDashboardDesignSystemRuntime(
       registerDesignSystemDbIpcHandlers(agentDatabase);
     },
     loadMeteredUsageRows: (cutoffIso: string) =>
-      loadMeteredUsageRows(agentDatabase.connection, cutoffIso),
+      agentDatabase.loadMeteredUsageRows(cutoffIso),
   };
 
   return runtime;
 }
 
-function registerDesignSystemDbIpcHandlers(agentDatabase: AgentDatabase): void {
+function registerDesignSystemDbIpcHandlers(agentDatabase: PgliteAgentDatabase): void {
   ipcMain.handle("desktop:db:get-sessions", () => agentDatabase.sessions.getAll());
 
   ipcMain.handle("desktop:db:get-sessions-page", (_event, request: unknown) =>
@@ -253,7 +228,7 @@ function registerDesignSystemDbIpcHandlers(agentDatabase: AgentDatabase): void {
   ipcMain.handle("desktop:db:get-agent-hierarchy", (_event, sessionId: unknown) => {
     const id = coerceDbId(sessionId);
     if (id === null) return [];
-    return agentDatabase.agents.getBySessionWithChildren(id, agentDatabase.events);
+    return agentDatabase.agents.getBySessionWithChildren(id);
   });
 
   ipcMain.handle("desktop:db:get-analytics", () =>

@@ -118,7 +118,7 @@ export interface CostReconciliationServiceDeps {
   openaiKeyStore: AdminKeyStoreLike;
   store: Pick<ReconciliationStore, "upsert" | "list">;
   /** Load the metered usage rows to reconcile (production opens dashboard.db). */
-  loadUsageRows: () => MeteredUsageRow[];
+  loadUsageRows: () => MeteredUsageRow[] | Promise<MeteredUsageRow[]>;
   /** Build the Anthropic cost client from a key (overridable in tests). */
   createAnthropicClient?: (apiKey: string) => AnthropicCostClient;
   /** Build the OpenAI cost client from a key (overridable in tests). */
@@ -288,7 +288,7 @@ export class CostReconciliationService {
     }
 
     // Load usage once and reuse it across each vendor's pass.
-    const usageRows = this.deps.loadUsageRows();
+    const usageRows = await this.deps.loadUsageRows();
     const loadUsageRows = (): MeteredUsageRow[] => usageRows;
 
     let rowsWritten = 0;

@@ -704,6 +704,10 @@ export class DesktopApplication {
         this.agentDashboardMode === "design-system"
           ? this.agentDashboardDesignSystem?.connection ?? null
           : null,
+      getSource: () =>
+        this.agentDashboardMode === "design-system"
+          ? this.agentDashboardDesignSystem?.syncSource ?? null
+          : null,
       onBatchOutcome: (event) => {
         Observability.agentSessionSyncBatchFailed(event);
       },
@@ -713,8 +717,8 @@ export class DesktopApplication {
     // renderer) and the reconciliation store, and reconciles the local
     // genai-prices estimate against what each vendor actually billed.
     // Agent Dashboard usage rows are mode-owned: legacy reads dashboard.db from
-    // disk, design-system reads the in-process connection, and disabled returns
-    // no rows so the dashboard code path stays inert.
+    // disk, design-system reads the PGlite runtime, and disabled returns no rows
+    // so the dashboard code path stays inert.
     // One Anthropic Admin key store, shared by reconciliation (compares the local
     // estimate against the billed cost_report) and Claude Code analytics (reads
     // Anthropic's own per-user usage estimate). Sharing the store means a key
@@ -1482,15 +1486,15 @@ export class DesktopApplication {
     return false;
   }
 
-  private loadAgentDashboardMeteredUsageRows(): MeteredUsageRow[] {
+  private async loadAgentDashboardMeteredUsageRows(): Promise<MeteredUsageRow[]> {
     if (!this.isAgentMonitorEnabled()) {
       return [];
     }
 
     const cutoffIso = reconciliationCutoffIso(new Date());
     if (this.agentDashboardMode === "design-system") {
-      return (
-        this.agentDashboardDesignSystem?.loadMeteredUsageRows(cutoffIso) ?? []
+      return await Promise.resolve(
+        this.agentDashboardDesignSystem?.loadMeteredUsageRows(cutoffIso) ?? [],
       );
     }
 
@@ -1509,19 +1513,11 @@ export class DesktopApplication {
       return null;
     }
     if (!this.agentDashboardDesignSystem) {
-      const {
-        createAgentDashboardDesignSystemRuntime,
-        prepareAgentDashboardDatabaseStartup,
-      } = await import(
+      const { createAgentDashboardDesignSystemRuntime } = await import(
         "./agent-dashboard-design-system-runtime.js"
       );
-      const startupResult = await prepareAgentDashboardDatabaseStartup({
-        userDataPath: app.getPath("userData"),
-        backend: "pglite",
-        log: (scope, message) => gatewayLog.info(scope, message),
-      });
       this.agentDashboardDesignSystem =
-        createAgentDashboardDesignSystemRuntime({
+        await createAgentDashboardDesignSystemRuntime({
           userDataPath: app.getPath("userData"),
           getWindow: () => this.desktopWindow.getWindow(),
           onTerminalFailure: (reason) => {
@@ -1535,7 +1531,6 @@ export class DesktopApplication {
             this.refreshTrayState();
           },
           log: (scope, message) => gatewayLog.info(scope, message),
-          startupResult,
         });
       this.agentDashboardDesignSystem.registerIpcHandlers();
     }
