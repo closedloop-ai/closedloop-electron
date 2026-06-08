@@ -15,6 +15,10 @@ import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { Results } from "@electric-sql/pglite";
+import type {
+  PlanRecord,
+  PlanVersionRecord,
+} from "../../shared/agent-db-contract.js";
 
 type DbClient = {
   query<T extends Record<string, unknown>>(
@@ -447,11 +451,64 @@ export function extractPlansFromPlansDir(plansDir: string): PlanCapture[] {
 interface PlanRow extends Record<string, unknown> {
   id: string;
   plan_key: string | null;
+  title: string | null;
+  status: string;
+  source: string | null;
+  capture_method: string | null;
   harness: string | null;
   created_from_session_id: string | null;
   file_path: string | null;
   source_log_path: string | null;
+  needs_confirmation: boolean;
+  confidence: number;
+  created_at: string | null;
   updated_at: string | null;
+  latest_content?: string | null;
+  version_count?: number | null;
+}
+
+interface PlanVersionRow extends Record<string, unknown> {
+  id: string;
+  plan_id: string;
+  version_number: number;
+  content_markdown: string | null;
+  content_sha256: string | null;
+  author_type: string | null;
+  capture_method: string | null;
+  created_at: string | null;
+}
+
+function toPlanRecord(row: PlanRow): PlanRecord {
+  return {
+    id: row.id,
+    title: row.title,
+    status: row.status,
+    source: row.source,
+    captureMethod: row.capture_method,
+    harness: row.harness,
+    sessionId: row.created_from_session_id,
+    filePath: row.file_path,
+    sourceLogPath: row.source_log_path,
+    needsConfirmation: row.needs_confirmation,
+    confidence: row.confidence,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    latestContent: row.latest_content ?? null,
+    versionCount: row.version_count ?? 0,
+  };
+}
+
+function toPlanVersionRecord(row: PlanVersionRow): PlanVersionRecord {
+  return {
+    id: row.id,
+    planId: row.plan_id,
+    versionNumber: row.version_number,
+    contentMarkdown: row.content_markdown,
+    contentSha256: row.content_sha256,
+    authorType: row.author_type,
+    captureMethod: row.capture_method,
+    createdAt: row.created_at,
+  };
 }
 
 async function findExistingPlan(
@@ -764,15 +821,32 @@ function buildPlanListFilters(opts: PlanListFilters): {
 export async function listPlans(
   db: DbClient,
   opts: PlanListFilters = {},
-): Promise<Record<string, unknown>[]> {
+): Promise<PlanRecord[]> {
   const { limit = 100, offset = 0 } = opts;
   const filters = buildPlanListFilters(opts);
-  const result = await db.query(
-    `SELECT * FROM plans${filters.clause}
-     ORDER BY updated_at DESC LIMIT $${filters.nextParam} OFFSET $${filters.nextParam + 1}`,
+  const result = await db.query<PlanRow>(
+    `SELECT
+       p.*,
+       latest.content_markdown AS latest_content,
+       COALESCE(version_counts.version_count, 0)::int AS version_count
+     FROM plans p
+     LEFT JOIN LATERAL (
+       SELECT content_markdown
+       FROM plan_versions
+       WHERE plan_id = p.id
+       ORDER BY version_number DESC
+       LIMIT 1
+     ) latest ON true
+     LEFT JOIN (
+       SELECT plan_id, COUNT(*)::int AS version_count
+       FROM plan_versions
+       GROUP BY plan_id
+     ) version_counts ON version_counts.plan_id = p.id
+     ${filters.clause}
+     ORDER BY p.updated_at DESC LIMIT $${filters.nextParam} OFFSET $${filters.nextParam + 1}`,
     [...filters.params, limit, offset],
   );
-  return result.rows;
+  return result.rows.map(toPlanRecord);
 }
 
 export async function countPlans(
@@ -790,8 +864,8 @@ export async function countPlans(
 export async function getPlanVersions(
   db: DbClient,
   planId: string,
-): Promise<Record<string, unknown>[]> {
-  const result = await db.query(
+): Promise<PlanVersionRecord[]> {
+  const result = await db.query<PlanVersionRow>(
     `SELECT id, plan_id, version_number, content_markdown, content_sha256,
             author_type, source_session_id, source_event_ref, capture_method,
             created_at
@@ -799,18 +873,36 @@ export async function getPlanVersions(
      ORDER BY version_number ASC`,
     [planId],
   );
-  return result.rows;
+  return result.rows.map(toPlanVersionRecord);
 }
 
 export async function getPlan(
   db: DbClient,
   id: string,
-): Promise<(Record<string, unknown> & { versions: Record<string, unknown>[] }) | null> {
-  const result = await db.query(`SELECT * FROM plans WHERE id = $1`, [id]);
+): Promise<PlanRecord | null> {
+  const result = await db.query<PlanRow>(
+    `SELECT
+       p.*,
+       latest.content_markdown AS latest_content,
+       COALESCE(version_counts.version_count, 0)::int AS version_count
+     FROM plans p
+     LEFT JOIN LATERAL (
+       SELECT content_markdown
+       FROM plan_versions
+       WHERE plan_id = p.id
+       ORDER BY version_number DESC
+       LIMIT 1
+     ) latest ON true
+     LEFT JOIN (
+       SELECT plan_id, COUNT(*)::int AS version_count
+       FROM plan_versions
+       GROUP BY plan_id
+     ) version_counts ON version_counts.plan_id = p.id
+     WHERE p.id = $1`,
+    [id],
+  );
   const plan = result.rows[0];
-  if (!plan) return null;
-  const versions = await getPlanVersions(db, id);
-  return { ...plan, versions };
+  return plan ? toPlanRecord(plan) : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -557,7 +557,7 @@ function registerDesignSystemDbIpcHandlers(
     if (typeof id !== "string") return;
     const plan = await planStore.getPlan(dbForStores, id);
     if (!plan) return;
-    const filePath = String(target === "log" ? plan.source_log_path : plan.file_path);
+    const filePath = String(target === "log" ? plan.sourceLogPath : plan.filePath);
     if (filePath && filePath !== "null" && filePath !== "undefined") void shell.openPath(filePath);
   }));
 
@@ -590,7 +590,7 @@ function registerDesignSystemDbIpcHandlers(
     if (typeof id !== "string") return;
     const prs = await prStore.listPullRequests(dbForStores);
     const pr = prs.find((p) => p.id === id);
-    const prUrl = pr?.pr_url;
+    const prUrl = pr?.prUrl;
     if (typeof prUrl === "string") void shell.openExternal(prUrl);
   }));
 }

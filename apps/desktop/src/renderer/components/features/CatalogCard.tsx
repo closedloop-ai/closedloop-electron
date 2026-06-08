@@ -23,7 +23,7 @@ export function CatalogCard({
   const harnesses = catalogHarnesses(entry);
   const installedHarnesses = catalogInstalledHarnesses(entry);
   const isInstalled = installedHarnesses.length > 0;
-  const starHistory = entry.history?.map((h) => h.stars) ?? [];
+  const starHistory = catalogStarHistory(entry);
 
   return (
     <DashboardCard
@@ -139,6 +139,10 @@ function catalogHarnesses(entry: CatalogEntry): string[] {
 
 function catalogInstalledHarnesses(entry: CatalogEntry): string[] {
   return Array.isArray(entry.installedHarnesses) ? entry.installedHarnesses : [];
+}
+
+function catalogStarHistory(entry: CatalogEntry): number[] {
+  return Array.isArray(entry.history) ? entry.history.map((h) => h.stars) : [];
 }
 
 function formatCount(n: number): string {

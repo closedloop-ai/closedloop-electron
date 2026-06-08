@@ -25,9 +25,10 @@ export function PlansView() {
     10_000,
   );
 
+  const planList = arrayOrEmpty(plans);
   const selectedPlan = useMemo(
-    () => plans?.find((p) => p.id === selectedPlanId) ?? null,
-    [plans, selectedPlanId],
+    () => planList.find((p) => p.id === selectedPlanId) ?? null,
+    [planList, selectedPlanId],
   );
 
   const { data: versions } = useQueryCache<PlanVersionRecord[]>(
@@ -75,7 +76,7 @@ export function PlansView() {
     return <LoadingState label="plans" />;
   }
 
-  const planList = plans ?? [];
+  const versionList = arrayOrEmpty(versions);
 
   return (
     <PageShell title="Plans" description="Plans extracted from agent sessions -- review, confirm, or reject">
@@ -122,10 +123,10 @@ export function PlansView() {
                 )}
 
                 {/* Version history */}
-                {showVersions && versions && versions.length > 0 && (
+                {showVersions && versionList.length > 0 && (
                   <DashboardCard title="Version History">
                     <div className="space-y-4">
-                      {versions.map((v) => (
+                      {versionList.map((v) => (
                         <VersionEntry key={v.id} version={v} />
                       ))}
                     </div>
@@ -319,4 +320,8 @@ function formatDate(value: string | null | undefined): string {
   if (!value) return "-";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
 }

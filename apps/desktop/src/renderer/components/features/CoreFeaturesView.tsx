@@ -62,7 +62,7 @@ export function SkillsView() {
     return <LoadingState label="skills" />;
   }
 
-  const rows = skills ?? [];
+  const rows = arrayOrEmpty(skills);
 
   return (
     <PageShell title="Skills" description="Skill invocations captured from agent sessions">
@@ -120,7 +120,7 @@ export function ToolsView() {
     return <LoadingState label="tools" />;
   }
 
-  const rows = tools ?? [];
+  const rows = arrayOrEmpty(tools);
 
   return (
     <PageShell title="Tools" description="Tool calls grouped across all imported sessions">
@@ -176,7 +176,7 @@ export function SubAgentsView() {
     return <LoadingState label="subagents" />;
   }
 
-  const rows = subagents ?? [];
+  const rows = arrayOrEmpty(subagents);
 
   return (
     <PageShell title="SubAgents" description="Subagent roles, outcomes, and session coverage">
@@ -288,4 +288,8 @@ function formatDate(value: string | null): string {
   }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
 }

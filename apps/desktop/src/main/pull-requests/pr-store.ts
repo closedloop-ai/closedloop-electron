@@ -16,6 +16,11 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import type { Results } from "@electric-sql/pglite";
+import type {
+  PrRecord,
+  PrSessionGroup,
+  PrStats,
+} from "../../shared/agent-db-contract.js";
 
 type DbClient = {
   query<T extends Record<string, unknown>>(
@@ -23,6 +28,36 @@ type DbClient = {
     params?: unknown[],
   ): Promise<Results<T>>;
 };
+
+interface PrRow extends Record<string, unknown> {
+  id: string;
+  session_id: string | null;
+  pr_url: string;
+  pr_number: number | null;
+  repo_full_name: string | null;
+  branch_name: string | null;
+  head_sha: string | null;
+  title: string | null;
+  harness: string | null;
+  observed_at: string | null;
+  created_at: string | null;
+}
+
+function toPrRecord(row: PrRow): PrRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    prUrl: row.pr_url,
+    prNumber: row.pr_number,
+    repoFullName: row.repo_full_name,
+    branchName: row.branch_name,
+    headSha: row.head_sha,
+    title: row.title,
+    harness: row.harness,
+    observedAt: row.observed_at,
+    createdAt: row.created_at,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -593,15 +628,15 @@ function buildPrFilter(opts: PrListFilters): {
 export async function listPullRequests(
   db: DbClient,
   opts: PrListFilters = {},
-): Promise<Record<string, unknown>[]> {
+): Promise<PrRecord[]> {
   const { limit = 100, offset = 0 } = opts;
   const { where, params, nextParam } = buildPrFilter(opts);
-  const result = await db.query(
+  const result = await db.query<PrRow>(
     `SELECT * FROM pull_requests${where}
      ORDER BY observed_at DESC LIMIT $${nextParam} OFFSET $${nextParam + 1}`,
     [...params, limit, offset],
   );
-  return result.rows;
+  return result.rows.map(toPrRecord);
 }
 
 export async function countPullRequests(
@@ -623,12 +658,6 @@ export async function countRepos(db: DbClient): Promise<number> {
   return result.rows[0]?.c ?? 0;
 }
 
-export interface PrStats {
-  totalPrs: number;
-  totalRepos: number;
-  totalSessions: number;
-}
-
 export async function getPrStats(db: DbClient): Promise<PrStats> {
   const result = await db.query<{
     total_prs: number;
@@ -644,8 +673,8 @@ export async function getPrStats(db: DbClient): Promise<PrStats> {
   const row = result.rows[0];
   return {
     totalPrs: row?.total_prs ?? 0,
-    totalRepos: row?.total_repos ?? 0,
-    totalSessions: row?.total_sessions ?? 0,
+    repos: row?.total_repos ?? 0,
+    sessionsWithPrs: row?.total_sessions ?? 0,
   };
 }
 
@@ -653,21 +682,10 @@ export async function getPrStats(db: DbClient): Promise<PrStats> {
 // DB: session-grouped PR listing
 // ---------------------------------------------------------------------------
 
-interface SessionWithPrs extends Record<string, unknown> {
-  session_id: string | null;
-  session_name: string | null;
-  session_started_at: string | null;
-  session_cwd: string | null;
-  pr_count: number;
-  last_pr_at: string | null;
-  harness: string | null;
-  pull_requests: Record<string, unknown>[];
-}
-
 export async function listPrSessions(
   db: DbClient,
   opts: { limit?: number; offset?: number } = {},
-): Promise<SessionWithPrs[]> {
+): Promise<PrSessionGroup[]> {
   const { limit = 100, offset = 0 } = opts;
   const result = await db.query<{
     session_id: string | null;
@@ -694,18 +712,22 @@ export async function listPrSessions(
     [limit, offset],
   );
 
-  const rows: SessionWithPrs[] = [];
+  const rows: PrSessionGroup[] = [];
   for (const row of result.rows) {
-    const prsResult = await db.query(
-      `SELECT id, pr_url, pr_number, repo_full_name, branch_name, head_sha,
-              title, harness, observed_at
+    const prsResult = await db.query<PrRow>(
+      `SELECT id, session_id, pr_url, pr_number, repo_full_name, branch_name, head_sha,
+              title, harness, observed_at, created_at
        FROM pull_requests WHERE session_id IS NOT DISTINCT FROM $1
        ORDER BY observed_at DESC`,
       [row.session_id],
     );
     rows.push({
-      ...row,
-      pull_requests: prsResult.rows,
+      sessionId: row.session_id ?? "unknown",
+      sessionName: row.session_name,
+      cwd: row.session_cwd,
+      harness: row.harness,
+      startedAt: row.session_started_at,
+      prs: prsResult.rows.map(toPrRecord),
     });
   }
   return rows;

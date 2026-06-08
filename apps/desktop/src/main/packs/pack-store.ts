@@ -16,6 +16,12 @@
  */
 
 import type { Results } from "@electric-sql/pglite";
+import type {
+  InstalledPack,
+  InstalledPackDetail,
+  SkillInvocation,
+  SkillWithInvocations,
+} from "../../shared/agent-db-contract.js";
 
 type DbClient = {
   query<T extends Record<string, unknown>>(
@@ -149,6 +155,93 @@ interface PackListRow extends Record<string, unknown> {
   skill_count: number;
 }
 
+function splitHarnesses(value: string | null): string[] {
+  if (!value) {
+    return [];
+  }
+  return value.split(",").filter(Boolean);
+}
+
+function toInstalledPack(row: PackListRow): InstalledPack {
+  return {
+    packId: row.pack_id,
+    harnesses: splitHarnesses(row.harnesses),
+    installs: [],
+    skillCount: row.skill_count,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+function toInstalledPackInstall(row: PackInstallRow): InstalledPack["installs"][number] {
+  return {
+    harness: row.harness,
+    installPath: row.install_path,
+    installKind: row.install_kind,
+    sourceUrl: row.source_url,
+    version: row.version,
+    detectedAt: row.detected_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+function toInstalledPackDetail(
+  packId: string,
+  installs: PackInstallRow[],
+  skills: SkillRow[],
+  associations: ProjectAssociationRow[],
+): InstalledPackDetail {
+  const sortedLastSeenTimes = installs
+    .map((install) => install.last_seen_at)
+    .filter((value): value is string => typeof value === "string")
+    .sort();
+  const lastSeenAt = sortedLastSeenTimes.length > 0
+    ? sortedLastSeenTimes[sortedLastSeenTimes.length - 1]!
+    : null;
+
+  return {
+    packId,
+    harnesses: [...new Set(installs.map((install) => install.harness))],
+    installs: installs.map(toInstalledPackInstall),
+    skillCount: skills.length,
+    lastSeenAt,
+    skills: skills.map((skill) => ({
+      skillId: skill.skill_id,
+      name: skill.name,
+      version: skill.version,
+      description: skill.description,
+      harness: skill.harness,
+    })),
+    associations: associations.map((association) => ({
+      projectPath: association.project_path,
+      detectedAt: association.detected_at,
+      lastSeenAt: association.last_seen_at,
+    })),
+  };
+}
+
+function toSkillWithInvocations(row: SkillWithInvocationsRow): SkillWithInvocations {
+  return {
+    skillId: row.skill_id,
+    packId: row.pack_id,
+    name: row.name,
+    harness: row.harness,
+    description: row.description,
+    invocationCount: row.invocation_count,
+    lastUsedAt: row.last_invoked_at,
+  };
+}
+
+function toSkillInvocation(row: SkillInvocationRow): SkillInvocation {
+  return {
+    eventId: row.event_id,
+    sessionId: row.session_id,
+    sessionName: row.session_name,
+    harness: row.session_harness,
+    model: row.session_model,
+    createdAt: row.created_at,
+  };
+}
+
 /**
  * List all packs, collapsed to one row per `pack_id` (the user-facing handle).
  * Includes harness fan-out and skill count.
@@ -162,7 +255,7 @@ interface PackListRow extends Record<string, unknown> {
  * (e.g. a marketplace pack with several plugins at different versions) --
  * avoids picking one arbitrary value and presenting it as authoritative.
  */
-export async function listPacks(db: DbClient): Promise<PackListRow[]> {
+export async function listPacks(db: DbClient): Promise<InstalledPack[]> {
   const result = await db.query<PackListRow>(
     `SELECT
        p.pack_id,
@@ -183,7 +276,7 @@ export async function listPacks(db: DbClient): Promise<PackListRow[]> {
      GROUP BY p.pack_id
      ORDER BY p.pack_id ASC`,
   );
-  return result.rows;
+  return result.rows.map(toInstalledPack);
 }
 
 interface PackInstallRow extends Record<string, unknown> {
@@ -217,15 +310,6 @@ interface ProjectAssociationRow extends Record<string, unknown> {
   last_seen_at: string;
 }
 
-interface PackDetail {
-  pack_id: string;
-  version: string | null;
-  harnesses: string[];
-  installs: PackInstallRow[];
-  skills: SkillRow[];
-  associations: ProjectAssociationRow[];
-}
-
 /**
  * Get one pack by `pack_id`, returning installs (one row per harness/install
  * path), skills, and project associations. Tombstoned installs are excluded.
@@ -233,7 +317,7 @@ interface PackDetail {
 export async function getPack(
   db: DbClient,
   packId: string,
-): Promise<PackDetail | null> {
+): Promise<InstalledPackDetail | null> {
   const installResult = await db.query<PackInstallRow>(
     `SELECT pack_id, harness, install_path, install_kind, source_url, version,
             detected_at, last_seen_at
@@ -256,14 +340,7 @@ export async function getPack(
     [packId],
   );
 
-  return {
-    pack_id: packId,
-    version: installs[0].version,
-    harnesses: [...new Set(installs.map((i) => i.harness))],
-    installs,
-    skills,
-    associations: assocResult.rows,
-  };
+  return toInstalledPackDetail(packId, installs, skills, assocResult.rows);
 }
 
 export async function listSkillsForPack(
@@ -309,7 +386,7 @@ function skillNameFromPromptSql(tableAlias: string): string {
   END`;
 }
 
-interface SkillWithInvocations extends SkillRow {
+interface SkillWithInvocationsRow extends SkillRow {
   invocation_count: number;
   last_invoked_at: string | null;
 }
@@ -329,7 +406,7 @@ interface SkillWithInvocations extends SkillRow {
  * Codex patch (default 'claude' for legacy rows).
  */
 export async function listSkills(db: DbClient): Promise<SkillWithInvocations[]> {
-  const result = await db.query<SkillWithInvocations>(
+  const result = await db.query<SkillWithInvocationsRow>(
     `SELECT
        s.skill_id,
        s.pack_id,
@@ -359,7 +436,7 @@ export async function listSkills(db: DbClient): Promise<SkillWithInvocations[]> 
      WHERE s.uninstalled_at IS NULL
      ORDER BY (s.pack_id IS NULL) ASC, s.pack_id ASC, s.name ASC, s.harness ASC`,
   );
-  return result.rows;
+  return result.rows.map(toSkillWithInvocations);
 }
 
 interface SkillInvocationRow extends Record<string, unknown> {
@@ -390,7 +467,7 @@ export async function listSkillInvocations(
     offset = 0,
     harness = null as string | null,
   } = {},
-): Promise<SkillInvocationRow[]> {
+): Promise<SkillInvocation[]> {
   const harnessClause = harness
     ? "AND COALESCE(NULLIF(sess.harness, ''), 'claude') = $2"
     : "";
@@ -432,7 +509,7 @@ export async function listSkillInvocations(
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     params,
   );
-  return result.rows;
+  return result.rows.map(toSkillInvocation);
 }
 
 // ────────────────────────────────────────────────────────────────────────────

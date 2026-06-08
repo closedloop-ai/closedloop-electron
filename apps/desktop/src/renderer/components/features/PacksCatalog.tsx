@@ -139,6 +139,15 @@ export function PacksCatalog() {
     [filteredCatalog],
   );
 
+  const installedPackRows = useMemo(
+    () => (Array.isArray(installedPacks) ? installedPacks : []),
+    [installedPacks],
+  );
+  const recentProjectRows = useMemo(
+    () => (Array.isArray(recentProjects) ? recentProjects : []),
+    [recentProjects],
+  );
+
   const hasProjectScopedActions = useMemo(
     () =>
       filteredCatalog.some((entry) =>
@@ -152,10 +161,10 @@ export function PacksCatalog() {
   );
 
   useEffect(() => {
-    if (!selectedProjectCwd && recentProjects?.[0]) {
-      setSelectedProjectCwd(recentProjects[0]);
+    if (!selectedProjectCwd && recentProjectRows[0]) {
+      setSelectedProjectCwd(recentProjectRows[0]);
     }
-  }, [recentProjects, selectedProjectCwd]);
+  }, [recentProjectRows, selectedProjectCwd]);
 
   // -- Actions --
 
@@ -255,7 +264,7 @@ export function PacksCatalog() {
         onInstall={handleInstall}
         onUninstall={handleUninstall}
         installing={installing}
-        recentProjects={recentProjects ?? []}
+        recentProjects={recentProjectRows}
         selectedProjectCwd={selectedProjectCwd}
         onProjectCwdChange={setSelectedProjectCwd}
         installError={installError}
@@ -280,7 +289,7 @@ export function PacksCatalog() {
         </div>
         {hasProjectScopedActions && (
           <ProjectCwdSelect
-            recentProjects={recentProjects ?? []}
+            recentProjects={recentProjectRows}
             selectedProjectCwd={selectedProjectCwd}
             onProjectCwdChange={setSelectedProjectCwd}
             className="w-[18rem]"
@@ -351,7 +360,7 @@ export function PacksCatalog() {
       </Tabs>
 
       {/* Installed packs (from local detection) */}
-      {!installedLoading && installedPacks && installedPacks.length > 0 && (
+      {!installedLoading && installedPackRows.length > 0 && (
         <DashboardCard title="Locally Detected Packs" contentClassName="p-0">
           <div className="overflow-auto">
             <DsTable className={DASHBOARD_TABLE_CLASS_NAME}>
@@ -364,16 +373,16 @@ export function PacksCatalog() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {installedPacks.map((pack) => (
+                {installedPackRows.map((pack) => (
                   <TableRow
-                    key={pack.packId}
+                    key={installedPackId(pack)}
                     className="cursor-pointer hover:bg-[var(--muted)]/50"
-                    onClick={() => handleCardClick(pack.packId)}
+                    onClick={() => handleCardClick(installedPackId(pack))}
                   >
-                    <TableCell className="px-5 font-medium">{pack.packId}</TableCell>
+                    <TableCell className="px-5 font-medium">{installedPackId(pack)}</TableCell>
                     <TableCell className="px-5">
                       <div className="flex flex-wrap gap-1">
-                        {pack.harnesses.map((h) => (
+                        {installedPackHarnesses(pack).map((h) => (
                           <Badge key={h} variant="outline" className="text-[10px]">{h}</Badge>
                         ))}
                       </div>
@@ -473,7 +482,10 @@ function PackDetailView({
 
   const displayName = catalogEntry?.displayName ?? packId;
   const description = catalogEntry?.descriptionLive ?? catalogEntry?.description;
-  const starHistory = catalogEntry?.history?.map((h) => h.stars) ?? [];
+  const starHistory = catalogEntry ? catalogStarHistory(catalogEntry) : [];
+  const skills = installedPackDetailSkills(packDetail);
+  const associations = installedPackDetailAssociations(packDetail);
+  const contentsCache = catalogContentsCache(catalogEntry);
   const hasProjectScopedActions = catalogEntry
     ? catalogHarnesses(catalogEntry).some(
         (harness) =>
@@ -583,8 +595,8 @@ function PackDetailView({
       )}
 
       {/* Skills list */}
-      {packDetail && packDetail.skills.length > 0 && (
-        <DashboardCard title={`Skills (${packDetail.skills.length})`} contentClassName="p-0">
+      {skills.length > 0 && (
+        <DashboardCard title={`Skills (${skills.length})`} contentClassName="p-0">
           <div className="overflow-auto">
             <DsTable className={DASHBOARD_TABLE_CLASS_NAME}>
               <TableHeader>
@@ -596,7 +608,7 @@ function PackDetailView({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {packDetail.skills.map((skill) => (
+                {skills.map((skill) => (
                   <TableRow key={skill.skillId}>
                     <TableCell className="px-5 font-medium">{skill.name ?? skill.skillId}</TableCell>
                     <TableCell className="px-5 text-xs text-[var(--muted-foreground)]">
@@ -615,10 +627,10 @@ function PackDetailView({
       )}
 
       {/* Project associations */}
-      {packDetail && packDetail.associations.length > 0 && (
+      {associations.length > 0 && (
         <DashboardCard title="Project Associations">
           <div className="space-y-2">
-            {packDetail.associations.map((assoc) => (
+            {associations.map((assoc) => (
               <div key={assoc.projectPath} className="flex items-center justify-between text-sm">
                 <span className="truncate font-mono text-xs">{assoc.projectPath}</span>
                 <span className="shrink-0 text-xs text-[var(--muted-foreground)]">
@@ -640,7 +652,7 @@ function PackDetailView({
       )}
 
       {/* Contents */}
-      {catalogEntry?.contentsCache && catalogEntry.contentsCache.length > 0 && (
+      {contentsCache.length > 0 && (
         <DashboardCard title="Contents" contentClassName="p-0">
           <div className="overflow-auto">
             <DsTable className={DASHBOARD_TABLE_CLASS_NAME}>
@@ -652,7 +664,7 @@ function PackDetailView({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {catalogEntry.contentsCache.map((item) => (
+                {contentsCache.map((item) => (
                   <TableRow key={item.name}>
                     <TableCell className="px-5 font-medium">{item.name}</TableCell>
                     <TableCell className="px-5">
@@ -735,12 +747,42 @@ function catalogInstalledHarnesses(entry: CatalogEntry): string[] {
   return Array.isArray(entry.installedHarnesses) ? entry.installedHarnesses : [];
 }
 
+function catalogStarHistory(entry: CatalogEntry): number[] {
+  return Array.isArray(entry.history) ? entry.history.map((h) => h.stars) : [];
+}
+
+function catalogContentsCache(
+  entry: CatalogEntry | null,
+): NonNullable<CatalogEntry["contentsCache"]> {
+  return Array.isArray(entry?.contentsCache) ? entry.contentsCache : [];
+}
+
 function catalogDisplayName(entry: CatalogEntry): string {
   return typeof entry.displayName === "string" ? entry.displayName : catalogPackId(entry);
 }
 
 function catalogPackId(entry: CatalogEntry): string {
   return typeof entry.packId === "string" ? entry.packId : "";
+}
+
+function installedPackId(pack: InstalledPack): string {
+  return typeof pack.packId === "string" ? pack.packId : "";
+}
+
+function installedPackHarnesses(pack: InstalledPack): string[] {
+  return Array.isArray(pack.harnesses) ? pack.harnesses : [];
+}
+
+function installedPackDetailSkills(
+  packDetail: InstalledPackDetail | null,
+): InstalledPackDetail["skills"] {
+  return Array.isArray(packDetail?.skills) ? packDetail.skills : [];
+}
+
+function installedPackDetailAssociations(
+  packDetail: InstalledPackDetail | null,
+): InstalledPackDetail["associations"] {
+  return Array.isArray(packDetail?.associations) ? packDetail.associations : [];
 }
 
 function resolveProjectCwdForAction(

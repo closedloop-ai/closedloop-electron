@@ -69,6 +69,8 @@ export function PullRequestsView() {
   }
 
   const prStats = stats ?? { totalPrs: 0, sessionsWithPrs: 0, repos: 0 };
+  const sessionGroups = arrayOrEmpty(sessions);
+  const prs = arrayOrEmpty(allPrs);
 
   return (
     <PageShell title="Pull Requests" description="Pull request artifacts across agent sessions">
@@ -104,9 +106,9 @@ export function PullRequestsView() {
           </TabsList>
 
           <TabsContent value="by-session" className="mt-4">
-            {!sessionsLoading && sessions && sessions.length > 0 ? (
+            {!sessionsLoading && sessionGroups.length > 0 ? (
               <div className="space-y-4">
-                {sessions.map((group) => (
+                {sessionGroups.map((group) => (
                   <SessionGroupCard
                     key={group.sessionId}
                     group={group}
@@ -122,8 +124,8 @@ export function PullRequestsView() {
           </TabsContent>
 
           <TabsContent value="all-prs" className="mt-4">
-            {!prsLoading && allPrs && allPrs.length > 0 ? (
-              <PrTable prs={allPrs} onOpenPr={handleOpenPr} />
+            {!prsLoading && prs.length > 0 ? (
+              <PrTable prs={prs} onOpenPr={handleOpenPr} />
             ) : prsLoading ? (
               <LoadingState label="pull requests" />
             ) : (
@@ -145,6 +147,7 @@ function SessionGroupCard({
   group: PrSessionGroup;
   onOpenPr: (id: string) => void;
 }) {
+  const prs = prGroupRecords(group);
   return (
     <DashboardCard>
       <div className="space-y-3">
@@ -161,13 +164,13 @@ function SessionGroupCard({
             </div>
           </div>
           <Badge variant="outline" className="shrink-0">
-            {group.prs.length} PR{group.prs.length !== 1 ? "s" : ""}
+            {prs.length} PR{prs.length !== 1 ? "s" : ""}
           </Badge>
         </div>
 
         {/* PR chips */}
         <div className="flex flex-wrap gap-2">
-          {group.prs.map((pr) => (
+          {prs.map((pr) => (
             <PrChip key={pr.id} pr={pr} onOpen={onOpenPr} />
           ))}
         </div>
@@ -278,4 +281,12 @@ function formatDate(value: string | null | undefined): string {
   if (!value) return "-";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function prGroupRecords(group: PrSessionGroup): PrRecord[] {
+  return Array.isArray(group.prs) ? group.prs : [];
 }
