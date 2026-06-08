@@ -1487,7 +1487,7 @@ export class DesktopApplication {
     await this.agentDashboardDesignSystem?.stop();
     this.agentSessionSync.stop();
     if (options.closeDesignSystem && this.agentDashboardDesignSystem) {
-      this.agentDashboardDesignSystem.close();
+      await this.agentDashboardDesignSystem.close();
       this.agentDashboardDesignSystem = null;
     }
   }
@@ -1975,7 +1975,7 @@ export class DesktopApplication {
     this.commandKeyReconciler.stop();
     await this.stopAgentCapture();
     this.costReconciliation.stop();
-    this.agentDashboardDesignSystem?.close();
+    await this.agentDashboardDesignSystem?.close();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,

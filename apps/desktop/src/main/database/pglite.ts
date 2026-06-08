@@ -481,7 +481,7 @@ function pageWhereClause(status: string | null, q: string | null): {
     const start = params.length + 1;
     params.push(like, like, like, like);
     where.push(
-      `(s.id LIKE $${start} ESCAPE '\\' OR s.name LIKE $${start + 1} ESCAPE '\\' OR s.cwd LIKE $${start + 2} ESCAPE '\\' OR s.model LIKE $${start + 3} ESCAPE '\\')`,
+      `(s.id ILIKE $${start} ESCAPE '\\' OR s.name ILIKE $${start + 1} ESCAPE '\\' OR s.cwd ILIKE $${start + 2} ESCAPE '\\' OR s.model ILIKE $${start + 3} ESCAPE '\\')`,
     );
   }
   return {
@@ -2192,7 +2192,7 @@ async function sweepStaleSessions(
   now: string,
   staleMinutes: number,
 ): Promise<void> {
-  const cutoff = new Date(Date.now() - staleMinutes * 60_000).toISOString();
+  const cutoff = new Date(new Date(now).valueOf() - staleMinutes * 60_000).toISOString();
   const stale = await tx.query<{ id: string }>(
     "SELECT id FROM sessions WHERE status = 'active' AND id != $1 AND updated_at < $2",
     [currentSessionId, cutoff],

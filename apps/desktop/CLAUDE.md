@@ -169,9 +169,10 @@ Gateway section remains.
   dashboard-derived cost source.
 - **Hook listener:** in design-system mode, `src/main/agent-monitor-listener.ts`
   binds `127.0.0.1:4820` in the main process and accepts the hook payload
-  (`POST /api/hooks/event`, `GET /api/health`). Each event is gated by the
-  FEA-1407 sandbox check, harness-stamped from `__provider`, and applied by the
-  lifecycle state machine.
+  (`POST /api/hooks/event`, `GET /api/health`). Each event is
+  harness-stamped from `__provider` and applied by the lifecycle state machine.
+  Local import is ungated — all hook events are written to the local DB
+  regardless of the sandbox directory (FEA-1550).
 - **Collection layer (`src/main/collectors/`):** design-system mode uses
   `CollectorManager` for best-effort boot bulk import and live file watchers for
   all five agent CLIs, writing through the first-party `importSession` into the
@@ -182,9 +183,9 @@ Gateway section remains.
   `~/.claude/settings.json` at install time, so 4820 means hooks need zero
   per-hook env. 4820 is outside `PORT_PROBE_ORDER`, so it never collides with
   the gateway. (FEA-1500 tracks migrating this transport later.)
-- **Durable DB:** `app.getPath("userData")/agent-dashboard.sqlite` (schema in
-  `src/main/database/schema.ts`), Node's built-in `node:sqlite`. Persisted
-  collector caches live under `<userData>/agent-monitor/`.
+- **Durable DB:** `app.getPath("userData")/agent-dashboard.pgdata` (PGlite,
+  schema in `src/main/database/pglite.ts`). Persisted collector caches live
+  under `<userData>/agent-dashboard-ingest/`.
 - **UI:** a first-party React app in the main window (`src/renderer/`) — NO
   iframe. The left sidebar drives the **Dashboard** + agent nav items; live
   updates arrive via the `desktop:db:changed` IPC push after each write.
@@ -206,10 +207,12 @@ Gateway section remains.
   tree.
 - **Security model (by design):** the collectors + listener read the agent-CLI
   home dirs (`~/.claude`, `~/.codex`, …) **directly**, outside the gateway
-  `isPathAllowed` sandbox, but every captured session is dropped unless its
-  `cwd` is inside the FEA-1407 sandbox base directory (fail-closed). The listener
-  is bound to `127.0.0.1` only; no cloud egress from collectors. Hooks only
-  mutate global Claude/Codex config on explicit user opt-in and are reversible.
+  `isPathAllowed` sandbox. Local import and hook capture are ungated — all
+  sessions are written to the local PGlite DB regardless of working directory
+  (FEA-1550). Cloud sync sends all local sessions without sandbox filtering;
+  payloads are sanitized before upload. The listener is bound to `127.0.0.1`
+  only; no cloud egress from collectors. Hooks only mutate global Claude/Codex
+  config on explicit user opt-in and are reversible.
 - **Multi-harness support (5 agent tools):** ingests sessions from **Claude
   Code** (hooks live + file historical), **OpenAI Codex** (rollout JSONL under
   `~/.codex/sessions/`), **Cursor** (agent transcripts under `~/.cursor/projects/`),

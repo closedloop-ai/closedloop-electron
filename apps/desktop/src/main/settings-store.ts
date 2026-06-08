@@ -96,9 +96,15 @@ export class SettingsStore {
     if ("allowedDirectories" in this.store.store) {
       this.store.delete("allowedDirectories" as keyof DesktopSettings);
     }
+    // TODO(FEA-1550): remove these migration blocks once all installs have upgraded past 0.16.0
     if ("agentDashboardDesignSystemEnabled" in this.store.store) {
       this.store.delete(
         "agentDashboardDesignSystemEnabled" as keyof DesktopSettings,
+      );
+    }
+    if ("agentSessionChunkedSyncEnabled" in this.store.store) {
+      this.store.delete(
+        "agentSessionChunkedSyncEnabled" as keyof DesktopSettings,
       );
     }
 

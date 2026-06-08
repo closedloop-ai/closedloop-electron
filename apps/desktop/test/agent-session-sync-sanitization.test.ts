@@ -47,7 +47,10 @@ test("sanitizeSessionForSync strips content-bearing keys recursively", () => {
   const sanitized = sanitizeSessionForSync(makeSyncedSession());
   const data = sanitized.events[0].data as Record<string, unknown>;
 
-  for (const key of ["prompt", "content", "stdout", "stderr", "text", "output", "reasoning"]) {
+  for (const key of [
+    "arguments", "command", "content", "new_string", "old_string",
+    "output", "patch", "prompt", "reasoning", "stderr", "stdout", "text",
+  ]) {
     assert.equal(Object.hasOwn(data, key), false, `${key} must be stripped`);
   }
   assert.deepEqual(data.nested, { safe: "preserved" });
@@ -69,21 +72,31 @@ function makeSyncedSession(): SyncedAgentSession {
         toolName: "Bash",
         createdAt: "2026-06-08T12:01:00.000Z",
         data: {
+          arguments: "shell command args",
+          command: "rm -rf /",
           prompt: "run private command",
           content: "file contents",
+          new_string: "replacement text",
+          old_string: "original text",
           stdout: "command output",
           stderr: "command errors",
           text: "assistant text",
           output: "tool output",
+          patch: "diff content",
           reasoning: "hidden reasoning",
           exitCode: 0,
           nested: {
+            arguments: "nested args",
+            command: "nested command",
             prompt: "nested prompt",
             content: "nested content",
+            new_string: "nested replacement",
+            old_string: "nested original",
             stdout: "nested stdout",
             stderr: "nested stderr",
             text: "nested text",
             output: "nested output",
+            patch: "nested diff",
             reasoning: "nested reasoning",
             safe: "preserved",
           },

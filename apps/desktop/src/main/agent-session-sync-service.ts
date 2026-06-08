@@ -741,9 +741,13 @@ export function sanitizeSessionForSync(
 }
 
 const STRIPPED_LEAF_KEYS = new Set([
+  "arguments",
   "command",
   "content",
+  "new_string",
+  "old_string",
   "output",
+  "patch",
   "prompt",
   "reasoning",
   "stderr",

@@ -41,6 +41,7 @@ const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
 
 export interface AgentDashboardDesignSystemRuntimeOptions {
   getWindow: () => BrowserWindow | null;
+  getUserIdentity?: () => { userId: string | null; organizationId: string | null } | null;
   onTerminalFailure: (reason: string) => void;
   userDataPath?: string;
   log?: (scope: string, message: string) => void;
@@ -53,7 +54,7 @@ export interface AgentDashboardDesignSystemRuntime {
   isReady: () => boolean;
   start: () => void;
   stop: () => Promise<void>;
-  close: () => void;
+  close: () => Promise<void> | void;
   restartCollectors: () => void;
   registerIpcHandlers: () => void;
   loadMeteredUsageRows: (cutoffIso: string) => MeteredUsageRow[] | Promise<MeteredUsageRow[]>;
@@ -87,6 +88,7 @@ export async function createAgentDashboardDesignSystemRuntime(
       void pgliteDatabase?.sessions.handleSessionMutation(sessionId);
       options.getWindow()?.webContents.send("desktop:db:changed", { sessionId });
     },
+    getUserIdentity: options.getUserIdentity,
     log: (message: string) => log("agent-pglite", message),
   });
   pgliteDatabase = agentDatabase;
@@ -133,13 +135,13 @@ export async function createAgentDashboardDesignSystemRuntime(
       collectorManager.stop();
       await hookListener.stop();
     },
-    close: () => {
+    close: async () => {
       if (closed) {
         return;
       }
       closed = true;
       unregisterDesignSystemDbIpcHandlers();
-      void agentDatabase.close();
+      await agentDatabase.close();
     },
     restartCollectors: () => {
       if (closed) {
