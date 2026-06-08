@@ -20,6 +20,7 @@
     "typecheck:renderer": "tsc -p tsconfig.renderer.json --noEmit",
     "lint": "eslint src/",
     "assert:design-system-boundary": "tsx --test test/agent-dashboard-boundary.test.ts",
+    "test:boot:design-system-off": "node --import tsx scripts/assert-design-system-boot-off.mjs",
     "measure:agent-dashboard-storage": "node scripts/measure-agent-dashboard-storage.mjs",
     "verify:electron-binary": "node scripts/ensure-electron-binary.mjs",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
