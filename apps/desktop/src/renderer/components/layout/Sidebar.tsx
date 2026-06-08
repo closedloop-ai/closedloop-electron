@@ -48,8 +48,8 @@ const SVG_ICONS: Record<string, string> = {
 function NavIcon({ name }: { name: string }) {
   const paths = SVG_ICONS[name] || "";
   return (
-    <span className="shrink-0 size-[18px] text-current opacity-70">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-full">
+    <span className="shrink-0 text-current opacity-70">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
         <g dangerouslySetInnerHTML={{ __html: paths }} />
       </svg>
     </span>
