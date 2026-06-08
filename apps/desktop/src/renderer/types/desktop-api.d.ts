@@ -9,6 +9,13 @@ import type {
   SessionPageRequest,
   SessionWithAgents,
   DashboardSummary,
+  DashboardCoreFeatures,
+  DashboardPackSummary,
+  DashboardPlanSummary,
+  DashboardPullRequestSummary,
+  DashboardSkillSummary,
+  DashboardSubAgentSummary,
+  DashboardToolSummary,
   TokenAnalytics,
   AnalyticsData,
   WorkflowQueryData,
@@ -101,7 +108,7 @@ export interface DesktopApi {
   setAgentMonitorHooksEnabled: (enabled: boolean) => Promise<AgentMonitorHookResult>;
   getAgentMonitorCodexHooksOptIn: () => Promise<boolean>;
   setAgentMonitorCodexHooksOptIn: (optIn: boolean) => Promise<AgentMonitorHookResult>;
-  /** @deprecated Replaced by in-process SQLite database */
+  /** @deprecated Replaced by in-process dashboard database */
   getAgentMonitorData?: (query: string) => Promise<unknown>;
   /** Database IPC channels (typed against the in-process repository shapes). */
   db: {
@@ -121,6 +128,13 @@ export interface DesktopApi {
     getAgentHierarchy: (sessionId: string) => Promise<AgentHierarchyNode[]>;
     getAnalytics: () => Promise<AnalyticsData>;
     getWorkflowData: () => Promise<WorkflowQueryData>;
+    getCoreFeatures: () => Promise<DashboardCoreFeatures>;
+    getPacks: () => Promise<DashboardPackSummary[]>;
+    getSkills: () => Promise<DashboardSkillSummary[]>;
+    getTools: () => Promise<DashboardToolSummary[]>;
+    getSubAgents: () => Promise<DashboardSubAgentSummary[]>;
+    getPlans: () => Promise<DashboardPlanSummary[]>;
+    getPullRequests: () => Promise<DashboardPullRequestSummary[]>;
   };
   /** Live DB-change push subscription; returns an unsubscribe fn. */
   onDbChanged: (callback: (payload: { sessionId?: string }) => void) => () => void;

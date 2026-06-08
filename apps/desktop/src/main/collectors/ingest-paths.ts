@@ -4,8 +4,9 @@
  * persisted per-source catchup caches and the OpenCode DB fingerprint
  * (FEA-1503; ported from the vendor `ingest-paths.js`). Unlike the vendor module
  * (which read `DASHBOARD_DB_PATH` from the now-removed sidecar env), these take
- * the state directory explicitly; the CollectorManager derives it from
- * `app.getPath("userData")/agent-monitor` so caches sit beside the in-process DB.
+ * the state directory explicitly. The PGlite runtime must use a PGlite-specific
+ * state directory so legacy sidecar/SQLite ingest caches cannot suppress a fresh
+ * first-start refill into a brand-new database.
  */
 import path from "node:path";
 

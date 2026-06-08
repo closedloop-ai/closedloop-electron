@@ -37,7 +37,7 @@ export const MICRO_CENTS_PER_USD = 1_000_000;
 
 /**
  * Throw if `value` is not a safe integer. Money totals must round-trip exactly
- * through JS numbers, IPC JSON, and SQLite INTEGER columns; a non-integer or an
+ * through JS numbers, IPC JSON, and database integer columns; a non-integer or an
  * out-of-range value indicates a conversion bug or implausibly large input and
  * must fail loudly rather than be silently truncated.
  */

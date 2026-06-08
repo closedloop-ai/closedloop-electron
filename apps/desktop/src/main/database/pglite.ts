@@ -7,6 +7,13 @@ import {
   type AgentRow,
   type AnalyticsData,
   type DashboardSummary,
+  type DashboardCoreFeatures,
+  type DashboardPackSummary,
+  type DashboardPlanSummary,
+  type DashboardPullRequestSummary,
+  type DashboardSkillSummary,
+  type DashboardSubAgentSummary,
+  type DashboardToolSummary,
   type EventCountByType,
   type EventRow,
   type EventWithSession,
@@ -40,14 +47,17 @@ import type {
   NormalizedSession,
   NormalizedToolUse,
 } from "../collectors/types.js";
-import type { ImportResult, Importer } from "../collectors/import-session.js";
+import type {
+  HookData,
+  ImportResult,
+  Importer,
+  TokenUsageCounts,
+  TokenUsageRow,
+} from "../agent-dashboard-db-types.js";
 import {
   extractTranscriptTokens,
   type TranscriptExtract,
 } from "./transcript.js";
-import type { HookData } from "./lifecycle.js";
-import type { TokenUsageCounts } from "./token-usage.js";
-import type { TokenUsageRow } from "./types.js";
 
 const TERMINAL_STATUSES = "('completed', 'abandoned', 'error')";
 const TERMINAL_STATUS_SET = new Set(["completed", "abandoned", "error"]);
@@ -212,6 +222,13 @@ export interface PgliteAgentDatabase {
     getTokenAnalytics(): Promise<TokenAnalytics>;
     getAnalytics(): Promise<AnalyticsData>;
     getWorkflowData(): Promise<WorkflowQueryData>;
+    getCoreFeatures(): Promise<DashboardCoreFeatures>;
+    getPacks(): Promise<DashboardPackSummary[]>;
+    getSkills(): Promise<DashboardSkillSummary[]>;
+    getTools(): Promise<DashboardToolSummary[]>;
+    getSubAgents(): Promise<DashboardSubAgentSummary[]>;
+    getPlans(): Promise<DashboardPlanSummary[]>;
+    getPullRequests(): Promise<DashboardPullRequestSummary[]>;
   };
   getSummary(): Promise<DashboardSummary>;
   run(sql: string, ...params: unknown[]): Promise<void>;
@@ -803,20 +820,20 @@ function createPgliteDashboardQueries(db: PgliteClient) {
         completed: number;
         errors: number;
       }>(`
-        SELECT COALESCE(subagent_type, COALESCE(name, 'unknown')) as subagent_type,
+        SELECT COALESCE(agents.subagent_type, COALESCE(MAX(agents.name), 'unknown')) as subagent_type,
           COUNT(*)::int as count,
           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)::int as completed,
           SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END)::int as errors
         FROM agents WHERE parent_agent_id IS NOT NULL OR type = 'subagent'
-        GROUP BY subagent_type ORDER BY count DESC
+        GROUP BY agents.subagent_type ORDER BY count DESC
       `);
       const mainCount = await count(db, "SELECT COUNT(*)::int as count FROM agents WHERE parent_agent_id IS NULL AND (type IS NULL OR type != 'subagent')");
       const edges = await db.query<{ source: string; target: string; weight: number }>(`
-        SELECT COALESCE(p.subagent_type, COALESCE(p.name, 'main')) as source,
-          COALESCE(c.subagent_type, COALESCE(c.name, 'unknown')) as target,
+        SELECT COALESCE(p.subagent_type, COALESCE(MAX(p.name), 'main')) as source,
+          COALESCE(c.subagent_type, COALESCE(MAX(c.name), 'unknown')) as target,
           COUNT(*)::int as weight
         FROM agents c JOIN agents p ON c.parent_agent_id = p.id
-        GROUP BY source, target ORDER BY weight DESC LIMIT 50
+        GROUP BY p.subagent_type, c.subagent_type ORDER BY weight DESC LIMIT 50
       `);
       const outcomes = await db.query<{ status: string; count: number }>("SELECT status, COUNT(*)::int as count FROM sessions GROUP BY status");
       const toolTransitions = await db.query<{ source: string; target: string; value: number }>(`
@@ -838,11 +855,11 @@ function createPgliteDashboardQueries(db: PgliteClient) {
       `);
       const toolCounts = await db.query<{ tool_name: string; count: number }>("SELECT tool_name, COUNT(*)::int as count FROM events WHERE created_at::timestamp > now() - interval '30 days' AND tool_name IS NOT NULL GROUP BY tool_name ORDER BY count DESC LIMIT 20");
       const cooccurrence = await db.query<{ source: string; target: string; weight: number }>(`
-        SELECT COALESCE(a1.subagent_type, COALESCE(a1.name, 'unknown')) as source,
-          COALESCE(a2.subagent_type, COALESCE(a2.name, 'unknown')) as target,
+        SELECT COALESCE(a1.subagent_type, COALESCE(MAX(a1.name), 'unknown')) as source,
+          COALESCE(a2.subagent_type, COALESCE(MAX(a2.name), 'unknown')) as target,
           COUNT(DISTINCT a1.session_id)::int as weight
         FROM agents a1 JOIN agents a2 ON a1.session_id = a2.session_id AND a1.id < a2.id
-        GROUP BY source, target ORDER BY weight DESC LIMIT 30
+        GROUP BY a1.subagent_type, a2.subagent_type ORDER BY weight DESC LIMIT 30
       `);
       const avgDepth = depthRows.rows.length > 0
         ? depthRows.rows.reduce((sum, row) => sum + Number(row.max_depth ?? 0), 0) / depthRows.rows.length
@@ -899,6 +916,237 @@ function createPgliteDashboardQueries(db: PgliteClient) {
         })),
         cooccurrence: cooccurrence.rows.map((r) => ({ source: r.source, target: r.target, weight: Number(r.weight ?? 0) })),
       };
+    },
+    async getCoreFeatures(): Promise<DashboardCoreFeatures> {
+      const [packs, skills, tools, subagents, plans, pullRequests] =
+        await Promise.all([
+          this.getPacks(),
+          this.getSkills(),
+          this.getTools(),
+          this.getSubAgents(),
+          this.getPlans(),
+          this.getPullRequests(),
+        ]);
+      return { packs, skills, tools, subagents, plans, pullRequests };
+    },
+    async getPacks(): Promise<DashboardPackSummary[]> {
+      const skills = await this.getSkills();
+      const packs = new Map<string, DashboardPackSummary>();
+      for (const skill of skills) {
+        if (!skill.packId) {
+          continue;
+        }
+        const existing = packs.get(skill.packId);
+        if (existing) {
+          existing.skillCount++;
+          existing.toolCallCount += skill.invocationCount;
+          existing.lastUsedAt = maxIso(existing.lastUsedAt, skill.lastUsedAt);
+          continue;
+        }
+        packs.set(skill.packId, {
+          id: skill.packId,
+          name: titleFromId(skill.packId),
+          harness: skill.harness,
+          installPath: null,
+          sourceUrl: null,
+          version: null,
+          skillCount: 1,
+          toolCallCount: skill.invocationCount,
+          lastUsedAt: skill.lastUsedAt,
+        });
+      }
+      return [...packs.values()].sort(compareLastUsedThenName);
+    },
+    async getSkills(): Promise<DashboardSkillSummary[]> {
+      const result = await db.query<{
+        harness: string | null;
+        data: string | null;
+        summary: string | null;
+        created_at: string | null;
+      }>(`
+        SELECT s.harness, e.data, e.summary, e.created_at
+        FROM events e
+        LEFT JOIN sessions s ON s.id = e.session_id
+        WHERE e.tool_name = 'Skill'
+        ORDER BY e.created_at DESC
+      `);
+      const grouped = new Map<string, DashboardSkillSummary>();
+      for (const row of result.rows) {
+        const data = parseJsonObjectText(row.data);
+        const name =
+          nonEmptyString(data?.skillName) ??
+          nonEmptyString(data?.skill) ??
+          nonEmptyString(data?.name) ??
+          nonEmptyString(row.summary);
+        if (!name) {
+          continue;
+        }
+        const harness = nonEmptyString(row.harness) ?? "unknown";
+        const packId = packIdFromSkillName(name);
+        const id = `${harness}:${packId ?? "standalone"}:${name}`;
+        const existing = grouped.get(id);
+        if (existing) {
+          existing.invocationCount++;
+          existing.lastUsedAt = maxIso(existing.lastUsedAt, row.created_at ?? null);
+          continue;
+        }
+        grouped.set(id, {
+          id,
+          packId,
+          name,
+          harness,
+          description: nonEmptyString(data?.description) ?? null,
+          installPath: nonEmptyString(data?.installPath) ?? nonEmptyString(data?.path) ?? null,
+          invocationCount: 1,
+          lastUsedAt: row.created_at ?? null,
+        });
+      }
+      return [...grouped.values()].sort(compareLastUsedThenName);
+    },
+    async getTools(): Promise<DashboardToolSummary[]> {
+      const result = await db.query<{
+        tool_name: string;
+        invocation_count: number;
+        session_count: number;
+        last_used_at: string | null;
+      }>(`
+        SELECT tool_name,
+          COUNT(*)::int as invocation_count,
+          COUNT(DISTINCT session_id)::int as session_count,
+          MAX(created_at) as last_used_at
+        FROM events
+        WHERE tool_name IS NOT NULL
+        GROUP BY tool_name
+        ORDER BY invocation_count DESC, tool_name ASC
+      `);
+      return result.rows.map((row) => ({
+        toolName: row.tool_name,
+        invocationCount: Number(row.invocation_count ?? 0),
+        sessionCount: Number(row.session_count ?? 0),
+        lastUsedAt: row.last_used_at ?? null,
+      }));
+    },
+    async getSubAgents(): Promise<DashboardSubAgentSummary[]> {
+      const result = await db.query<{
+        subagent_type: string;
+        total: number;
+        completed: number;
+        errors: number;
+        sessions: number;
+        last_used_at: string | null;
+      }>(`
+        SELECT COALESCE(agents.subagent_type, COALESCE(MAX(agents.name), 'unknown')) as subagent_type,
+          COUNT(*)::int as total,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)::int as completed,
+          SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END)::int as errors,
+          COUNT(DISTINCT session_id)::int as sessions,
+          MAX(updated_at) as last_used_at
+        FROM agents
+        WHERE parent_agent_id IS NOT NULL OR type = 'subagent'
+        GROUP BY agents.subagent_type
+        ORDER BY total DESC, subagent_type ASC
+      `);
+      return result.rows.map((row) => ({
+        subagentType: row.subagent_type,
+        total: Number(row.total ?? 0),
+        completed: Number(row.completed ?? 0),
+        errors: Number(row.errors ?? 0),
+        sessions: Number(row.sessions ?? 0),
+        lastUsedAt: row.last_used_at ?? null,
+      }));
+    },
+    async getPlans(): Promise<DashboardPlanSummary[]> {
+      const result = await db.query<{
+        id: string;
+        cwd: string | null;
+        harness: string | null;
+        metadata: string | null;
+        updated_at: string | null;
+      }>(`
+        SELECT id, cwd, harness, metadata, updated_at
+        FROM sessions
+        WHERE metadata IS NOT NULL
+        ORDER BY updated_at DESC
+      `);
+      const plans: DashboardPlanSummary[] = [];
+      const seen = new Set<string>();
+      for (const session of result.rows) {
+        const metadata = parseJsonObjectText(session.metadata);
+        const rawPlans = Array.isArray(metadata?.plans) ? metadata.plans : [];
+        for (const [index, rawPlan] of rawPlans.entries()) {
+          const plan = asRecord(rawPlan);
+          const content = nonEmptyString(plan?.content);
+          if (!content) {
+            continue;
+          }
+          const timestamp = nonEmptyString(plan?.timestamp) ?? session.updated_at ?? null;
+          const id = `${session.id}:plan:${index}`;
+          if (seen.has(id)) {
+            continue;
+          }
+          seen.add(id);
+          plans.push({
+            id,
+            sessionId: session.id,
+            title: titleFromPlan(content),
+            source: nonEmptyString(plan?.source) ?? null,
+            content,
+            timestamp,
+            harness: session.harness,
+            cwd: session.cwd,
+          });
+        }
+      }
+      return plans.sort((a, b) => compareIsoDesc(a.timestamp, b.timestamp));
+    },
+    async getPullRequests(): Promise<DashboardPullRequestSummary[]> {
+      const result = await db.query<{
+        id: string;
+        name: string | null;
+        harness: string | null;
+        metadata: string | null;
+        updated_at: string | null;
+      }>(`
+        SELECT id, name, harness, metadata, updated_at
+        FROM sessions
+        WHERE metadata IS NOT NULL
+        ORDER BY updated_at DESC
+      `);
+      const pullRequests: DashboardPullRequestSummary[] = [];
+      const seen = new Set<string>();
+      for (const session of result.rows) {
+        const metadata = parseJsonObjectText(session.metadata);
+        const artifacts = asRecord(metadata?.artifacts);
+        const repoFallback = nonEmptyString(artifacts?.repo);
+        const prs = Array.isArray(artifacts?.prs) ? artifacts.prs : [];
+        for (const rawPr of prs) {
+          const pr = asRecord(rawPr);
+          const number = numberFromUnknown(pr?.number);
+          const repoFullName = nonEmptyString(pr?.repo) ?? repoFallback;
+          if (number == null || !repoFullName) {
+            continue;
+          }
+          const id = `${session.id}:pr:${repoFullName}:${number}`;
+          if (seen.has(id)) {
+            continue;
+          }
+          seen.add(id);
+          pullRequests.push({
+            id,
+            sessionId: session.id,
+            sessionName: session.name,
+            prUrl: `https://github.com/${repoFullName}/pull/${number}`,
+            prNumber: number,
+            repoFullName,
+            branchName: nonEmptyString(pr?.branch) ?? nonEmptyString(pr?.branchName) ?? null,
+            headSha: nonEmptyString(pr?.headSha) ?? nonEmptyString(pr?.sha) ?? null,
+            title: nonEmptyString(pr?.title) ?? null,
+            harness: session.harness,
+            observedAt: session.updated_at,
+          });
+        }
+      }
+      return pullRequests.sort((a, b) => compareIsoDesc(a.observedAt, b.observedAt));
     },
   };
 }
@@ -1247,9 +1495,9 @@ async function importSessionWithTx(
           mainId,
         ],
       );
-      await addEvent("PreToolUse", subId, tu.timestamp, tu.name, "Spawned subagent", importEventData(tu.input));
+      await addEvent("PreToolUse", subId, tu.timestamp, tu.name, "Spawned subagent", importToolEventData(tu));
     } else {
-      await addEvent("PostToolUse", mainId, tu.timestamp, tu.name, null, importEventData(tu.input));
+      await addEvent("PostToolUse", mainId, tu.timestamp, tu.name, null, importToolEventData(tu));
     }
   }
   for (const td of session.turnDurations ?? []) {
@@ -1983,6 +2231,24 @@ function importEventData(input: unknown): string | null {
   return text;
 }
 
+function importToolEventData(toolUse: NormalizedToolUse): string | null {
+  const input = asRecord(toolUse.input);
+  const payload: Record<string, unknown> = input ? { ...input } : {};
+  if (toolUse.skillName && !payload.skillName) {
+    payload.skillName = toolUse.skillName;
+  }
+  if (toolUse.mcpServer && !payload.mcpServer) {
+    payload.mcpServer = toolUse.mcpServer;
+  }
+  if (toolUse.mcpMethod && !payload.mcpMethod) {
+    payload.mcpMethod = toolUse.mcpMethod;
+  }
+  if (toolUse.diffDelta && !payload.diffDelta) {
+    payload.diffDelta = toolUse.diffDelta;
+  }
+  return Object.keys(payload).length > 0 ? importEventData(payload) : null;
+}
+
 function subagentName(tu: NormalizedToolUse): string {
   const input = (tu.input ?? {}) as Record<string, unknown>;
   const description = strOf(input.description);
@@ -1998,6 +2264,72 @@ function subagentName(tu: NormalizedToolUse): string {
 
 function strOf(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
+function packIdFromSkillName(name: string): string | null {
+  const normalized = name.trim();
+  const separatorIndex = normalized.search(/[/:]/);
+  if (separatorIndex <= 0) {
+    return null;
+  }
+  return normalized.slice(0, separatorIndex);
+}
+
+function titleFromId(id: string): string {
+  return id
+    .split(/[-_\s/]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || id;
+}
+
+function titleFromPlan(content: string): string {
+  const firstLine =
+    content
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^#+\s*/, "").trim())
+      .find((line) => line.length > 0) ?? "Untitled plan";
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
+}
+
+function compareIsoDesc(a: string | null, b: string | null): number {
+  const left = a ? Date.parse(a) : 0;
+  const right = b ? Date.parse(b) : 0;
+  return (Number.isFinite(right) ? right : 0) - (Number.isFinite(left) ? left : 0);
+}
+
+function maxIso(a: string | null, b: string | null): string | null {
+  return compareIsoDesc(a, b) <= 0 ? a : b;
+}
+
+function compareLastUsedThenName<
+  T extends { name: string; lastUsedAt: string | null },
+>(a: T, b: T): number {
+  const byDate = compareIsoDesc(a.lastUsedAt, b.lastUsedAt);
+  return byDate !== 0 ? byDate : a.name.localeCompare(b.name);
 }
 
 function truncate(value: string | null | undefined, max: number): string | null {

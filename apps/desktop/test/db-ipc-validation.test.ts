@@ -17,7 +17,7 @@ test("coerceDbId rejects an oversized string", () => {
   assert.equal(coerceDbId("x".repeat(MAX_DB_ID_LENGTH + 1)), null);
 });
 
-test("coerceDbId rejects non-string values that would corrupt SQLite bindings", () => {
+test("coerceDbId rejects non-string values that would corrupt database bindings", () => {
   // The exact "[object Object]" primary-key hazard the review flagged.
   assert.equal(coerceDbId({ malicious: true }), null);
   assert.equal(coerceDbId(["a", "b"]), null);

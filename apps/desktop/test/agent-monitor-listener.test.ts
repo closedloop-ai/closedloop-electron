@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { openAgentDatabase } from "../src/main/database/index.js";
-import { createLifecycle } from "../src/main/database/lifecycle.js";
+import { openPgliteAgentDatabase, type PgliteAgentDatabase } from "../src/main/database/pglite.js";
 import { AgentHookListener } from "../src/main/agent-monitor-listener.js";
 
 interface PostResult {
@@ -66,22 +65,21 @@ interface ListenerDiagnostics {
 async function withListener(
   run: (
     url: string,
-    db: ReturnType<typeof openAgentDatabase>,
+    db: PgliteAgentDatabase,
     diagnostics: ListenerDiagnostics,
   ) => Promise<void>,
 ): Promise<void> {
-  const dir = mkdtempSync(path.join(tmpdir(), "cl-listener-"));
-  const db = openAgentDatabase(path.join(dir, "agent-dashboard.sqlite"));
+  const dir = await mkdtemp(path.join(tmpdir(), "cl-listener-"));
   const diagnostics: ListenerDiagnostics = { emits: [], logs: [] };
-  const lifecycle = createLifecycle(db.connection, {
-    tokenUsage: db.tokenUsage,
+  const db = await openPgliteAgentDatabase({
+    dataDir: path.join(dir, "agent-dashboard.pgdata"),
     detectBillingMode: () => "api",
     extractTranscript: () => null,
     emit: (sessionId) => diagnostics.emits.push(sessionId),
     log: (message) => diagnostics.logs.push(message),
   });
   const listener = new AgentHookListener({
-    lifecycle,
+    lifecycle: db,
     log: (message) => diagnostics.logs.push(message),
     port: 0,
   });
@@ -92,16 +90,16 @@ async function withListener(
     await run(url!, db, diagnostics);
   } finally {
     await listener.stop();
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
   }
 }
 
-function assertNoWritesOrEmits(
-  db: ReturnType<typeof openAgentDatabase>,
+async function assertNoWritesOrEmits(
+  db: PgliteAgentDatabase,
   diagnostics: ListenerDiagnostics,
-): void {
-  assert.equal(db.sessions.getAll().length, 0, "no session rows written");
+): Promise<void> {
+  assert.equal((await db.sessions.getAll()).length, 0, "no session rows written");
   assert.deepEqual(diagnostics.emits, [], "no live DB-change emits");
 }
 
@@ -120,9 +118,9 @@ test("listener: SessionStart writes a session with harness=claude", async () => 
       data: { session_id: "s1", cwd: "/work/project" },
     });
     assert.equal(res.status, 200);
-    const session = db.sessions.getById("s1");
+    const session = await db.sessions.getById("s1");
     assert.ok(session, "session written");
-    assert.equal(session!.harness, "claude");
+    assert.equal(session?.harness, "claude");
     assert.deepEqual(diagnostics.emits, ["s1"]);
   });
 });
@@ -134,7 +132,7 @@ test("listener: Codex route stamps harness=codex without payload provider hint",
       data: { session_id: "cx1", cwd: "/work/project" },
     });
     assert.equal(res.status, 200);
-    assert.equal(db.sessions.getById("cx1")!.harness, "codex");
+    assert.equal((await db.sessions.getById("cx1"))?.harness, "codex");
     assert.deepEqual(diagnostics.emits, ["cx1"]);
   });
 });
@@ -148,7 +146,7 @@ test("listener: payload provider hints are rejected before writes on every hook 
       });
       assert.equal(res.status, 200);
       assert.deepEqual(res.body, { ok: true, skipped: "invalid-provider-hint" });
-      assertNoWritesOrEmits(db, diagnostics);
+      await assertNoWritesOrEmits(db, diagnostics);
     }
   });
 });
@@ -162,7 +160,7 @@ test("listener: malformed, invalid, and oversized payloads fail soft without wri
     );
     assert.equal(malformed.status, 200);
     assert.deepEqual(malformed.body, { ok: false });
-    assertNoWritesOrEmits(db, diagnostics);
+    await assertNoWritesOrEmits(db, diagnostics);
     assert.equal(
       diagnostics.logs.some((message) => message.includes("super-secret-value")),
       false,
@@ -175,7 +173,7 @@ test("listener: malformed, invalid, and oversized payloads fail soft without wri
     });
     assert.equal(invalidEnvelope.status, 200);
     assert.deepEqual(invalidEnvelope.body, { ok: true, skipped: "invalid" });
-    assertNoWritesOrEmits(db, diagnostics);
+    await assertNoWritesOrEmits(db, diagnostics);
 
     const oversized = await requestRaw(
       `${url}/api/hooks/event`,
@@ -187,7 +185,7 @@ test("listener: malformed, invalid, and oversized payloads fail soft without wri
     );
     assert.equal(oversized.status, 200);
     assert.deepEqual(oversized.body, { ok: false });
-    assertNoWritesOrEmits(db, diagnostics);
+    await assertNoWritesOrEmits(db, diagnostics);
   });
 });
 
@@ -199,7 +197,7 @@ test("listener: sessions from any directory are captured (no sandbox gating)", a
     });
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { ok: true });
-    const session = db.sessions.getById("anywhere");
+    const session = await db.sessions.getById("anywhere");
     assert.ok(session, "session from any directory is imported");
     assert.deepEqual(diagnostics.emits, ["anywhere"]);
   });

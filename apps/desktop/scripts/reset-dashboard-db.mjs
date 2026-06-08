@@ -2,17 +2,17 @@
 /**
  * @file reset-dashboard-db.mjs — wipe the in-process Agent Dashboard DB.
  *
- * Full wipe — removes `agent-dashboard.sqlite` + its `-wal`/`-shm` sidecars.
+ * Full wipe — removes the PGlite `agent-dashboard.pgdata` directory.
  * Loses all collected sessions, events, agents, and token usage. Use for
  * first-time-user-experience (FTUE) testing — the next launch re-derives history
  * from the on-disk agent-CLI transcripts (FEA-1503 collection layer).
  *
- * The ClosedLoop app must be STOPPED before running this — node:sqlite locks the
- * DB file and the in-process hook listener holds 127.0.0.1:4820. The script
+ * The ClosedLoop app must be STOPPED before running this — PGlite owns the
+ * data directory and the in-process hook listener holds 127.0.0.1:4820. The script
  * refuses with a clear message if the app is still running (port 4820 is bound).
  *
  * Cross-platform DB path resolution mirrors `app.getPath("userData")` from the
- * Electron main process (`<userData>/agent-dashboard.sqlite`).
+ * Electron main process (`<userData>/agent-dashboard.pgdata`).
  */
 import { existsSync, rmSync } from "node:fs";
 import { homedir, platform } from "node:os";
@@ -20,20 +20,20 @@ import { join } from "node:path";
 import net from "node:net";
 
 const APP_NAME = "ClosedLoop";
-const DB_FILE = "agent-dashboard.sqlite";
+const DB_DIR = "agent-dashboard.pgdata";
 
 function dashboardDbPath() {
   switch (platform()) {
     case "darwin":
-      return join(homedir(), "Library", "Application Support", APP_NAME, DB_FILE);
+      return join(homedir(), "Library", "Application Support", APP_NAME, DB_DIR);
     case "win32":
       return join(
         process.env.APPDATA || join(homedir(), "AppData", "Roaming"),
         APP_NAME,
-        DB_FILE,
+        DB_DIR,
       );
     default:
-      return join(homedir(), ".config", APP_NAME, DB_FILE);
+      return join(homedir(), ".config", APP_NAME, DB_DIR);
   }
 }
 
@@ -52,12 +52,9 @@ async function appIsRunning(port = 4820) {
 }
 
 function removeAll(dbPath) {
-  for (const ext of ["", "-wal", "-shm"]) {
-    const f = dbPath + ext;
-    if (existsSync(f)) {
-      rmSync(f, { force: true });
-      console.log(`[reset-dashboard-db] removed ${f}`);
-    }
+  if (existsSync(dbPath)) {
+    rmSync(dbPath, { recursive: true, force: true });
+    console.log(`[reset-dashboard-db] removed ${dbPath}`);
   }
 }
 

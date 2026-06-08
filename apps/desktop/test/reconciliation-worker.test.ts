@@ -19,14 +19,11 @@
  *   (5) only metered API usage is reconciled — subscription rows and unpriced
  *       models contribute nothing (no silent $0), and a vendor with no fetch
  *       function (no Admin key) is skipped rather than compared to a $0 bill;
- *   (6) the DB reader sums effective tokens as raw + baseline_*, keeps only
- *       metered sessions, and honors the cutoff window.
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { usdToMicroCents } from "../src/main/cost-math.js";
 import {
@@ -37,7 +34,6 @@ import type { VendorBilledEntry } from "../src/main/admin-billing.js";
 import {
   ANTHROPIC_TOOLS_MODEL,
   OPENAI_DAY_GRAIN_MODEL,
-  loadMeteredUsageRows,
   reconciliationCutoffIso,
   runReconciliation,
   type MeteredUsageRow,
@@ -440,60 +436,4 @@ test("persists reconciled rows into a real ReconciliationStore", async () => {
   assert.equal(listed[0].vendor, "anthropic");
   assert.equal(listed[0].model, "claude-opus-4-5");
   assert.equal(listed[0].localEstimateMicroCents, local);
-});
-
-test("loadMeteredUsageRows reads effective tokens, metered only, within the cutoff", () => {
-  const dir = makeTempDir();
-  const dbPath = path.join(dir, "agent-dashboard.sqlite");
-  const db = new DatabaseSync(dbPath);
-  db.exec(
-    `CREATE TABLE sessions (
-       id TEXT PRIMARY KEY, name TEXT, status TEXT, cwd TEXT, model TEXT,
-       started_at TEXT, updated_at TEXT, ended_at TEXT, awaiting_input_since TEXT,
-       metadata TEXT, harness TEXT, billing_mode TEXT
-     )`,
-  );
-  // FEA-1497 in-process schema: the plain columns already hold the effective
-  // reconciled counts (raw_* are write-time accumulators, not read here).
-  db.exec(
-    `CREATE TABLE token_usage (
-       session_id TEXT, model TEXT DEFAULT 'unknown',
-       input_tokens INTEGER, output_tokens INTEGER,
-       cache_read_tokens INTEGER, cache_write_tokens INTEGER,
-       raw_input INTEGER, raw_output INTEGER,
-       raw_cache_read INTEGER, raw_cache_write INTEGER,
-       PRIMARY KEY (session_id, model)
-     )`,
-  );
-  const insertSession = db.prepare(
-    `INSERT INTO sessions (id, started_at, harness, billing_mode) VALUES (?, ?, ?, ?)`,
-  );
-  const insertUsage = db.prepare(
-    `INSERT INTO token_usage
-       (session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  );
-
-  // Metered, in-window session: effective tokens live in the plain columns.
-  insertSession.run("s1", "2026-05-20T10:00:00Z", "claude", "api");
-  insertUsage.run("s1", "claude-opus-4-5", 1500, 300, 75, 15);
-  // Subscription session — excluded by the metered filter.
-  insertSession.run("s2", "2026-05-20T10:00:00Z", "claude", "subscription_unknown");
-  insertUsage.run("s2", "claude-opus-4-5", 1000, 200, 0, 0);
-  // Metered but before the cutoff — excluded by the window.
-  insertSession.run("s3", "2025-01-01T00:00:00Z", "claude", "api");
-  insertUsage.run("s3", "claude-opus-4-5", 1, 2, 3, 4);
-
-  const cutoff = reconciliationCutoffIso(new Date("2026-05-28T00:00:00Z"), 35);
-  const rows = loadMeteredUsageRows(db, cutoff);
-  db.close();
-
-  assert.equal(rows.length, 1);
-  const r = rows[0];
-  assert.equal(r.sessionId, "s1");
-  assert.equal(r.billingMode, "api");
-  assert.equal(r.inputTokens, 1500);
-  assert.equal(r.outputTokens, 300);
-  assert.equal(r.cacheReadTokens, 75);
-  assert.equal(r.cacheWriteTokens, 15);
 });

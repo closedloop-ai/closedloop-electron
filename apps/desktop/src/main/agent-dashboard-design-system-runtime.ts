@@ -30,6 +30,13 @@ const DESIGN_SYSTEM_DB_IPC_CHANNELS = [
   "desktop:db:get-agent-hierarchy",
   "desktop:db:get-analytics",
   "desktop:db:get-workflow-data",
+  "desktop:db:get-core-features",
+  "desktop:db:get-packs",
+  "desktop:db:get-skills",
+  "desktop:db:get-tools",
+  "desktop:db:get-subagents",
+  "desktop:db:get-plans",
+  "desktop:db:get-pull-requests",
 ] as const;
 
 export interface AgentDashboardDesignSystemRuntimeOptions {
@@ -237,6 +244,34 @@ function registerDesignSystemDbIpcHandlers(agentDatabase: PgliteAgentDatabase): 
 
   ipcMain.handle("desktop:db:get-workflow-data", () =>
     agentDatabase.dashboard.getWorkflowData(),
+  );
+
+  ipcMain.handle("desktop:db:get-core-features", () =>
+    agentDatabase.dashboard.getCoreFeatures(),
+  );
+
+  ipcMain.handle("desktop:db:get-packs", () =>
+    agentDatabase.dashboard.getPacks(),
+  );
+
+  ipcMain.handle("desktop:db:get-skills", () =>
+    agentDatabase.dashboard.getSkills(),
+  );
+
+  ipcMain.handle("desktop:db:get-tools", () =>
+    agentDatabase.dashboard.getTools(),
+  );
+
+  ipcMain.handle("desktop:db:get-subagents", () =>
+    agentDatabase.dashboard.getSubAgents(),
+  );
+
+  ipcMain.handle("desktop:db:get-plans", () =>
+    agentDatabase.dashboard.getPlans(),
+  );
+
+  ipcMain.handle("desktop:db:get-pull-requests", () =>
+    agentDatabase.dashboard.getPullRequests(),
   );
 }
 

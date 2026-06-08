@@ -3,14 +3,7 @@ export const FALLBACK_GATEWAY_PORTS = [19433, 19434, 19435] as const;
 export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS] as const;
 export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
 
-/**
- * Fixed loopback port for the generated Agent Monitor sidecar. It MUST be fixed
- * (not an ephemeral free port like the gateway) because Claude Code hooks bake
- * a port at install time and the hook handler POSTs to
- * `127.0.0.1:${CLAUDE_DASHBOARD_PORT || 4820}` — 4820 is upstream's own default,
- * so hooks work with zero per-hook env. Outside PORT_PROBE_ORDER, so it never
- * collides with the gateway's port selection.
- */
+/** Fixed loopback port for the local Agent Dashboard hook listener. */
 export const AGENT_MONITOR_PORT = 4820;
 
 export const COMMAND_SIGNING_REJECTION_REASONS = {
@@ -161,10 +154,8 @@ export interface DesktopSettings {
   dashboardWelcomeSeen: boolean;
   cloudCommandsPaused: boolean;
   cloudConnectionEnabled: boolean;
-  /** Enables the legacy sidecar-backed Agent Dashboard experience. On by default. */
+  /** Enables the first-party PGlite-backed Agent Dashboard experience. On by default. */
   agentMonitorEnabled: boolean;
-  /** Opts into the in-process design-system Agent Dashboard. Labs-only and off by default. */
-  agentDashboardDesignSystemEnabled: boolean;
   /** Host-owned opt-in for Plans / plan extraction UI in the embedded Agent Dashboard. */
   planExtractionEnabled: boolean;
   /** Desktop-local opt-in that requires trusted browser command signatures. */
@@ -184,8 +175,6 @@ export interface DesktopSettings {
   savedConfigs: SavedConfig[];
   activeConfigId: string | null;
   updateAndRestartEnabled: boolean;
-  /** Splits oversized agent sessions into chunked batches for sync. Requires relay support. */
-  agentSessionChunkedSyncEnabled: boolean;
   /**
    * ISO timestamp when the user last dismissed the managed-key revival hint
    * (D5 / AC-010). Null means never dismissed.
@@ -210,7 +199,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
   agentMonitorEnabled: true,
-  agentDashboardDesignSystemEnabled: false,
   planExtractionEnabled: false,
   commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",
@@ -222,7 +210,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   savedConfigs: [],
   activeConfigId: null,
   updateAndRestartEnabled: false,
-  agentSessionChunkedSyncEnabled: false,
   managedKeyHintDismissedAt: null,
   managedKeyHintLastSeenProvenance: null,
 };

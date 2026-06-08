@@ -25,17 +25,8 @@ const FEATURE_FLAGS_INTERNAL = [
     default: true,
     label: "Agent Dashboard",
     description:
-      "Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar.",
+      "Runs the local PGlite-backed Agent Dashboard that powers the Dashboard and agent views in the sidebar.",
     category: "Diagnostics" as const,
-    requiresRestart: true,
-  },
-  {
-    key: "agentDashboardDesignSystemEnabled" as const,
-    default: false,
-    label: "Agent Dashboard Design System",
-    description:
-      "Use the in-process design-system Agent Dashboard instead of the legacy sidecar dashboard.",
-    category: "Labs" as const,
     requiresRestart: true,
   },
   {
@@ -76,14 +67,6 @@ const FEATURE_FLAGS_INTERNAL = [
     label: "Auto-Update & Restart",
     description:
       "Automatically download and install updates, then restart the app.",
-    category: "Experimental" as const,
-  },
-  {
-    key: "agentSessionChunkedSyncEnabled" as const,
-    default: false,
-    label: "Chunked Session Sync",
-    description:
-      "Splits oversized agent sessions into multiple smaller batches for sync. Enable after the relay supports chunked ingestion.",
     category: "Experimental" as const,
   },
 ] as const;

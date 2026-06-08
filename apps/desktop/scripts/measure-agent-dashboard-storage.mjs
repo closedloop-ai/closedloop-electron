@@ -1,32 +1,24 @@
 #!/usr/bin/env node
 /**
- * Measure Agent Dashboard SQLite storage without creating missing DB files.
+ * Measure Agent Dashboard PGlite storage without creating missing DB files.
  *
- * The legacy sidecar DB lives at `<userData>/agent-monitor/dashboard.db`; the
- * Labs design-system DB lives at `<userData>/agent-dashboard.sqlite`. Missing
- * files are reported as absent and are never opened.
+ * The first-party Agent Dashboard DB lives at
+ * `<userData>/agent-dashboard.pgdata`. Missing directories are reported as
+ * absent and are never opened.
  */
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 const APP_NAME = "ClosedLoop";
 
 const userDataPath = parseUserDataArg(process.argv) ?? defaultUserDataPath();
-const targets = [
-  {
-    mode: "legacy",
-    path: path.join(userDataPath, "agent-monitor", "dashboard.db"),
-  },
-  {
-    mode: "design-system",
-    path: path.join(userDataPath, "agent-dashboard.sqlite"),
-  },
-];
+const target = {
+  mode: "pglite",
+  path: path.join(userDataPath, "agent-dashboard.pgdata"),
+};
 
-const measurements = targets.map(measureExistingDatabase);
-console.log(JSON.stringify({ userDataPath, measurements }, null, 2));
+console.log(JSON.stringify({ userDataPath, measurements: [measureExistingDirectory(target)] }, null, 2));
 
 function parseUserDataArg(argv) {
   const index = argv.indexOf("--user-data");
@@ -54,43 +46,42 @@ function defaultUserDataPath() {
   }
 }
 
-function measureExistingDatabase(target) {
+function measureExistingDirectory(target) {
   if (!existsSync(target.path)) {
     return {
       mode: target.mode,
       path: target.path,
       exists: false,
       bytes: 0,
-      tables: [],
-      indexes: [],
+      files: 0,
+      directories: 0,
     };
   }
 
-  const db = new DatabaseSync(target.path);
-  try {
-    const objects = db
-      .prepare(
-        `
-          SELECT type, name
-          FROM sqlite_master
-          WHERE type IN ('table', 'index')
-          ORDER BY type ASC, name ASC
-        `,
-      )
-      .all();
-    return {
-      mode: target.mode,
-      path: target.path,
-      exists: true,
-      bytes: statSync(target.path).size,
-      tables: objects
-        .filter((row) => row.type === "table")
-        .map((row) => row.name),
-      indexes: objects
-        .filter((row) => row.type === "index")
-        .map((row) => row.name),
-    };
-  } finally {
-    db.close();
+  const measured = measurePath(target.path);
+  return {
+    mode: target.mode,
+    path: target.path,
+    exists: true,
+    ...measured,
+  };
+}
+
+function measurePath(targetPath) {
+  const stat = statSync(targetPath);
+  if (!stat.isDirectory()) {
+    return { bytes: stat.size, files: 1, directories: 0 };
   }
+
+  let bytes = 0;
+  let files = 0;
+  let directories = 1;
+  for (const entry of readdirSync(targetPath, { withFileTypes: true })) {
+    const child = path.join(targetPath, entry.name);
+    const measured = measurePath(child);
+    bytes += measured.bytes;
+    files += measured.files;
+    directories += measured.directories;
+  }
+  return { bytes, files, directories };
 }

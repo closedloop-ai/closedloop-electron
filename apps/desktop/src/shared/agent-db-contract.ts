@@ -5,12 +5,10 @@
 // shared contract between main and renderer — the renderer MUST import its DB
 // response shapes from here, NOT from `src/main/database/types.ts`.
 //
-// Raw persistence rows (the untyped `Record<string, unknown>` produced by
-// `node:sqlite`) are private to `src/main/database/`. Each repository store maps
-// those raw rows into the DTOs below via its `toRow()` helper, so a SQLite
-// schema/column change is absorbed at that boundary and does not break the
-// renderer's compile-time contract. Purely-internal row types that never cross
-// IPC (e.g. `TokenUsageRow`) stay in `src/main/database/types.ts`.
+// Raw persistence rows are private to `src/main/database/`. Each repository
+// store maps those raw rows into the DTOs below, so a schema/column change is
+// absorbed at that boundary and does not break the renderer's compile-time
+// contract. Purely-internal row types that never cross IPC stay in main.
 
 export interface SessionRow {
   id: string;
@@ -211,4 +209,77 @@ export interface AgentHierarchyNode {
     summary: string | null;
     createdAt: string | null;
   }>;
+}
+
+export interface DashboardPackSummary {
+  id: string;
+  name: string;
+  harness: string;
+  installPath: string | null;
+  sourceUrl: string | null;
+  version: string | null;
+  skillCount: number;
+  toolCallCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardSkillSummary {
+  id: string;
+  packId: string | null;
+  name: string;
+  harness: string;
+  description: string | null;
+  installPath: string | null;
+  invocationCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardToolSummary {
+  toolName: string;
+  invocationCount: number;
+  sessionCount: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardSubAgentSummary {
+  subagentType: string;
+  total: number;
+  completed: number;
+  errors: number;
+  sessions: number;
+  lastUsedAt: string | null;
+}
+
+export interface DashboardPlanSummary {
+  id: string;
+  sessionId: string | null;
+  title: string;
+  source: string | null;
+  content: string;
+  timestamp: string | null;
+  harness: string | null;
+  cwd: string | null;
+}
+
+export interface DashboardPullRequestSummary {
+  id: string;
+  sessionId: string | null;
+  sessionName: string | null;
+  prUrl: string;
+  prNumber: number;
+  repoFullName: string;
+  branchName: string | null;
+  headSha: string | null;
+  title: string | null;
+  harness: string | null;
+  observedAt: string | null;
+}
+
+export interface DashboardCoreFeatures {
+  packs: DashboardPackSummary[];
+  skills: DashboardSkillSummary[];
+  tools: DashboardToolSummary[];
+  subagents: DashboardSubAgentSummary[];
+  plans: DashboardPlanSummary[];
+  pullRequests: DashboardPullRequestSummary[];
 }

@@ -59,10 +59,9 @@ export interface AgentHookListenerOptions {
  *
  * Every request responds 200 fail-soft so a hook never blocks an agent turn.
  * Local import is ungated — all hook events are written to the local DB
- * regardless of the sandbox directory. Sandbox enforcement is applied
- * exclusively on the cloud-sync path in AgentSessionSyncService. Provider
- * attribution is route-owned; payload-level provider hints are rejected as
- * spoofable data before lifecycle writes or live DB-change emits.
+ * regardless of the sandbox directory. Provider attribution is route-owned;
+ * payload-level provider hints are rejected as spoofable data before lifecycle
+ * writes or live DB-change emits.
  */
 export class AgentHookListener {
   private readonly options: AgentHookListenerOptions;

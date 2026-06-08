@@ -7,8 +7,7 @@
  * hook listener via the `agentMonitorEnabled` toggle.
  *
  * Local import is ungated — all sessions from all five harnesses are imported
- * into the local DB regardless of the sandbox directory. Sandbox enforcement
- * is applied exclusively on the cloud-sync path in AgentSessionSyncService.
+ * into the local DB regardless of the sandbox directory.
  *
  * Claude has a live hook path; its live watcher is therefore gated OFF when hooks
  * are installed (hooks own live capture — a concurrent file watcher would

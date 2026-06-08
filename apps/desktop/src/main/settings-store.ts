@@ -96,6 +96,11 @@ export class SettingsStore {
     if ("allowedDirectories" in this.store.store) {
       this.store.delete("allowedDirectories" as keyof DesktopSettings);
     }
+    if ("agentDashboardDesignSystemEnabled" in this.store.store) {
+      this.store.delete(
+        "agentDashboardDesignSystemEnabled" as keyof DesktopSettings,
+      );
+    }
 
     // Migration: rename apiOrigin → relayOrigin, preserve authApiOrigin → apiOrigin.
     // With defaults removed, this.store.store only contains actually-persisted keys,
@@ -265,10 +270,6 @@ export class SettingsStore {
     return this.getFlag("agentMonitorEnabled");
   }
 
-  getAgentDashboardDesignSystemEnabled(): boolean {
-    return this.getFlag("agentDashboardDesignSystemEnabled");
-  }
-
   getPlanExtractionEnabled(): boolean {
     return this.getFlag("planExtractionEnabled");
   }
@@ -311,10 +312,6 @@ export class SettingsStore {
 
   setAgentMonitorEnabled(agentMonitorEnabled: boolean): void {
     this.setFlag("agentMonitorEnabled", agentMonitorEnabled);
-  }
-
-  setAgentDashboardDesignSystemEnabled(enabled: boolean): void {
-    this.setFlag("agentDashboardDesignSystemEnabled", enabled);
   }
 
   setPlanExtractionEnabled(planExtractionEnabled: boolean): void {

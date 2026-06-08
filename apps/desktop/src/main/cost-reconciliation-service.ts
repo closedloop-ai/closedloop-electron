@@ -117,7 +117,7 @@ export interface CostReconciliationServiceDeps {
   anthropicKeyStore: AdminKeyStoreLike;
   openaiKeyStore: AdminKeyStoreLike;
   store: Pick<ReconciliationStore, "upsert" | "list">;
-  /** Load the metered usage rows to reconcile (production opens dashboard.db). */
+  /** Load the metered usage rows to reconcile. */
   loadUsageRows: () => MeteredUsageRow[] | Promise<MeteredUsageRow[]>;
   /** Build the Anthropic cost client from a key (overridable in tests). */
   createAnthropicClient?: (apiKey: string) => AnthropicCostClient;
